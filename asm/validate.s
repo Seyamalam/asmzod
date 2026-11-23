@@ -1590,7 +1590,7 @@ _az_strtoi:
     lsl x12, x10, #3
     add x11, x11, x12
     str x11, [sp, #56]         // rest field addr
-    // eff_n = rest ? nin : min(nin, nitems)
+    // eff_n = rest ? max(nin, nitems) : min(nin, nitems)
     ldr x11, [x11]
     cbnz x11, .Ltu_effall
     ldr x9, [sp, #40]
@@ -1600,6 +1600,9 @@ _az_strtoi:
     b .Ltu_eff
 .Ltu_effall:
     ldr x9, [sp, #40]
+    cmp x9, x10
+    b.hs .Ltu_eff
+    mov x9, x10               // rest: iterate missing fixed slots too
 .Ltu_eff:
     str x9, [sp, #160]         // eff_n
     str xzr, [sp, #168]        // lenfail
@@ -1607,6 +1610,11 @@ _az_strtoi:
     ldr x9, [sp, #40]
     cmp x9, x10
     b.hs .Ltu_over
+    // under-length: with rest, missing fixed items are validated as
+    // undefined (-> invalid_type@idx) rather than a size issue
+    ldr x11, [sp, #56]
+    ldr x11, [x11]
+    cbnz x11, .Ltu_lenok
     // too_small exact
     add x0, sp, #88
     adrp x1, .Lma_exactly@PAGE
@@ -1697,7 +1705,17 @@ _az_strtoi:
     ldr x0, [sp, #64]
     bl _az_path_push_idx
     ldr x0, [sp, #88]
+    // val = i < nin ? cur : undef (missing fixed item with rest)
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #40]
+    cmp x9, x10
+    b.hs .Ltu_undef
     ldr x1, [sp, #72]
+    b .Ltu_havev
+.Ltu_undef:
+    adrp x1, .Lundef_val@PAGE
+    add x1, x1, .Lundef_val@PAGEOFF
+.Ltu_havev:
     bl _az_validate
     str x0, [sp, #96]
     stp x1, x2, [sp, #104]
@@ -1727,11 +1745,16 @@ _az_strtoi:
     bl _az_pair_push40
     cbnz x0, .Lv_ret
 .Ltu_next:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #40]
+    cmp x9, x10
+    b.hs .Ltu_noadv            // missing slot: input cursor exhausted
     ldr x0, [sp, #72]
     bl _az_vsize
     ldr x9, [sp, #72]
     add x9, x9, x0
     str x9, [sp, #72]
+.Ltu_noadv:
     ldr x9, [sp, #64]
     add x9, x9, #1
     str x9, [sp, #64]
@@ -2734,6 +2757,8 @@ _az_strtoi:
     mov x3, #0
     blr x9
     fmov d0, x0                // t bits
+    fcmp d0, d0
+    b.vs .Ldt_fail             // NaN time = Invalid Date
     str d0, [sp, #32]
     // checks
     ldrb w9, [x27, #1]
@@ -3150,10 +3175,15 @@ _az_strtoi:
     b.eq .Lvs_alen
     // non-size check: stride past param (skip in non-string mode)
     cmp w9, #7
-    b.ls .Lvs_avar             // 7..9 varlen
+    b.lo .Lvs_afmt             // 4,5,6: small fixed params
     cmp w9, #10
-    b.eq .Lvs_a8
-    mov x12, #0                // most formats: no params
+    b.ls .Lvs_avar             // 7,8,9: varlen (u64 len + bytes)
+    cmp w9, #11
+    b.eq .Lvs_a8               // 10: regex u64 cbid
+    mov x12, #0                // every other format: no params
+    b .Lvs_anext
+.Lvs_afmt:
+    mov x12, #0                // email/url: no params
     cmp w9, #5
     b.ne .Lvs_anext
     mov x12, #1                // uuid: u8 version
@@ -3193,6 +3223,7 @@ _az_strtoi:
 .Lvs_asize:
     // (x0=code, x12=n, w5=exact) origin "string"
     str x12, [sp, #480]
+    str x11, [sp, #472]        // params ptr survives issue_size
     ucvtf d0, x12
     fmov x3, d0
     adrp x1, .Lty_as_str@PAGE
@@ -3204,6 +3235,7 @@ _az_strtoi:
     bl _az_issue_size
     cbnz x0, .Lv_ret
     ldr x12, [sp, #480]
+    ldr x11, [sp, #472]
 .Lvs_an8:
     add x14, x11, #8
     sub x15, x15, #1

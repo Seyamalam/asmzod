@@ -19,6 +19,7 @@ _az_run_strchecks:
     mov x1, x3
     bl _az_utf16_units
     str x0, [sp, #48]
+    str xzr, [sp, #400]        // failed-any flag
 .Lsc_loop:
     cbz x28, .Lsc_ok
     ldrb w9, [x27]
@@ -139,8 +140,9 @@ _az_run_strchecks:
     cset w5, eq                  // exact iff LENGTH
     bl _az_issue_size
     cbnz x0, .Lsc_retx
-    mov x0, #-2
-    b .Lsc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lsc_next8
 .Lsc_sizefail_big:
     ldp x6, x7, [sp, #56]
     cbnz x7, .Lsc_sf_have2
@@ -165,8 +167,9 @@ _az_run_strchecks:
     cset w5, eq                  // exact iff LENGTH
     bl _az_issue_size
     cbnz x0, .Lsc_retx
-    mov x0, #-2
-    b .Lsc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lsc_next8
 
 // ---- format checks: shared tail ----
 // validator result in w0: 0 -> issue invalid_string {validation, msg}
@@ -463,8 +466,9 @@ _az_run_strchecks:
     mov x3, x7
     bl _az_issue_invstr
     cbnz x0, .Lsc_retx
-    mov x0, #-2
-    b .Lsc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lsc_nextv
 
 // ---- regex (param u64 cbid) ----
 .Lsc_regex:
@@ -555,8 +559,12 @@ _az_run_strchecks:
     mov x0, x9
     bl _az_issue_invstr
     cbnz x0, .Lsc_retx
-    mov x0, #-2
-    b .Lsc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    ldr w9, [sp, #80]
+    cmp w9, #0x0A               // regex carries an 8B cbid param
+    b.eq .Lsc_next8
+    b .Lsc_next0
 
 // advance: x9 = param size (or .Lsc_nextv recomputes for var-len)
 .Lsc_next:
@@ -580,7 +588,12 @@ _az_run_strchecks:
     sub x28, x28, #1
     b .Lsc_loop
 .Lsc_ok:
+    ldr x0, [sp, #400]
+    cbnz x0, .Lsc_isbad
     mov x0, #0
+    b .Lsc_retx
+.Lsc_isbad:
+    mov x0, #-2
 .Lsc_retx:
     ldp x27, x28, [sp, #16]
     ldp x29, x30, [sp]
@@ -597,6 +610,7 @@ _az_run_numchecks:
     str x2, [sp, #40]            // valptr
     mov x27, x0
     mov x28, x1
+    str xzr, [sp, #400]          // failed-any flag
 .Lnc_loop:
     cbz x28, .Lnc_ok
     ldrb w9, [x27]
@@ -692,8 +706,12 @@ _az_run_numchecks:
     mov w5, #0
     bl _az_issue_size
     cbnz x0, .Lnc_retx
-    mov x0, #-2
-    b .Lnc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    ldr w9, [sp, #80]
+    cmp w9, #8                  // safeInt: no params
+    b.eq .Lnc_next0
+    b .Lnc_next8
 .Lnc_int:
     frintm d1, d0
     fcmp d0, d1
@@ -714,8 +732,9 @@ _az_run_numchecks:
     ldr x3, [sp, #40]
     bl _az_issue_type
     cbnz x0, .Lnc_retx
-    mov x0, #-2
-    b .Lnc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lnc_next0
 .Lnc_finite:
     mov x9, #0x7FF0000000000000
     fmov d1, x9
@@ -735,8 +754,9 @@ _az_run_numchecks:
     bl _az_issue_begin
     cbnz x0, .Lnc_retx
     bl _az_issue_commit
-    mov x0, #-2
-    b .Lnc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lnc_next0
 .Lnc_mult:
     ldr d1, [x12]                // m
     fdiv d2, d0, d1
@@ -775,8 +795,9 @@ _az_run_numchecks:
     bl _az_issue_f_f64
     cbnz x0, .Lnc_retx
     bl _az_issue_commit
-    mov x0, #-2
-    b .Lnc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lnc_next8
 .Lnc_safe:
     // int && |x| <= 2^53-1
     frintm d1, d0
@@ -830,7 +851,12 @@ _az_run_numchecks:
     sub x28, x28, #1
     b .Lnc_loop
 .Lnc_ok:
+    ldr x0, [sp, #400]
+    cbnz x0, .Lnc_isbad
     mov x0, #0
+    b .Lnc_retx
+.Lnc_isbad:
+    mov x0, #-2
 .Lnc_retx:
     ldp x27, x28, [sp, #16]
     ldp x29, x30, [sp]
@@ -846,6 +872,7 @@ _az_run_bigintchecks:
     stp x2, x3, [sp, #32]
     mov x27, x0
     mov x28, x1
+    str xzr, [sp, #400]          // failed-any flag
 .Lbc_loop:
     cbz x28, .Lbc_ok
     ldrb w9, [x27]
@@ -968,8 +995,9 @@ _az_run_bigintchecks:
     bl _az_issue_f_bool
     cbnz x0, .Lbc_retx
     bl _az_issue_commit
-    mov x0, #-2
-    b .Lbc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lbc_next8
 .Lbc_mult:
     // val % m != 0 -> not_multiple_of
     cbz x13, .Lbc_next8          // m==0: skip (avoid div0)
@@ -1008,8 +1036,9 @@ _az_run_bigintchecks:
     bl _az_issue_f_i64
     cbnz x0, .Lbc_retx
     bl _az_issue_commit
-    mov x0, #-2
-    b .Lbc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lbc_next8
 .Lbc_next0:
     ldr x27, [sp, #72]
     b .Lbc_cont
@@ -1020,7 +1049,12 @@ _az_run_bigintchecks:
     sub x28, x28, #1
     b .Lbc_loop
 .Lbc_ok:
+    ldr x0, [sp, #400]
+    cbnz x0, .Lbc_isbad
     mov x0, #0
+    b .Lbc_retx
+.Lbc_isbad:
+    mov x0, #-2
 .Lbc_retx:
     ldp x27, x28, [sp, #16]
     ldp x29, x30, [sp]

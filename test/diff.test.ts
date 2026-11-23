@@ -144,6 +144,121 @@ C("date", () => z.date(), () => Z.date(), [new Date(), "2024-01-01", 123, null])
 C("lazy", () => z.lazy(() => z.string()), () => Z.lazy(() => Z.string()), corpus);
 C("instanceof", () => z.instanceof(Map), () => Z.instanceof(Map), [new Map(), {}, new Set()]);
 
+// ---- extended corpus: trickier inputs ----
+const corpus2: unknown[] = [
+  "3.5", "0x10", "  42  ", "1e5", "-0", "1,000", "😀", "café",
+  new Map(), new Set([1, 2]), new Map([["a", 1]]), new Set(),
+  new Date("bad"), { name: 1 }, [[]], [[1], [2]], { a: { b: 1 } },
+  "mailto:x@y.z", BigInt("9007199254740993"),
+];
+
+// string check combos + more formats
+C("str-nonempty", () => z.string().nonempty(), () => Z.string().nonempty(), corpus2);
+C("str-min+email", () => z.string().min(5).email(), () => Z.string().min(5).email(), corpus2);
+C("str-regex-flag", () => z.string().regex(/^[A-Z]+$/i), () => Z.string().regex(/^[A-Z]+$/i),
+  corpus2.concat(["ABC", "abc", "Ab1"]));
+C("str-len-emoji", () => z.string().length(2), () => Z.string().length(2),
+  ["😀😀", "😀", "ab", "a😀b", "café"]);
+C("str-startswith-obj", () => z.string().startsWith("{"), () => Z.string().startsWith("{"), corpus2);
+
+// numeric check matrix
+C("num-gte0", () => z.number().gte(0), () => Z.number().gte(0), corpus2);
+C("num-lt10", () => z.number().lt(10), () => Z.number().lt(10), corpus2);
+C("num-pos", () => z.number().positive(), () => Z.number().positive(), corpus2);
+C("num-neg", () => z.number().negative(), () => Z.number().negative(), corpus2);
+C("num-nonneg", () => z.number().nonnegative(), () => Z.number().nonnegative(), corpus2);
+C("num-mult2.5", () => z.number().multipleOf(2.5), () => Z.number().multipleOf(2.5), corpus2);
+C("num-int+min", () => z.number().int().min(2), () => Z.number().int().min(2), corpus2);
+
+// bigint checks
+C("big-min", () => z.bigint().min(10n), () => Z.bigint().min(10n), corpus2);
+C("big-max", () => z.bigint().max(5n), () => Z.bigint().max(5n), corpus2);
+C("big-mult", () => z.bigint().multipleOf(3n), () => Z.bigint().multipleOf(3n), corpus2);
+
+// array sizes + nested
+C("arr-max2", () => z.array(z.string()).max(2), () => Z.array(Z.string()).max(2), corpus2);
+C("arr-len3", () => z.array(z.number()).length(3), () => Z.array(Z.number()).length(3), corpus2);
+C("arr-nonempty", () => z.array(z.boolean()).nonempty(), () => Z.array(Z.boolean()).nonempty(), corpus2);
+C("arr-nested", () => z.array(z.array(z.number())), () => Z.array(Z.array(Z.number())), corpus2);
+C("arr-union-el", () => z.array(z.union([z.string(), z.number()])),
+  () => Z.array(Z.union([Z.string(), Z.number()])), corpus2);
+
+// tuple rest
+C("tuple-rest", () => (z.tuple([z.string()]) as any).rest?.(z.number()) ?? z.tuple([z.string()]),
+  () => Z.tuple([Z.string()]).rest(Z.number()),
+  [["a"], ["a", 1, 2], ["a", "b"], ["a", 1, "x"], [], "x"]);
+
+// object transforms (pure TS — shape changes)
+C("obj-partial", () => z.object({ a: z.string(), b: z.number() }).partial(),
+  () => Z.object({ a: Z.string(), b: Z.number() }).partial(), corpus2);
+C("obj-required", () => z.object({ a: z.string().optional() }).required(),
+  () => Z.object({ a: Z.string().optional() }).required(), corpus2);
+C("obj-pick", () => z.object({ a: z.string(), b: z.number() }).pick({ a: true }),
+  () => Z.object({ a: Z.string(), b: Z.number() }).pick({ a: true }), corpus2);
+C("obj-omit", () => z.object({ a: z.string(), b: z.number() }).omit({ b: true }),
+  () => Z.object({ a: Z.string(), b: Z.number() }).omit({ b: true }), corpus2);
+C("obj-extend", () => z.object({ a: z.string() }).extend({ c: z.number() }),
+  () => Z.object({ a: Z.string() }).extend({ c: Z.number() }), corpus2);
+C("obj-deep", () => z.object({ l1: z.object({ l2: z.object({ l3: z.object({ v: z.string() }) }) }) }),
+  () => Z.object({ l1: Z.object({ l2: Z.object({ l3: Z.object({ v: Z.string() }) }) }) }),
+  [{ l1: { l2: { l3: { v: "x" } } } }, { l1: { l2: { l3: {} } } }, { l1: { l2: {} } }, { l1: {} }, {}]);
+
+// record with key type
+C("record-str-key", () => z.record(z.string(), z.number()),
+  () => Z.record(Z.string(), Z.number()), corpus2);
+
+// unions: deeper + identical shapes
+C("union-3way", () => z.union([z.literal("y"), z.number().min(10), z.object({ k: z.string() })]),
+  () => Z.union([Z.literal("y"), Z.number().min(10), Z.object({ k: Z.string() })]), corpus2);
+C("union-obj-obj", () => z.union([z.object({ a: z.string() }), z.object({ b: z.number() })]),
+  () => Z.union([Z.object({ a: Z.string() }), Z.object({ b: Z.number() })]), corpus2);
+
+// effects: transform/refine/brand/or/catch-fn
+C("transform", () => z.string().transform((s: string) => s.length),
+  () => Z.string().transform((s) => s.length), corpus2);
+C("refine", () => z.number().refine((n: number) => n > 2),
+  () => Z.number().refine((n) => n > 2), corpus2);
+C("superRefine", () => z.string().superRefine((s: string, ctx: any) => {
+    if (s === "bad") ctx.addIssue({ code: "custom", message: "no bad" });
+  }),
+  () => Z.string().superRefine((s, ctx) => {
+    if (s === "bad") ctx.addIssue({ code: "custom", message: "no bad" });
+  }), ["bad", "ok", "worse"]);
+C("or", () => (z.string() as any).or?.(z.number()) ?? z.union([z.string(), z.number()]),
+  () => Z.string().or(Z.number()), corpus2);
+C("catch-fn", () => (z.number() as any).catch?.(() => 9) ?? z.number(),
+  () => Z.number().catch(() => 9), corpus2);
+C("brand", () => (z.string() as any).brand?.("B") ?? z.string(),
+  () => Z.string().brand("B"), corpus2);
+C("readonly", () => (z.array(z.number()) as any).readonly?.() ?? z.array(z.number()),
+  () => Z.array(Z.number()).readonly(), corpus2);
+
+// date bounds
+C("date-min", () => z.date().min(new Date("2020-01-01")),
+  () => Z.date().min(new Date("2020-01-01")),
+  [new Date("2019-01-01"), new Date("2021-06-01"), "x", new Date("bad")]);
+C("date-max", () => z.date().max(new Date("2020-12-31")),
+  () => Z.date().max(new Date("2020-12-31")),
+  [new Date("2019-01-01"), new Date("2021-06-01"), new Date("bad")]);
+
+// nullish / nullable chains
+C("nullish", () => (z.string() as any).nullish?.() ?? z.string().nullable().optional(),
+  () => Z.string().nullish(), corpus2);
+C("opt-of-opt", () => z.string().optional().optional(),
+  () => Z.string().optional().optional(), corpus2);
+
+// literal variety
+C("literal-null", () => z.literal(null), () => Z.literal(null), corpus2);
+C("literal-true", () => z.literal(true), () => Z.literal(true), corpus2);
+C("literal-big", () => z.literal(7n), () => Z.literal(7n), corpus2);
+
+// nested failure shapes
+C("obj-opt-field", () => z.object({ a: z.string(), b: z.number().optional() }),
+  () => Z.object({ a: Z.string(), b: Z.number().optional() }), corpus2);
+C("arr-of-obj", () => z.array(z.object({ n: z.number() })),
+  () => Z.array(Z.object({ n: Z.number() })),
+  [[{ n: 1 }], [{ n: "x" }], [{ n: 1 }, { n: "x" }, { n: 2 }], [{}]]);
+
 for (const c of cases) {
   test(`diff: ${c.name}`, () => {
     const as = c.az();

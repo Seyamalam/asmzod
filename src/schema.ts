@@ -87,10 +87,9 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return new ZodEffects({
       type: "refine", inner: this,
       cbid: regId(reg.refine, ((v: unknown) => {
-        let first: any = null;
-        fn(v as Output, { addIssue: (i: any) => { first ??= i; } });
-        if (first) { throw new ZodIssueThrow(first); }
-        return true;
+        let ok = true;
+        fn(v as Output, { addIssue: (i: any) => { ok = false; } });
+        return ok;
       }) as (v: unknown) => unknown),
       message: undefined,
     });

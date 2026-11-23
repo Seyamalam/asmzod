@@ -207,6 +207,10 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       return;
     }
 
+    case "brand":
+      emit(w, d.inner, hosts);
+      return;
+
     case "pipe": {
       w.u8(0x11);
       const fi = w.field(), fo = w.field();
