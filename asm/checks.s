@@ -1,0 +1,1093 @@
+// checks.s — string format validators + check runners
+// check record: u8 code + u64 msglen + msg + params
+    .text
+    .p2align 2
+
+// ---------- az_utf16_units(x0=ptr, x1=len) -> x0 units ----------
+// JS .length semantics: 1 unit per code point <=0xFFFF, 2 above
+    .globl _az_utf16_units
+_az_utf16_units:
+    mov x9, #0               // units
+    mov x10, #0              // i
+.Luu_loop:
+    cmp x10, x1
+    b.hs .Luu_done
+    ldrb w11, [x0, x10]
+    cmp w11, #0x80
+    b.lo .Luu_1
+    cmp w11, #0xF0
+    b.hs .Luu_4
+    cmp w11, #0xE0
+    b.hs .Luu_3
+    // 2-byte seq
+    add x10, x10, #2
+    add x9, x9, #1
+    b .Luu_loop
+.Luu_3:
+    add x10, x10, #3
+    add x9, x9, #1
+    b .Luu_loop
+.Luu_4:
+    add x10, x10, #4
+    add x9, x9, #2           // surrogate pair
+    b .Luu_loop
+.Luu_1:
+    add x10, x10, #1
+    add x9, x9, #1
+    b .Luu_loop
+.Luu_done:
+    mov x0, x9
+    ret
+
+// ---------- az_memmem(x0=hay,x1=hlen,x2=ndl,x3=nlen) -> w0 1/0 ----------
+    .globl _az_memmem
+_az_memmem:
+    cbz x3, .Lmm_yes
+    cmp x3, x1
+    b.hi .Lmm_no
+    sub x4, x1, x3           // last start
+    mov x5, #0
+.Lmm_outer:
+    cmp x5, x4
+    b.hi .Lmm_no
+    mov x6, #0
+.Lmm_inner:
+    cmp x6, x3
+    b.hs .Lmm_yes
+    ldrb w7, [x0, x5]
+    add x8, x5, x6
+    ldrb w7, [x0, x8]
+    ldrb w9, [x2, x6]
+    cmp w7, w9
+    b.ne .Lmm_next
+    add x6, x6, #1
+    b .Lmm_inner
+.Lmm_next:
+    add x5, x5, #1
+    b .Lmm_outer
+.Lmm_yes:
+    mov w0, #1
+    ret
+.Lmm_no:
+    mov w0, #0
+    ret
+
+// ---------- small char helpers ----------
+// w9 = byte; uses w10 scratch
+.isdig:  // inlined via macros below (no fn call overhead needed)
+// we'll just write ranges inline in each validator.
+
+// ---------- az_is_email(x0=ptr,x1=len) -> w0 1/0 ----------
+// local[last char in A-Za-z0-9_+-, others also ' and .] @
+// domain: (label '.')+ letters{2,}
+    .globl _az_is_email
+_az_is_email:
+    mov x9, #0               // i
+.Lem_scan:
+    cmp x9, x1
+    b.hs .Lem_no             // no '@'
+    ldrb w11, [x0, x9]
+    cmp w11, #'@'
+    b.eq .Lem_at
+    // must be allowed local char: [A-Za-z0-9_'+.-]
+    cmp w11, #'0'
+    b.lo .Lem_l1
+    cmp w11, #'9'
+    b.ls .Lem_lok
+    cmp w11, #'A'
+    b.lo .Lem_l1
+    cmp w11, #'Z'
+    b.ls .Lem_lok
+    cmp w11, #'a'
+    b.lo .Lem_l1
+    cmp w11, #'z'
+    b.ls .Lem_lok
+.Lem_l1:
+    cmp w11, #'_'
+    b.eq .Lem_lok
+    cmp w11, #'\''
+    b.eq .Lem_lok
+    cmp w11, #'+'
+    b.eq .Lem_lok
+    cmp w11, #'-'
+    b.eq .Lem_lok
+    cmp w11, #'.'
+    b.eq .Lem_lok
+    b .Lem_no
+.Lem_lok:
+    add x9, x9, #1
+    b .Lem_scan
+.Lem_at:
+    // local part: x9 chars [0..x9). must be nonempty and last char in end set
+    cbz x9, .Lem_no
+    sub x13, x9, #1
+    ldrb w11, [x0, x13]
+    // end set: A-Za-z0-9_+-
+    mov w12, #1
+    cmp w11, #'0'
+    b.lo .Lem_e1
+    cmp w11, #'9'
+    b.ls .Lem_eok
+    cmp w11, #'A'
+    b.lo .Lem_e1
+    cmp w11, #'Z'
+    b.ls .Lem_eok
+    cmp w11, #'a'
+    b.lo .Lem_e1
+    cmp w11, #'z'
+    b.ls .Lem_eok
+.Lem_e1:
+    cmp w11, #'_'
+    b.eq .Lem_eok
+    cmp w11, #'+'
+    b.eq .Lem_eok
+    cmp w11, #'-'
+    b.eq .Lem_eok
+    mov w12, #0
+.Lem_eok:
+    cbz w12, .Lem_no
+    // domain: i=x9+1 .. end ; labels sep by '.'; last label all letters >=2
+    add x9, x9, #1
+    mov x10, #0              // labels seen
+    mov x13, x9              // label start
+.Lem_dlabel:
+    cmp x13, x1
+    b.hs .Lem_no             // ran out mid-label
+    // scan one label: chars [alnum][alnum-]* until '.' or end
+    mov x14, x13             // cur
+    mov x15, #0              // label len
+.Lem_dchar:
+    cmp x14, x1
+    b.hs .Lem_dend
+    ldrb w11, [x0, x14]
+    cmp w11, #'.'
+    b.eq .Lem_dend
+    // allowed: alnum or '-' (but not leading '-' -> pos0 must be alnum)
+    mov w12, #1
+    cmp w11, #'0'
+    b.lo .Lem_d2
+    cmp w11, #'9'
+    b.ls .Lem_dok
+    cmp w11, #'A'
+    b.lo .Lem_d2
+    cmp w11, #'Z'
+    b.ls .Lem_dok
+    cmp w11, #'a'
+    b.lo .Lem_d2
+    cmp w11, #'z'
+    b.ls .Lem_dok
+.Lem_d2:
+    cmp w11, #'-'
+    b.eq .Lem_dok
+    mov w12, #0
+.Lem_dok:
+    cbz w12, .Lem_no
+    // first char can't be '-'
+    cbnz x15, .Lem_dok2
+    cmp w11, #'-'
+    b.eq .Lem_no
+.Lem_dok2:
+    add x14, x14, #1
+    add x15, x15, #1
+    b .Lem_dchar
+.Lem_dend:
+    cbz x15, .Lem_no          // empty label
+    cmp x14, x1
+    b.hs .Lem_tld             // hit end -> last label must be letters>=2
+    // label was non-final: continue at x14+1
+    add x10, x10, #1
+    add x13, x14, #1
+    b .Lem_dlabel
+.Lem_tld:
+    // last label [x13, x14): all letters, len>=2, and must have had >=1 dot
+    cbz x10, .Lem_no
+    cmp x15, #2
+    b.lo .Lem_no
+    mov x14, x13
+.Lem_tldl:
+    cmp x14, x1
+    b.hs .Lem_yes
+    ldrb w11, [x0, x14]
+    cmp w11, #'A'
+    b.lo .Lem_no
+    cmp w11, #'Z'
+    b.ls .Lem_tldn
+    cmp w11, #'a'
+    b.lo .Lem_no
+    cmp w11, #'z'
+    b.hi .Lem_no
+.Lem_tldn:
+    add x14, x14, #1
+    b .Lem_tldl
+.Lem_yes:
+    mov w0, #1
+    ret
+.Lem_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_uuid(x0=ptr,x1=len,x2=version) -> w0 ----------
+// 8-4-4-4-12 hex; version 0=any else nibble at pos 14 == version
+    .globl _az_is_uuid
+_az_is_uuid:
+    cmp x1, #36
+    b.ne .Luid_no
+    mov x9, #0
+    mov x10, #0              // group idx 0..4
+    // group lengths
+    adrp x11, .Luid_groups@PAGE
+    add x11, x11, .Luid_groups@PAGEOFF
+.Luid_grp:
+    cmp x10, #5
+    b.hs .Luid_ver
+    ldrb w12, [x11, x10]     // group len
+    mov x13, #0
+.Luid_hex:
+    cmp x13, x12
+    b.hs .Luid_grp_end
+    ldrb w14, [x0, x9]
+    // hex?
+    cmp w14, #'0'
+    b.lo .Luid_no
+    cmp w14, #'9'
+    b.ls .Luid_hok
+    cmp w14, #'A'
+    b.lo .Luid_no
+    cmp w14, #'F'
+    b.ls .Luid_hok
+    cmp w14, #'a'
+    b.lo .Luid_no
+    cmp w14, #'f'
+    b.hi .Luid_no
+.Luid_hok:
+    // version check at pos 14
+    cmp x9, #14
+    b.ne .Luid_hn
+    cbz x2, .Luid_hn
+    sub w15, w14, #'0'
+    cmp w15, w2
+    b.ne .Luid_no
+.Luid_hn:
+    add x9, x9, #1
+    add x13, x13, #1
+    b .Luid_hex
+.Luid_grp_end:
+    add x10, x10, #1
+    cmp x10, #5
+    b.hs .Luid_ver
+    // expect '-'
+    ldrb w14, [x0, x9]
+    cmp w14, #'-'
+    b.ne .Luid_no
+    add x9, x9, #1
+    b .Luid_grp
+.Luid_ver:
+    mov w0, #1
+    ret
+.Luid_no:
+    mov w0, #0
+    ret
+    .section __TEXT,__const
+.Luid_groups: .byte 8,4,4,4,12
+    .text
+
+// ---------- az_is_ulid(x0,x1) : 26 chars crockford b32 ----------
+    .globl _az_is_ulid
+_az_is_ulid:
+    cmp x1, #26
+    b.ne .Lul_no
+    mov x9, #0
+.Lul_l:
+    cmp x9, #26
+    b.hs .Lul_yes
+    ldrb w11, [x0, x9]
+    mov w12, #0
+    cmp w11, #'0'
+    b.lo .Lul_c
+    cmp w11, #'9'
+    b.ls .Lul_ok
+.Lul_c:
+    cmp w11, #'A'
+    b.lo .Lul_no
+    cmp w11, #'Z'
+    b.hi .Lul_no
+    // exclude I L O U
+    cmp w11, #'I'
+    b.eq .Lul_no
+    cmp w11, #'L'
+    b.eq .Lul_no
+    cmp w11, #'O'
+    b.eq .Lul_no
+    cmp w11, #'U'
+    b.eq .Lul_no
+.Lul_ok:
+    add x9, x9, #1
+    b .Lul_l
+.Lul_yes:
+    mov w0, #1
+    ret
+.Lul_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_nanoid: 21 chars [A-Za-z0-9_-] ----------
+    .globl _az_is_nanoid
+_az_is_nanoid:
+    cmp x1, #21
+    b.ne .Lnn_no
+    mov x9, #0
+.Lnn_l:
+    cmp x9, #21
+    b.hs .Lnn_yes
+    ldrb w11, [x0, x9]
+    cmp w11, #'0'
+    b.lo .Lnn_c
+    cmp w11, #'9'
+    b.ls .Lnn_ok
+.Lnn_c:
+    cmp w11, #'A'
+    b.lo .Lnn_c2
+    cmp w11, #'Z'
+    b.ls .Lnn_ok
+.Lnn_c2:
+    cmp w11, #'a'
+    b.lo .Lnn_c3
+    cmp w11, #'z'
+    b.ls .Lnn_ok
+.Lnn_c3:
+    cmp w11, #'_'
+    b.eq .Lnn_ok
+    cmp w11, #'-'
+    b.eq .Lnn_ok
+    b .Lnn_no
+.Lnn_ok:
+    add x9, x9, #1
+    b .Lnn_l
+.Lnn_yes:
+    mov w0, #1
+    ret
+.Lnn_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_cuid2: [a-z][a-z0-9]* len>=2 ----------
+    .globl _az_is_cuid2
+_az_is_cuid2:
+    cmp x1, #2
+    b.lo .Lcu_no
+    ldrb w11, [x0]
+    cmp w11, #'a'
+    b.lo .Lcu_no
+    cmp w11, #'z'
+    b.hi .Lcu_no
+    mov x9, #1
+.Lcu_l:
+    cmp x9, x1
+    b.hs .Lcu_yes
+    ldrb w11, [x0, x9]
+    cmp w11, #'0'
+    b.lo .Lcu_c
+    cmp w11, #'9'
+    b.ls .Lcu_ok
+.Lcu_c:
+    cmp w11, #'a'
+    b.lo .Lcu_no
+    cmp w11, #'z'
+    b.hi .Lcu_no
+.Lcu_ok:
+    add x9, x9, #1
+    b .Lcu_l
+.Lcu_yes:
+    mov w0, #1
+    ret
+.Lcu_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_base64: len%4==0, alphabet, <=2 '=' at end ----------
+    .globl _az_is_base64
+_az_is_base64:
+    cbz x1, .Lb64_no
+    and x9, x1, #3
+    cbnz x9, .Lb64_no
+    mov x9, #0
+.Lb64_l:
+    cmp x9, x1
+    b.hs .Lb64_yes
+    ldrb w11, [x0, x9]
+    cmp w11, #'='
+    b.eq .Lb64_pad
+    cmp w11, #'0'
+    b.lo .Lb64_c
+    cmp w11, #'9'
+    b.ls .Lb64_ok
+.Lb64_c:
+    cmp w11, #'A'
+    b.lo .Lb64_c2
+    cmp w11, #'Z'
+    b.ls .Lb64_ok
+.Lb64_c2:
+    cmp w11, #'a'
+    b.lo .Lb64_c3
+    cmp w11, #'z'
+    b.ls .Lb64_ok
+.Lb64_c3:
+    cmp w11, #'+'
+    b.eq .Lb64_ok
+    cmp w11, #'/'
+    b.eq .Lb64_ok
+    b .Lb64_no
+.Lb64_ok:
+    add x9, x9, #1
+    b .Lb64_l
+.Lb64_pad:
+    // '=' allowed only as last 1-2 chars
+    sub x10, x1, x9
+    cmp x10, #2
+    b.hi .Lb64_no
+    // rest must all be '='
+.Lb64_pl:
+    cmp x9, x1
+    b.hs .Lb64_yes
+    ldrb w11, [x0, x9]
+    cmp w11, #'='
+    b.ne .Lb64_no
+    add x9, x9, #1
+    b .Lb64_pl
+.Lb64_yes:
+    mov w0, #1
+    ret
+.Lb64_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_hex ----------
+    .globl _az_is_hex
+_az_is_hex:
+    cbz x1, .Lhx_no
+    mov x9, #0
+.Lhx_l:
+    cmp x9, x1
+    b.hs .Lhx_yes
+    ldrb w11, [x0, x9]
+    cmp w11, #'0'
+    b.lo .Lhx_no
+    cmp w11, #'9'
+    b.ls .Lhx_ok
+    cmp w11, #'A'
+    b.lo .Lhx_no
+    cmp w11, #'F'
+    b.ls .Lhx_ok
+    cmp w11, #'a'
+    b.lo .Lhx_no
+    cmp w11, #'f'
+    b.hi .Lhx_no
+.Lhx_ok:
+    add x9, x9, #1
+    b .Lhx_l
+.Lhx_yes:
+    mov w0, #1
+    ret
+.Lhx_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_ipv4: a.b.c.d, 1-3 digits each, <=255, no leading 0 ----------
+    .globl _az_is_ipv4
+_az_is_ipv4:
+    mov x9, #0               // pos
+    mov x10, #0              // part idx
+.Lip4_part:
+    cmp x10, #4
+    b.hs .Lip4_yes
+    mov x11, #0              // digits
+    mov x12, #0              // value
+.Lip4_d:
+    cmp x9, x1
+    b.hs .Lip4_no
+    ldrb w13, [x0, x9]
+    cmp w13, #'0'
+    b.lo .Lip4_no
+    cmp w13, #'9'
+    b.hi .Lip4_no
+    sub w14, w13, #'0'
+    mov x15, #10
+    mul x12, x12, x15
+    add x12, x12, x14
+    add x9, x9, #1
+    add x11, x11, #1
+    cmp x11, #3
+    b.lo .Lip4_d2
+    // 3 digits max: next must be '.' or end
+    b .Lip4_pend
+.Lip4_d2:
+    // peek next: continue if digit
+    cmp x9, x1
+    b.hs .Lip4_pend
+    ldrb w13, [x0, x9]
+    cmp w13, #'0'
+    b.lo .Lip4_pend
+    cmp w13, #'9'
+    b.ls .Lip4_d
+.Lip4_pend:
+    cbz x11, .Lip4_no
+    cmp x12, #255
+    b.hi .Lip4_no
+    // leading zero check: >1 digit and first digit was '0'
+    cmp x11, #1
+    b.eq .Lip4_sep
+    sub x14, x9, x11
+    ldrb w13, [x0, x14]
+    cmp w13, #'0'
+    b.eq .Lip4_no
+.Lip4_sep:
+    cmp x10, #3
+    b.hs .Lip4_last
+    cmp x9, x1
+    b.hs .Lip4_no
+    ldrb w13, [x0, x9]
+    cmp w13, #'.'
+    b.ne .Lip4_no
+    add x9, x9, #1
+    add x10, x10, #1
+    b .Lip4_part
+.Lip4_last:
+    // must be end
+    cmp x9, x1
+    b.ne .Lip4_no
+.Lip4_yes:
+    mov w0, #1
+    ret
+.Lip4_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_ipv6: simplified — hex groups + ':' , '::' once ----------
+    .globl _az_is_ipv6
+_az_is_ipv6:
+    cbz x1, .Lip6_no
+    mov x9, #0               // i
+    mov x10, #0              // groups
+    mov x11, #0              // hexdigits in cur group
+    mov x12, #0              // seen '::'
+    mov x13, #0              // prev was ':'
+.Lip6_l:
+    cmp x9, x1
+    b.hs .Lip6_end
+    ldrb w14, [x0, x9]
+    cmp w14, #':'
+    b.eq .Lip6_col
+    // hex digit
+    mov w15, #0
+    cmp w14, #'0'
+    b.lo .Lip6_c
+    cmp w14, #'9'
+    b.ls .Lip6_h
+.Lip6_c:
+    cmp w14, #'A'
+    b.lo .Lip6_c2
+    cmp w14, #'F'
+    b.ls .Lip6_h
+.Lip6_c2:
+    cmp w14, #'a'
+    b.lo .Lip6_no
+    cmp w14, #'f'
+    b.hi .Lip6_no
+.Lip6_h:
+    add x11, x11, #1
+    cmp x11, #4
+    b.hi .Lip6_no
+    mov x13, #0
+    add x9, x9, #1
+    b .Lip6_l
+.Lip6_col:
+    cbz x11, .Lip6_colz      // group empty -> maybe '::'
+    add x10, x10, #1
+    mov x11, #0
+    mov x13, #1
+    add x9, x9, #1
+    b .Lip6_l
+.Lip6_colz:
+    // empty group -> must be '::' (prev was ':' or start)
+    cbnz x12, .Lip6_no       // only one '::'
+    mov x12, #1
+    mov x13, #1
+    add x9, x9, #1
+    // skip the second ':' — handled because group count stays
+    b .Lip6_l
+.Lip6_end:
+    cbz x11, .Lip6_e_nogrp
+    add x10, x10, #1          // final pending group counts
+    b .Lip6_e_chk
+.Lip6_e_nogrp:
+    // last char was ':' -> only valid if it was the second of '::'
+    cbz x12, .Lip6_no
+.Lip6_e_chk:
+    cmp x10, #8
+    b.hi .Lip6_no
+    cbnz x12, .Lip6_yes
+    cmp x10, #8               // no '::' -> must have all 8 groups
+    b.ne .Lip6_no
+.Lip6_yes:
+    mov w0, #1
+    ret
+.Lip6_no:
+    mov w0, #0
+    ret
+
+// ---------- az_is_datetime / datestr / timestr ----------
+// digits helper: w14=w13-'0' valid if <=9 — inline
+
+// az_is_datestr(x0,x1): YYYY-MM-DD
+    .globl _az_is_datestr
+_az_is_datestr:
+    cmp x1, #10
+    b.ne .Lds_no
+    // 4 digits
+    mov x9, #0
+.Lds_y:
+    cmp x9, #4
+    b.hs .Lds_y2
+    ldrb w11, [x0, x9]
+    cmp w11, #'0'
+    b.lo .Lds_no
+    cmp w11, #'9'
+    b.hi .Lds_no
+    add x9, x9, #1
+    b .Lds_y
+.Lds_y2:
+    ldrb w11, [x0, #4]
+    cmp w11, #'-'
+    b.ne .Lds_no
+    ldrb w11, [x0, #7]
+    cmp w11, #'-'
+    b.ne .Lds_no
+    // MM
+    ldrb w11, [x0, #5]
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.hi .Lds_no
+    ldrb w11, [x0, #6]
+    sub w13, w11, #'0'
+    cmp w13, #9
+    b.hi .Lds_no
+    mov w14, #10
+    mul w12, w12, w14
+    add w12, w12, w13        // month
+    cmp w12, #1
+    b.lo .Lds_no
+    cmp w12, #12
+    b.hi .Lds_no
+    // DD
+    ldrb w11, [x0, #8]
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.hi .Lds_no
+    ldrb w11, [x0, #9]
+    sub w13, w11, #'0'
+    cmp w13, #9
+    b.hi .Lds_no
+    mul w12, w12, w14
+    add w12, w12, w13
+    cmp w12, #1
+    b.lo .Lds_no
+    cmp w12, #31
+    b.hi .Lds_no
+    mov w0, #1
+    ret
+.Lds_no:
+    mov w0, #0
+    ret
+
+// az_is_timestr(x0,x1): HH:MM[:SS[.frac]]  len 5|8|>8
+    .globl _az_is_timestr
+_az_is_timestr:
+    cmp x1, #5
+    b.lo .Lts_no
+    // HH
+    ldrb w11, [x0]
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.hi .Lts_no
+    ldrb w11, [x0, #1]
+    sub w13, w11, #'0'
+    cmp w13, #9
+    b.hi .Lts_no
+    mov w14, #10
+    mul w12, w12, w14
+    add w12, w12, w13
+    cmp w12, #23
+    b.hi .Lts_no
+    ldrb w11, [x0, #2]
+    cmp w11, #':'
+    b.ne .Lts_no
+    // MM
+    ldrb w11, [x0, #3]
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.hi .Lts_no
+    ldrb w11, [x0, #4]
+    sub w13, w11, #'0'
+    cmp w13, #9
+    b.hi .Lts_no
+    mul w12, w12, w14
+    add w12, w12, w13
+    cmp w12, #59
+    b.hi .Lts_no
+    cmp x1, #5
+    b.eq .Lts_yes
+    // :SS
+    cmp x1, #8
+    b.lo .Lts_no
+    ldrb w11, [x0, #5]
+    cmp w11, #':'
+    b.ne .Lts_no
+    ldrb w11, [x0, #6]
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.hi .Lts_no
+    ldrb w11, [x0, #7]
+    sub w13, w11, #'0'
+    cmp w13, #9
+    b.hi .Lts_no
+    mul w12, w12, w14
+    add w12, w12, w13
+    cmp w12, #59
+    b.hi .Lts_no
+    cmp x1, #8
+    b.eq .Lts_yes
+    // .frac : '.' + 1+ digits
+    ldrb w11, [x0, #8]
+    cmp w11, #'.'
+    b.ne .Lts_no
+    mov x9, #9
+    mov x10, #0
+.Lts_fl:
+    cmp x9, x1
+    b.hs .Lts_fend
+    ldrb w11, [x0, x9]
+    cmp w11, #'0'
+    b.lo .Lts_no
+    cmp w11, #'9'
+    b.hi .Lts_no
+    add x9, x9, #1
+    add x10, x10, #1
+    b .Lts_fl
+.Lts_fend:
+    cbz x10, .Lts_no
+.Lts_yes:
+    mov w0, #1
+    ret
+.Lts_no:
+    mov w0, #0
+    ret
+
+// az_is_datetime(x0=ptr, x1=len, x2=flags) -> w0
+// flags bit0: allow ±HH:MM offset (zod3 datetime({offset:true}))
+// format: datestr 'T' timestr tz ; tz = 'Z'|'z' or ±HH:MM (if allowed)
+    .globl _az_is_datetime
+_az_is_datetime:
+    stp x29, x30, [sp, #-64]!
+    mov x29, sp
+    stp x0, x1, [sp, #16]     // ptr,len
+    str x2, [sp, #32]         // flags
+    cmp x1, #17               // min: 10+T+HH:MM+Z
+    b.lo .Ldt_no
+    mov x1, #10
+    bl _az_is_datestr
+    cbz w0, .Ldt_no
+    ldp x0, x1, [sp, #16]
+    ldrb w11, [x0, #10]
+    cmp w11, #'T'
+    b.ne .Ldt_no
+    // tz: last char 'Z'/'z' -> 1 ; else ±HH:MM (6, needs flag)
+    sub x13, x1, #1
+    ldrb w11, [x0, x13]
+    mov x14, #0               // tz len
+    cmp w11, #'Z'
+    b.eq .Ldt_tz1
+    cmp w11, #'z'
+    b.eq .Ldt_tz1
+    ldr x9, [sp, #32]
+    tbz x9, #0, .Ldt_no       // offset not allowed
+    cmp x1, #23               // need room for ±HH:MM
+    b.lo .Ldt_no
+    sub x13, x1, #6
+    ldrb w11, [x0, x13]
+    cmp w11, #'+'
+    b.eq .Ldt_tz6
+    cmp w11, #'-'
+    b.eq .Ldt_tz6
+    b .Ldt_no
+.Ldt_tz1:
+    mov x14, #1
+    b .Ldt_tzval
+.Ldt_tz6:
+    mov x14, #6
+    // validate "±HH:MM" digits at len-5..len-1
+    ldp x0, x1, [sp, #16]
+    sub x13, x1, #5
+    add x13, x0, x13
+    ldrb w11, [x13]
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.hi .Ldt_no
+    ldrb w11, [x13, #1]
+    sub w15, w11, #'0'
+    cmp w15, #9
+    b.hi .Ldt_no
+    mov w9, #10
+    mul w12, w12, w9
+    add w12, w12, w15
+    cmp w12, #23
+    b.hi .Ldt_no
+    ldrb w11, [x13, #2]
+    cmp w11, #':'
+    b.ne .Ldt_no
+    ldrb w11, [x13, #3]
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.hi .Ldt_no
+    ldrb w11, [x13, #4]
+    sub w15, w11, #'0'
+    cmp w15, #9
+    b.hi .Ldt_no
+    mul w12, w12, w9
+    add w12, w12, w15
+    cmp w12, #59
+    b.hi .Ldt_no
+.Ldt_tzval:
+    // time = [11, len-tzlen)
+    ldp x0, x1, [sp, #16]
+    sub x15, x1, x14
+    add x0, x0, #11
+    sub x1, x15, #11
+    bl _az_is_timestr
+    cbz w0, .Ldt_no
+    mov w0, #1
+    b .Ldt_out
+.Ldt_no:
+    mov w0, #0
+.Ldt_out:
+    ldp x29, x30, [sp], #64
+    ret
+
+// ---------- az_issue_invstr ----------
+// (x0=validation ptr, x1=len, x2=msgptr, x3=msglen) -> x0 0/-4
+// issue code 7 (invalid_string) + field "validation"
+    .globl _az_issue_invstr
+_az_issue_invstr:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    stp x0, x1, [sp, #16]
+    mov x1, x2
+    mov x2, x3
+    mov x0, #7
+    bl _az_issue_begin
+    cbnz x0, .Lis_out
+    adrp x0, ak_validation@PAGE
+    add x0, x0, ak_validation@PAGEOFF
+    mov x1, #10
+    ldp x2, x3, [sp, #16]
+    bl _az_issue_f_str
+    cbnz x0, .Lis_out
+    bl _az_issue_commit
+    mov x0, #0
+.Lis_out:
+    ldp x29, x30, [sp], #48
+    ret
+
+// ---------- az_issue_size ----------
+// too_small(8)/too_big(9)
+// x0=code, x1=typeptr, x2=typelen, x3=bound f64 bits, w4=inclusive, w5=exact,
+// x6=msgptr, x7=msglen  -> x0 0/-4
+    .globl _az_issue_size
+_az_issue_size:
+    stp x29, x30, [sp, #-96]!
+    mov x29, sp
+    stp x1, x2, [sp, #16]    // type
+    str x3, [sp, #32]        // bound bits
+    stp x4, x5, [sp, #40]    // incl/exact (w's in x slots)
+    str x0, [sp, #56]        // code
+    // begin
+    mov x1, x6
+    mov x2, x7
+    bl _az_issue_begin
+    cbnz x0, .Lsz_out
+    // minimum|maximum field by code
+    ldr x10, [sp, #56]
+    cmp x10, #9
+    b.eq .Lsz_max
+    adrp x0, ak_minimum@PAGE
+    add x0, x0, ak_minimum@PAGEOFF
+    mov x1, #7
+    b .Lsz_bound
+.Lsz_max:
+    adrp x0, ak_maximum@PAGE
+    add x0, x0, ak_maximum@PAGEOFF
+    mov x1, #7
+.Lsz_bound:
+    ldr d0, [sp, #32]
+    bl _az_issue_f_f64
+    cbnz x0, .Lsz_out
+    // type
+    adrp x0, ak_type@PAGE
+    add x0, x0, ak_type@PAGEOFF
+    mov x1, #4
+    ldp x2, x3, [sp, #16]
+    bl _az_issue_f_str
+    cbnz x0, .Lsz_out
+    // inclusive
+    adrp x0, ak_inclusive@PAGE
+    add x0, x0, ak_inclusive@PAGEOFF
+    mov x1, #9
+    ldr w2, [sp, #40]
+    bl _az_issue_f_bool
+    cbnz x0, .Lsz_out
+    // exact (only if set)
+    ldr w9, [sp, #48]
+    cbz w9, .Lsz_commit
+    adrp x0, ak_exact@PAGE
+    add x0, x0, ak_exact@PAGEOFF
+    mov x1, #5
+    mov w2, #1
+    bl _az_issue_f_bool
+    cbnz x0, .Lsz_out
+.Lsz_commit:
+    bl _az_issue_commit
+    mov x0, #0
+.Lsz_out:
+    ldp x29, x30, [sp], #96
+    ret
+
+    .section __TEXT,__cstring
+    .globl ams_atleast
+    .globl ams_atmost
+    .globl ams_exactly
+    .globl ams_chars
+    .globl ama_atleast
+    .globl ama_atmost
+    .globl ama_exactly
+    .globl ama_elems
+    .globl amn_gt
+    .globl amn_gte
+    .globl amn_lt
+    .globl amn_lte
+    .globl amn_mult
+    .globl amb_gt
+    .globl amb_gte
+    .globl amb_lt
+    .globl amb_lte
+    .globl amb_mult
+    .globl amd_min
+    .globl amd_max
+    .globl ak_validation
+ak_validation: .ascii "validation"
+    .globl ak_minimum
+ak_minimum:    .ascii "minimum"
+    .globl ak_maximum
+ak_maximum:    .ascii "maximum"
+    .globl ak_type
+ak_type:       .ascii "type"
+    .globl ak_inclusive
+ak_inclusive:  .ascii "inclusive"
+    .globl ak_exact
+ak_exact:      .ascii "exact"
+ams_atleast:   .ascii "String must contain at least "
+ams_atmost:    .ascii "String must contain at most "
+ams_exactly:   .ascii "String must contain exactly "
+ams_chars:     .ascii " character(s)"
+ama_atleast:   .ascii "Array must contain at least "
+ama_atmost:    .ascii "Array must contain at most "
+ama_exactly:   .ascii "Array must contain exactly "
+ama_elems:     .ascii " element(s)"
+amn_gt:        .ascii "Number must be greater than "
+amn_gte:       .ascii "Number must be greater than or equal to "
+amn_lt:        .ascii "Number must be less than "
+amn_lte:       .ascii "Number must be less than or equal to "
+amn_mult:      .ascii "Number must be a multiple of "
+amb_gt:        .ascii "Bigint must be greater than "
+amb_gte:       .ascii "Bigint must be greater than or equal to "
+amb_lt:        .ascii "Bigint must be less than "
+amb_lte:       .ascii "Bigint must be less than or equal to "
+amb_mult:      .ascii "Bigint must be a multiple of "
+amd_min:       .ascii "Date must be later than "
+amd_max:       .ascii "Date must be earlier than "
+
+    .text
+    .p2align 2
+
+// ---------- message builders ----------
+// az_msg_size(x0=outbuf, x1=prefixptr, x2=prefixlen, x3=n u64, x4=suffixptr, x5=suffixlen)
+// -> x0 = msglen. "prefix<n>suffix"
+    .globl _az_msg_size
+_az_msg_size:
+    stp x29, x30, [sp, #-64]!
+    mov x29, sp
+    stp x0, x3, [sp, #16]
+    stp x4, x5, [sp, #32]
+    mov x10, x0
+    // prefix
+    mov x11, x1
+    mov x12, x2
+.Lmsb1:
+    cbz x12, .Lmsb2
+    ldrb w13, [x11], #1
+    strb w13, [x10], #1
+    sub x12, x12, #1
+    b .Lmsb1
+.Lmsb2:
+    // n
+    ldr x0, [sp, #24]
+    mov x1, x10
+    bl _az_u64_dec
+    add x10, x10, x0
+    // suffix
+    ldp x11, x12, [sp, #32]
+.Lmsb3:
+    cbz x12, .Lmsb4
+    ldrb w13, [x11], #1
+    strb w13, [x10], #1
+    sub x12, x12, #1
+    b .Lmsb3
+.Lmsb4:
+    ldr x9, [sp, #16]
+    sub x0, x10, x9
+    ldp x29, x30, [sp], #64
+    ret
+
+// az_msg_f64(x0=outbuf, x1=prefixptr, x2=prefixlen, d0=n, x3=suffixptr, x4=suffixlen)
+// -> x0 = msglen
+    .globl _az_msg_f64
+_az_msg_f64:
+    stp x29, x30, [sp, #-64]!
+    mov x29, sp
+    stp x0, x3, [sp, #16]
+    stp x4, xzr, [sp, #32]
+    str d0, [sp, #48]
+    mov x10, x0
+    mov x11, x1
+    mov x12, x2
+.Lmfb1:
+    cbz x12, .Lmfb2
+    ldrb w13, [x11], #1
+    strb w13, [x10], #1
+    sub x12, x12, #1
+    b .Lmfb1
+.Lmfb2:
+    ldr d0, [sp, #48]
+    mov x0, x10
+    bl _az_f64_dec
+    add x10, x10, x0
+    ldp x11, x12, [sp, #24]
+.Lmfb3:
+    cbz x12, .Lmfb4
+    ldrb w13, [x11], #1
+    strb w13, [x10], #1
+    sub x12, x12, #1
+    b .Lmfb3
+.Lmfb4:
+    ldr x9, [sp, #16]
+    sub x0, x10, x9
+    ldp x29, x30, [sp], #64
+    ret
