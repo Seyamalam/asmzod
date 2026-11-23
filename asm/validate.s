@@ -714,12 +714,12 @@ _az_vtype:
     // x1 = outptr already
     mov x2, x19
     sub x3, x20, x19
-    mov x13, x19               // remember dest
+    str x19, [sp, #32]         // remember dest (x13 not safe across cb)
     blr x9
     cmp x0, #0
     b.lt .Lv_ret               // -3/-5 propagate
-    add x19, x13, x0           // bump arena by produced len
-    mov x1, x13
+    ldr x1, [sp, #32]
+    add x19, x1, x0            // bump arena by produced len
     mov x2, x0
     mov x0, #0
     b .Lv_ret
@@ -1631,9 +1631,10 @@ _az_strtoi:
     str xzr, [sp, #64]         // i
     str xzr, [sp, #72]         // failed
     // key node ptr (0 if none)
-    add x9, x27, #1
-    ldr x10, [x9]
+    mov x9, #0
+    ldr x10, [x27, #1]
     cbz x10, .Lrc_nokey
+    add x9, x27, #1
     add x9, x9, x10
 .Lrc_nokey:
     str x9, [sp, #80]
@@ -2833,12 +2834,14 @@ _az_strtoi:
     cbz x9, .Lcb_f
     b .Lcb_emit
 .Lcb_emit:
+    str w10, [sp, #32]
     mov x0, #2
     bl _az_val_reserve
     cmp x0, #-1
     b.eq .Lcb_oom
     mov w9, #2
     strb w9, [x0]
+    ldr w10, [sp, #32]
     strb w10, [x0, #1]
     b .Lcz_inner
 .Lcb_oom:
