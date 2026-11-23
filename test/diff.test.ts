@@ -9,6 +9,9 @@ function issueKey(i: any) {
 function issueSort(issues: any[]) {
   return issues.map(issueKey).sort();
 }
+function* zipIssues(a: any[], b: any[]): Generator<[any, any]> {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) yield [a[i], b[i]];
+}
 
 function deepEq(a: unknown, b: unknown): boolean {
   try { expect(a).toEqual(b); return true; } catch { return false; }
@@ -259,6 +262,27 @@ C("arr-of-obj", () => z.array(z.object({ n: z.number() })),
   () => Z.array(Z.object({ n: Z.number() })),
   [[{ n: 1 }], [{ n: "x" }], [{ n: 1 }, { n: "x" }, { n: 2 }], [{}]]);
 
+// map / set
+C("map", () => z.map(z.string(), z.number()), () => Z.map(Z.string(), Z.number()),
+  [new Map([["a", 1]]), new Map([["a", 1], ["b", "x"], [5, 9]]), "x",
+   new Map(), new Set(), new Map([[3, "s"]])]);
+C("map-nested", () => z.map(z.string(), z.object({ v: z.number() })),
+  () => Z.map(Z.string(), Z.object({ v: Z.number() })),
+  [new Map([["k", { v: 1 }]]), new Map([["k", { v: "x" }], ["j", { q: 1 }]])]);
+C("set", () => z.set(z.string()), () => Z.set(Z.string()),
+  [new Set(["a"]), new Set(["a", 5]), [1, 2], new Set(), new Map(), "x"]);
+C("set-nested", () => z.set(z.object({ v: z.number() })),
+  () => Z.set(Z.object({ v: Z.number() })),
+  [new Set([{ v: 1 }]), new Set([{ v: "x" }, { v: 2 }])]);
+
+// union nested errors field
+C("union-errors", () => z.union([z.string().email(), z.number().min(10)]),
+  () => Z.union([Z.string().email(), Z.number().min(10)]),
+  [true, "bad", "a@b.c", 5, 15, null], true);
+C("union-errors-deep", () => z.union([z.object({ a: z.string() }), z.array(z.number())]),
+  () => Z.union([Z.object({ a: Z.string() }), Z.array(Z.number())]),
+  [true, "x", { a: 5 }, ["x"]], true);
+
 for (const c of cases) {
   test(`diff: ${c.name}`, () => {
     const as = c.az();
@@ -276,6 +300,18 @@ for (const c of cases) {
         const aKeys = issueSort(ar.error.issues);
         const zKeys = issueSort(zr.error.issues);
         expect(aKeys).toEqual(zKeys);
+        if (c.strictIssues) {
+          // deep-compare per-option union errors
+          for (const [ai, zi] of zipIssues(ar.error.issues, zr.error.issues)) {
+            if (zi.errors !== undefined) {
+              expect(ai.errors?.map((e: any[]) => issueSort(e))).toEqual(
+                zi.errors.map((e: any[]) => issueSort(e)));
+            }
+            for (const f of ["discriminator", "note", "options"] as const) {
+              if ((zi as any)[f] !== undefined) expect((ai as any)[f]).toEqual((zi as any)[f]);
+            }
+          }
+        }
       }
     }
   });

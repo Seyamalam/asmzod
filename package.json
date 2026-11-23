@@ -1,18 +1,30 @@
 {
   "name": "asmzod",
-  "version": "0.1.0",
-  "description": "Drop-in Zod replacement with the validation engine written in ARM64 assembly",
+  "version": "0.2.0",
+  "description": "Zod-compatible validation — the validator is hand-written ARM64 assembly (with a portable TS engine for everywhere else)",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "asm", "FORMAT.md", "README.md"],
   "scripts": {
     "build": "make -C asm",
     "test": "bun test",
+    "test:portable": "AZ_ENGINE=portable bun test",
+    "test:node": "node --test node/node.test.mjs",
+    "test:deno": "deno test --no-check deno/deno.test.ts",
     "bench": "bun bench/bench.ts"
   },
   "devDependencies": {
     "bun-types": "^1.2.0",
     "typescript": "^5.9.0",
     "zod": "4"
+  },
+  "peerDependencies": {
+    "koffi": "^2.11.0"
+  },
+  "peerDependenciesMeta": {
+    "koffi": { "optional": true }
   }
 }

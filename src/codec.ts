@@ -1,5 +1,4 @@
 // codec.ts — tagged binary value encoding/decoding (see FORMAT.md)
-import { ptr, toArrayBuffer, read } from "bun:ffi";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -63,27 +62,45 @@ function isPlainObject(v: object): boolean {
 }
 
 // ---- readers on absolute pointers ----
+// ---- memory backend: set by whichever native driver is active ----
+// decodeAt/view are only used on the native path; the portable engine has
+// its own byte-reader and never touches these.
+export interface MemBackend {
+  view(p: number, n: number): Uint8Array;
+  u8(p: number): number;
+  f64(p: number): number;
+  i64(p: number): bigint;
+  u64(p: number): bigint;
+}
+let mem: MemBackend | null = null;
+export function setMemBackend(b: MemBackend) { mem = b; }
+function need(): MemBackend {
+  if (!mem) throw new Error("asmzod: no native memory backend installed");
+  return mem;
+}
+
 export function view(p: number, n: number): Uint8Array {
   if (n <= 0) return new Uint8Array(0);
-  return new Uint8Array(toArrayBuffer(p, 0, n));
+  return need().view(p, n);
 }
 export function rd64u(p: number): bigint {
-  return read.u64(p) as bigint;
+  return need().u64(p);
 }
 
 // decode tagged value at absolute ptr -> [value, nextPtr]
 export function decodeAt(p: number, hosts: HostTable): [unknown, number] {
-  const tag = read.u8(p);
+  const m = need();
+  const tag = m.u8(p);
   switch (tag) {
     case 0: return [undefined, p + 1];
     case 1: return [null, p + 1];
-    case 2: return [read.u8(p + 1) !== 0, p + 2];
-    case 3: return [read.f64(p + 1), p + 9];
+    case 2: return [m.u8(p + 1) !== 0, p + 2];
+    case 3: return [m.f64(p + 1), p + 9];
     case 4: {
-      const n = Number(rd64u(p + 1));
+      const n = Number(m.u64(p + 1));
       return [dec.decode(view(p + 9, n)), p + 9 + n];
     }
-    case 5: return [read.i64(p + 1), p + 9];
+    case 5: return [m.i64(p + 1), p + 9];
     case 6: {
       const nf = Number(rd64u(p + 1));
       let cur = p + 9;
@@ -163,5 +180,3 @@ export class BW {
   }
   out(): Uint8Array { return new Uint8Array(this.bytes); }
 }
-
-export { ptr };

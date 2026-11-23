@@ -1,6 +1,6 @@
 // bytecode.ts — schema -> engine blob compiler (see FORMAT.md)
-import { BW, u64, str, encodeValue, type HostTable } from "./codec";
-import { reg, regId } from "./ffi";
+import { BW, u64, str, encodeValue, type HostTable } from "./codec.ts";
+import { reg, regId } from "./ffi.ts";
 
 export interface Compiled {
   blob: Uint8Array;

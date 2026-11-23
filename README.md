@@ -83,9 +83,27 @@ codes+paths — currently **50/50 cases green**, plus 15 API tests.
 | `z.infer` / `z.input` / `z.output` type machinery | ✅ |
 | `safeParse` `parse` `spa` sync parsing; `ZodError` + `format`/`flatten`/`issues` | ✅ |
 | `parseAsync` / async refinements | ❌ throws (engine is synchronous machine code) |
-| `map` `set` `promise` `function` | ❌ not yet |
+| `z.map` `z.set` | ✅ validated entry-by-entry at the TS layer |
+| `promise` `function` schemas | ❌ not yet |
 | `bigint` | i64 range only |
-| `unionErrors` detail on union failure | approximated (single `invalid_union` issue) |
+| union errors (`invalid_union.errors`) | ✅ per-option arrays + zod-4 best-match semantics |
+
+## Runtime support
+
+Two engines, one API:
+
+| runtime | backend | notes |
+|---|---|---|
+| **Bun** | ARM64 dylib via `bun:ffi` | the real deal — machine code does the validating |
+| **Node ≥ 22.6** | portable interpreter | `node test.ts` — type-stripping runs the TS sources directly (no param-props/namespaces, `.ts` extensions everywhere) |
+| **Deno** | portable interpreter | `deno test --no-check` — works today |
+| **Cloudflare Workers / browsers** | portable interpreter | see `examples/worker/` — zero FFI, zero native deps |
+| any bundler | portable interpreter | everything in `src/` is dependency-free TS |
+
+The portable engine (`src/engine.ts`) interprets the **same bytecode and
+tagged-value format** the ARM64 engine uses — and passes the identical
+117-case differential suite (`AZ_ENGINE=portable bun test`). `engineBackend`
+exports which one you're on. `AZ_ENGINE=portable` forces it anywhere.
 
 ## Performance
 

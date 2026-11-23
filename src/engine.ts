@@ -1,0 +1,584 @@
+// engine.ts — portable bytecode interpreter.
+// Pure TypeScript: runs the same schema blob + tagged-value format the ARM64
+// engine uses, so it works on Node, Deno, Cloudflare Workers, browsers —
+// everywhere asm/libasmzod.dylib can't load.
+import type { HostTable } from "./codec.ts";
+import { reg } from "./shared.ts";
+
+// ---- byte reader over a blob ----
+class R {
+  pos: number;
+  b: Uint8Array;
+  constructor(b: Uint8Array, pos = 0) { this.b = b; this.pos = pos; }
+  u8() { return this.b[this.pos++]; }
+  u64() { const v = new DataView(this.b.buffer, this.b.byteOffset + this.pos).getBigUint64(0, true); this.pos += 8; return v; }
+  i64() { const v = new DataView(this.b.buffer, this.b.byteOffset + this.pos).getBigInt64(0, true); this.pos += 8; return v; }
+  f64() { const v = new DataView(this.b.buffer, this.b.byteOffset + this.pos).getFloat64(0, true); this.pos += 8; return v; }
+  bytes(n: number) { const s = this.b.subarray(this.pos, this.pos + n); this.pos += n; return s; }
+  str(n: number | bigint) { return new TextDecoder().decode(this.bytes(Number(n))); }
+  // i64 offset relative to the field's own address
+  child(fieldPos: number) { const save = this.pos; this.pos = fieldPos; const rel = this.i64(); this.pos = save; return fieldPos + Number(rel); }
+}
+
+const dec = new TextDecoder();
+
+// ---- tagged value decoder (must match codec.ts encodeValue) ----
+function decodeValue(r: R, hosts: HostTable): unknown {
+  const tag = r.u8();
+  switch (tag) {
+    case 0: return undefined;
+    case 1: return null;
+    case 2: return r.u8() !== 0;
+    case 3: { const v = new DataView(r.b.buffer, r.b.byteOffset + r.pos).getFloat64(0, true); r.pos += 8; return v; }
+    case 4: { const n = Number(r.u64()); return r.str(n); }
+    case 5: return r.i64();
+    case 6: {
+      const n = Number(r.u64()); const o: Record<string, unknown> = {};
+      for (let i = 0; i < n; i++) { const k = r.str(Number(r.u64())); o[k] = decodeValue(r, hosts); }
+      return o;
+    }
+    case 7: { const n = Number(r.u64()); const a: unknown[] = []; for (let i = 0; i < n; i++) a.push(decodeValue(r, hosts)); return a; }
+    case 8: return hosts[Number(r.u64())];
+    default: throw new Error(`asmzod: bad value tag ${tag}`);
+  }
+}
+
+// ---- issue emission (internal pre-normalization shapes) ----
+interface Ctx {
+  hosts: HostTable;
+  issues: any[];
+  path: (string | number)[];
+  // pendingThrow mirrors the FFI driver's callback-error channel
+  pendingThrow: unknown;
+}
+function pushIssue(c: Ctx, code: string, fields?: Record<string, unknown>) {
+  c.issues.push({ code, path: [...c.path], ...fields });
+}
+function atKey<T>(c: Ctx, k: string | number, f: () => T): T {
+  c.path.push(k); try { return f(); } finally { c.path.pop(); }
+}
+
+// type names matching asm/.Lt* + hostref table
+function typeName(v: unknown): string {
+  if (v === undefined) return "undefined";
+  if (v === null) return "null";
+  if (typeof v === "boolean") return "boolean";
+  if (typeof v === "number") return Number.isNaN(v) ? "nan" : "number";
+  if (typeof v === "string") return "string";
+  if (typeof v === "bigint") return "bigint";
+  if (typeof v === "symbol") return "symbol";
+  if (typeof v === "function") return "function";
+  if (Array.isArray(v)) return "array";
+  if (v instanceof Date) return "date";
+  if (v instanceof Map) return "map";
+  if (v instanceof Set) return "set";
+  return "object";
+}
+
+// az_input_len: strings count code points (matches asm utf16_units)
+function inputLen(v: unknown): number {
+  if (typeof v === "string") { let n = 0; for (const _ of v) n++; return n; }
+  if (Array.isArray(v)) return v.length;
+  const l = (v as any)?.length;
+  return typeof l === "number" && l >= 0 && Number.isInteger(l) ? l : -1;
+}
+
+const TYPE_FAIL_CODES = new Set(["invalid_type", "invalid_value"]);
+
+// the interpreter. returns {ok, value} or {ok:false} — issues accumulate on c.
+export function portableParse(blob: Uint8Array, input: Uint8Array, hosts: HostTable) {
+  const c: Ctx = { hosts, issues: [], path: [], pendingThrow: null };
+  const rin = new R(input);
+  const v = decodeValue(rin, hosts);
+  let out: unknown;
+  try {
+    out = validate(new R(blob), v, c);
+  } catch (e) {
+    if (e !== FAILED) throw e;
+  }
+  if (c.pendingThrow !== null) throw c.pendingThrow;
+  if (c.issues.length) return { ok: false as const, issues: c.issues };
+  return { ok: true as const, value: out };
+}
+
+// ---- check runners ----
+
+function msgOf(r: R): string | undefined {
+  const n = Number(r.u64());
+  return n ? r.str(n) : undefined;
+}
+
+function sizeFail(c: Ctx, code: "too_small" | "too_big", origin: string,
+  limit: bigint, inclusive: boolean, exact: boolean, msg?: string) {
+  // zod emits number for f64-origin limits, bigint for bigint-schema limits;
+  // coerce when it fits so issues stay JSON-serializable
+  const lim: number | bigint =
+    origin === "bigint" ? limit
+      : limit >= BigInt(Number.MIN_SAFE_INTEGER) && limit <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(limit) : limit;
+  pushIssue(c, code, {
+    type: origin, [code === "too_small" ? "minimum" : "maximum"]: lim,
+    inclusive, ...(exact ? { exact: true } : {}), ...(msg ? { message: msg } : {}),
+  });
+}
+
+// returns whether the value is a valid string; runs all checks on failure too
+function runStrChecks(r: R, v: unknown, c: Ctx): boolean {
+  const n = r.u8();
+  const recs: { code: number; msg?: string; p: number }[] = [];
+  for (let i = 0; i < n; i++) { const code = r.u8(); const msg = msgOf(r); recs.push({ code, msg, p: r.pos }); r.pos = checkParamEnd(r, code, true); }
+  const isStr = typeof v === "string";
+  const len = isStr ? inputLen(v) : -1;
+  const alen = isStr ? len : inputLen(v);
+  let fail = !isStr;
+  for (const rc of recs) {
+    const save = r.pos; r.pos = rc.p;
+    try {
+      switch (rc.code) {
+        case 0x01: { const l = r.u64(); if (alen >= 0 && BigInt(alen) < l) { sizeFail(c, "too_small", "string", l, true, false, rc.msg); fail = true; } break; }
+        case 0x02: { const l = r.u64(); if (alen >= 0 && BigInt(alen) > l) { sizeFail(c, "too_big", "string", l, true, false, rc.msg); fail = true; } break; }
+        case 0x03: { const l = r.u64(); if (alen >= 0 && BigInt(alen) !== l) { sizeFail(c, BigInt(alen) < l ? "too_small" : "too_big", "string", l, true, true, rc.msg); fail = true; } break; }
+        case 0x07: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).startsWith(s)) { fmtFail(c, "startsWith", rc.msg); fail = true; } break; }
+        case 0x08: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).endsWith(s)) { fmtFail(c, "endsWith", rc.msg); fail = true; } break; }
+        case 0x09: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).includes(s)) { fmtFail(c, "includes", rc.msg); fail = true; } break; }
+        case 0x0a: { const re = reg.regex[Number(r.u64())]; if (isStr) { re.lastIndex = 0; if (!re.test(v as string)) { fmtFail(c, "regex", rc.msg); fail = true; } } break; }
+        default: {
+          if (isStr && !STR_FMT[rc.code]?.(v as string)) { fmtFail(c, STR_NAMES[rc.code] ?? "format", rc.msg); fail = true; }
+        }
+      }
+    } finally { r.pos = save; }
+  }
+  return !fail;
+}
+
+function fmtFail(c: Ctx, validation: string, msg?: string) {
+  pushIssue(c, "invalid_string", { validation, ...(msg ? { message: msg } : {}) });
+}
+
+function checkParamEnd(r: R, code: number, str_: boolean): number {
+  const save = r.pos;
+  if (str_) {
+    if (code === 0x01 || code === 0x02 || code === 0x03) { r.pos += 8; }
+    else if (code === 0x05) { r.pos += 1; }
+    else if (code === 0x07 || code === 0x08 || code === 0x09) { r.pos += 8 + Number(r.u64()); }
+    else if (code === 0x0a) { r.pos += 8; }
+  } else {
+    if (code >= 0x01 && code <= 0x04 || code === 0x07) { r.pos += 8; }
+  }
+  const end = r.pos; r.pos = save; return end;
+}
+
+const STR_NAMES: Record<number, string> = {
+  0x04: "email", 0x05: "uuid", 0x06: "url", 0x0b: "lowercase", 0x0c: "uppercase",
+  0x0d: "ipv4", 0x0e: "ipv6", 0x0f: "ulid", 0x10: "nanoid", 0x11: "cuid2",
+  0x12: "base64", 0x13: "hex", 0x14: "datetime", 0x15: "date", 0x16: "time",
+};
+// format validators — regexes lifted verbatim from zod@4 (v4/core/regexes.js)
+const Z_DATE = /^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))$/;
+const Z_TIME = /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?$/;
+const Z_DATETIME = /^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|(?:[+-](?:[01]\d|2[0-3]):[0-5]\d)))$/;
+const STR_FMT: Record<number, (s: string) => boolean> = {
+  0x04: (s) => /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/.test(s),
+  0x05: (s) => /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/.test(s),
+  0x06: (s) => { try { const u = new URL(s); return !!u.hostname; } catch { return false; } },
+  0x0b: (s) => s === s.toLowerCase(),
+  0x0c: (s) => s === s.toUpperCase(),
+  0x0d: (s) => /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/.test(s),
+  0x0e: (s) => /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/.test(s),
+  0x0f: (s) => /^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/.test(s),
+  0x10: (s) => /^[a-zA-Z0-9_-]{21}$/.test(s),
+  0x11: (s) => /^[0-9a-z]+$/.test(s),
+  0x12: (s) => /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/.test(s),
+  0x13: (s) => /^(0x)?[0-9a-fA-F]+$/.test(s),
+  0x14: (s) => Z_DATETIME.test(s),
+  0x15: (s) => Z_DATE.test(s),
+  0x16: (s) => Z_TIME.test(s),
+};
+
+function runNumChecks(r: R, v: number | bigint, isBig: boolean, c: Ctx): boolean {
+  const n = r.u8();
+  let fail = false;
+  for (let i = 0; i < n; i++) {
+    const code = r.u8(); const msg = msgOf(r);
+    switch (code) {
+      case 0x01: { const p = isBig ? r.i64() : r.f64(); if (!(v > (p as any))) { sizeFail(c, "too_small", isBig ? "bigint" : "number", BigInt(p as any), false, false, msg); fail = true; } break; }
+      case 0x02: { const p = isBig ? r.i64() : r.f64(); if (!(v >= (p as any))) { sizeFail(c, "too_small", isBig ? "bigint" : "number", BigInt(p as any), true, false, msg); fail = true; } break; }
+      case 0x03: { const p = isBig ? r.i64() : r.f64(); if (!(v < (p as any))) { sizeFail(c, "too_big", isBig ? "bigint" : "number", BigInt(p as any), false, false, msg); fail = true; } break; }
+      case 0x04: { const p = isBig ? r.i64() : r.f64(); if (!(v <= (p as any))) { sizeFail(c, "too_big", isBig ? "bigint" : "number", BigInt(p as any), true, false, msg); fail = true; } break; }
+      case 0x05: {
+        const ok = isBig || Number.isInteger(v as number);
+        if (!ok) { pushIssue(c, "invalid_type", { expected: "int", ...(msg ? { message: msg } : {}) }); fail = true; }
+        break;
+      }
+      case 0x06: {
+        if (!isBig && !Number.isFinite(v as number)) { pushIssue(c, "not_finite", { ...(msg ? { message: msg } : {}) }); fail = true; }
+        break;
+      }
+      case 0x07: { const p = isBig ? r.i64() : r.f64(); if ((v as any) % (p as any) !== (isBig ? 0n : 0)) { pushIssue(c, "not_multiple_of", { divisor: BigInt(p as any), ...(msg ? { message: msg } : {}) }); fail = true; } break; }
+      case 0x08: {
+        const nonInt = !isBig && !Number.isInteger(v as number);
+        const ok = nonInt ? false : isBig
+          ? (v as bigint) >= BigInt(Number.MIN_SAFE_INTEGER) && (v as bigint) <= BigInt(Number.MAX_SAFE_INTEGER)
+          : Number.isSafeInteger(v as number);
+        if (!ok && nonInt) {
+          pushIssue(c, "invalid_type", { expected: "int", ...(msg ? { message: msg } : {}) });
+          fail = true;
+        } else if (!ok) {
+          const over = isBig ? (v as bigint) > 0n : (v as number) > 0;
+          const lim = over ? Number.MAX_SAFE_INTEGER : Number.MIN_SAFE_INTEGER;
+          pushIssue(c, over ? "too_big" : "too_small", {
+            type: "int", [over ? "maximum" : "minimum"]: lim, inclusive: true, ...(msg ? { message: msg } : {}) });
+          fail = true;
+        }
+        break;
+      }
+    }
+  }
+  return !fail;
+}
+
+// ---- main validator: node offset -> validated output or issue accumulation ----
+// success: returns output value. failure: pushes issues, returns undefined.
+
+function validate(r: R, v: unknown, c: Ctx): unknown {
+  const node = r.pos;
+  const op = r.u8();
+  switch (op) {
+    case 0x01: { // string
+      const isStr = typeof v === "string";
+      if (!isStr) pushIssue(c, "invalid_type", { expected: "string", received: typeName(v) });
+      if (!runStrChecks(r, v, c) || !isStr) throw FAILED;
+      return v;
+    }
+    case 0x02: { // number
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        pushIssue(c, "invalid_type", { expected: "number", received: typeName(v) });
+        throw FAILED;
+      }
+      if (!runNumChecks(r, v as number, false, c)) throw FAILED;
+      return v;
+    }
+    case 0x03: { // boolean
+      if (typeof v !== "boolean") { pushIssue(c, "invalid_type", { expected: "boolean", received: typeName(v) }); throw FAILED; }
+      return v;
+    }
+    case 0x04: { // bigint
+      if (typeof v !== "bigint") { pushIssue(c, "invalid_type", { expected: "bigint", received: typeName(v) }); throw FAILED; }
+      if (!runNumChecks(r, v as bigint, true, c)) throw FAILED;
+      return v;
+    }
+    case 0x05: { // object
+      const mode = r.u8();
+      const catchallPos = r.pos; const catchallOff = r.i64();
+      const nf = Number(r.u64());
+      const fields: { name: string; pos: number }[] = [];
+      for (let i = 0; i < nf; i++) {
+        const nl = Number(r.u64()); const name = r.str(nl);
+        const fp = r.pos; fields.push({ name, pos: fp + Number(r.i64()) });
+      }
+      // hostrefs that are objects (Date/Map/Set/classes) -> treated as empty
+      // objects; functions/symbols/primitives -> invalid_type
+      const objectLike = v !== null && typeof v === "object" && !Array.isArray(v);
+      if (!objectLike) { pushIssue(c, "invalid_type", { expected: "object", received: typeName(v) }); throw FAILED; }
+      const obj = v as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      const before = c.issues.length;
+      const consumed = new Set<string>();
+      for (const f of fields) {
+        consumed.add(f.name);
+        const raw = obj[f.name];
+        const res = atKey(c, f.name, () => tryValidate(new R(r.b, f.pos), raw, c));
+        if (res.ok) out[f.name] = res.value;
+      }
+      const extra = Object.keys(obj).filter((k) => !consumed.has(k));
+      if (mode === 1 && extra.length) {
+        pushIssue(c, "unrecognized_keys", { keys: extra });
+      } else if (mode === 2) {
+        for (const k of extra) out[k] = obj[k];
+      } else if (catchallOff !== 0n) {
+        const cpos = catchallPos + Number(catchallOff);
+        for (const k of extra) {
+          const res = atKey(c, k, () => tryValidate(new R(r.b, cpos), obj[k], c));
+          if (res.ok) out[k] = res.value;
+        }
+      }
+      if (c.issues.length !== before) throw FAILED;
+      return out;
+    }
+    case 0x06: { // array — layout: elemoff | min | max
+      const ep = r.pos; const epos = ep + Number(r.i64());
+      const min = r.i64(); const max = r.i64();
+      if (!Array.isArray(v)) {
+        pushIssue(c, "invalid_type", { expected: "array", received: typeName(v) });
+        // uniform .length semantics: size checks still run on the input's length
+        const alen = inputLen(v);
+        if (alen >= 0) {
+          if (min !== -1n && BigInt(alen) < min) sizeFail(c, "too_small", "array", min, true, min === max, undefined);
+          if (max !== -1n && BigInt(alen) > max) sizeFail(c, "too_big", "array", max, true, min === max, undefined);
+        }
+        throw FAILED;
+      }
+      const before = c.issues.length;
+      if (min !== -1n && BigInt(v.length) < min) sizeFail(c, "too_small", "array", min, true, min === max, undefined);
+      if (max !== -1n && BigInt(v.length) > max) sizeFail(c, "too_big", "array", max, true, min === max, undefined);
+      const out: unknown[] = new Array(v.length);
+      for (let i = 0; i < v.length; i++) {
+        const res = atKey(c, i, () => tryValidate(new R(r.b, epos), v[i], c));
+        if (res.ok) out[i] = res.value;
+      }
+      if (c.issues.length !== before) throw FAILED;
+      return out;
+    }
+    case 0x07: { // union — engine always emits invalid_union; TS layer refines
+      const n = Number(r.u64());
+      const offs: number[] = [];
+      for (let i = 0; i < n; i++) { const fp = r.pos; offs.push(fp + Number(r.i64())); }
+      for (const p of offs) {
+        const save = c.issues.length;
+        const rr = new R(r.b); rr.pos = p;
+        const res = tryValidate(rr, v, c);
+        if (res.ok) { c.issues.length = save; return res.value; }
+        c.issues.length = save;
+      }
+      pushIssue(c, "invalid_union", {});
+      throw FAILED;
+    }
+    case 0x08: { // discriminated union
+      const dl = Number(r.u64()); const dname = r.str(dl);
+      const n = Number(r.u64());
+      const entries: { key: string; pos: number }[] = [];
+      for (let i = 0; i < n; i++) { const kl = Number(r.u64()); const key = r.str(kl); const fp = r.pos; entries.push({ key, pos: fp + Number(r.i64()) }); }
+      const dv = (v as any)?.[dname];
+      if (typeof v !== "object" || v === null || Array.isArray(v) || !(typeof dv === "string" || typeof dv === "number" || typeof dv === "boolean" || dv === null || dv === undefined)) {
+        pushIssue(c, "invalid_union", {});
+        throw FAILED;
+      }
+      const e = entries.find((x) => x.key === String(dv));
+      if (!e) {
+        atKey(c, dname, () => pushIssue(c, "invalid_union", {}));
+        throw FAILED;
+      }
+      const rr = new R(r.b); rr.pos = e.pos;
+      return validate(rr, v, c);
+    }
+    case 0x09: { // literal
+      const lv = decodeValue(r, c.hosts);
+      if (!literalEq(v, lv)) { pushIssue(c, "invalid_literal", { expected: lv }); throw FAILED; }
+      return v;
+    }
+    case 0x0a: { // enum
+      const n = Number(r.u64()); const vals: string[] = [];
+      for (let i = 0; i < n; i++) vals.push(r.str(Number(r.u64())));
+      if (typeof v !== "string" || !vals.includes(v)) { pushIssue(c, "invalid_enum_value", {}); throw FAILED; }
+      return v;
+    }
+    case 0x0b: { // optional
+      const fp = r.pos; const ip = fp + Number(r.i64());
+      if (v === undefined) return undefined;
+      const rr = new R(r.b); rr.pos = ip; return validate(rr, v, c);
+    }
+    case 0x0c: { // nullable
+      const fp = r.pos; const ip = fp + Number(r.i64());
+      if (v === null) return null;
+      const rr = new R(r.b); rr.pos = ip; return validate(rr, v, c);
+    }
+    case 0x0d: { // default — layout: inneroff | tagged value
+      const fp = r.pos; const ip = fp + Number(r.i64());
+      const dv = decodeValue(r, c.hosts);
+      if (v === undefined) return dv;
+      const rr = new R(r.b); rr.pos = ip; return validate(rr, v, c);
+    }
+    case 0x0e: { // catch — same layout
+      const fp = r.pos; const ip = fp + Number(r.i64());
+      const cv = decodeValue(r, c.hosts);
+      const rr = new R(r.b); rr.pos = ip;
+      const save = c.issues.length;
+      const res = tryValidate(rr, v, c);
+      if (res.ok) return res.value;
+      c.issues.length = save;
+      return cv;
+    }
+    case 0x0f: { // refine — layout: inneroff | cbid
+      const fp = r.pos; const ip = fp + Number(r.i64()); const id = Number(r.u64());
+      const rr = new R(r.b); rr.pos = ip;
+      const inner = validate(rr, v, c);
+      let ok = false;
+      try { ok = !!reg.refine[id](inner); } catch (e) { c.pendingThrow = e; }
+      if (!ok) { pushIssue(c, "custom", {}); throw FAILED; }
+      return inner;
+    }
+    case 0x10: { // transform — layout: inneroff | cbid
+      const fp = r.pos; const ip = fp + Number(r.i64()); const id = Number(r.u64());
+      const rr = new R(r.b); rr.pos = ip;
+      const inner = validate(rr, v, c);
+      try { return reg.transform[id](inner); } catch (e) { c.pendingThrow = e; throw FAILED; }
+    }
+    case 0x11: { // pipe
+      const fi = r.pos; const ip = fi + Number(r.i64());
+      const fo = r.pos; const opos = fo + Number(r.i64());
+      const rr = new R(r.b); rr.pos = ip;
+      const mid = validate(rr, v, c);
+      const rr2 = new R(r.b); rr2.pos = opos;
+      return validate(rr2, mid, c);
+    }
+    case 0x12: { // intersection
+      const fl = r.pos; const lp = fl + Number(r.i64());
+      const fr = r.pos; const rp = fr + Number(r.i64());
+      const save = c.issues.length;
+      const rl = tryValidate(new R(r.b, lp), v, c);
+      const rr = tryValidate(new R(r.b, rp), v, c);
+      if (!rl.ok || !rr.ok) throw FAILED;
+      c.issues.length = save;
+      const a = rl.value, b = rr.value;
+      if (a && b && typeof a === "object" && typeof b === "object" && !Array.isArray(a) && !Array.isArray(b)) {
+        return { ...(a as object), ...(b as object) };
+      }
+      if (Array.isArray(a) && Array.isArray(b)) return a;
+      if (literalEq(a, b)) return a;
+      pushIssue(c, "invalid_intersection_results", {});
+      throw FAILED;
+    }
+    case 0x13: { // tuple
+      const n = Number(r.u64());
+      const ips: number[] = [];
+      for (let i = 0; i < n; i++) { const fp = r.pos; ips.push(fp + Number(r.i64())); }
+      const rf = r.pos; const restRel = r.i64(); const restPos = rf + Number(restRel);
+      const items = Array.isArray(v) ? v : null;
+      if (!items) { pushIssue(c, "invalid_type", { expected: "array", received: typeName(v) }); throw FAILED; }
+      const before = c.issues.length;
+      if (restRel === 0n) {
+        if (items.length < n) sizeFail(c, "too_small", "array", BigInt(n), true, true, undefined);
+        else if (items.length > n) sizeFail(c, "too_big", "array", BigInt(n), true, true, undefined);
+      }
+      const eff = restRel !== 0n ? Math.max(items.length, n) : Math.min(items.length, n);
+      const out: unknown[] = [];
+      for (let i = 0; i < eff; i++) {
+        const res = atKey(c, i, () =>
+          tryValidate(new R(r.b, i < n ? ips[i] : restPos), items[i], c));
+        out[i] = res.ok ? res.value : items[i];
+      }
+      for (let i = eff; i < items.length; i++) out[i] = items[i];
+      if (c.issues.length !== before) throw FAILED;
+      return out;
+    }
+    case 0x14: { // record
+      const fk = r.pos; const kp = fk + Number(r.i64());
+      const fv = r.pos; const vp = fv + Number(r.i64());
+      if (typeof v !== "object" || v === null || Array.isArray(v) || !isPlain(v)) {
+        pushIssue(c, "invalid_type", { expected: "object", received: typeName(v) }); throw FAILED;
+      }
+      const before = c.issues.length;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v)) {
+        const save = c.issues.length;
+        if (kp !== fk) { // key schema present (kp==fk only if offset 0 — actually check)
+          const rr = new R(r.b); rr.pos = kp;
+          const kr = tryValidate(rr, k, c);
+          if (!kr.ok) { c.issues.length = save; pushIssue(c, "invalid_key", {}); continue; }
+          c.issues.length = save;
+        }
+        const res = atKey(c, k, () => tryValidate(new R(r.b, vp), (v as any)[k], c));
+        if (res.ok) out[k] = res.value;
+      }
+      if (c.issues.length !== before) throw FAILED;
+      return out;
+    }
+    case 0x15: return v; // any/unknown
+    case 0x16: pushIssue(c, "invalid_type", { expected: "never", received: typeName(v) }); throw FAILED;
+    case 0x17: if (v === null) return null; pushIssue(c, "invalid_type", { expected: "null", received: typeName(v) }); throw FAILED;
+    case 0x18: if (v === undefined) return undefined; pushIssue(c, "invalid_type", { expected: "undefined", received: typeName(v) }); throw FAILED;
+    case 0x19: if (typeof v === "number" && Number.isNaN(v)) return v; pushIssue(c, "invalid_type", { expected: "nan", received: typeName(v) }); throw FAILED;
+    case 0x1a: { // lazy — reg returns a compiled blob
+      const id = Number(r.u64());
+      const blob = reg.lazy[id]();
+      const rr = new R(blob);
+      return validate(rr, v, c);
+    }
+    case 0x1b: { // instanceof
+      const id = Number(r.u64()); const nl = Number(r.u64()); const name = r.str(nl);
+      const Ctor = reg.ctor[id];
+      if (!(v instanceof Ctor)) { pushIssue(c, "invalid_type", { expected: name, received: typeName(v) }); throw FAILED; }
+      return v;
+    }
+    case 0x1c: return coerceTo(r, v, c, 1); // string
+    case 0x1d: return coerceTo(r, v, c, 2); // number
+    case 0x1e: return coerceTo(r, v, c, 3); // boolean
+    case 0x1f: return coerceTo(r, v, c, 4); // bigint
+    case 0x20: { // date
+      const t = v instanceof Date ? v.getTime() : NaN;
+      if (!(v instanceof Date) || Number.isNaN(t)) {
+        pushIssue(c, "invalid_type", { expected: "date", received: typeName(v) }); throw FAILED;
+      }
+      const nc = r.u8();
+      let fail = false;
+      for (let i = 0; i < nc; i++) {
+        const kind = r.u8(); const msg = msgOf(r); const p = r.f64();
+        if (kind === 1 && t < p) { pushIssue(c, "too_small", { type: "date", minimum: p, inclusive: true, ...(msg ? { message: msg } : {}) }); fail = true; }
+        if (kind === 2 && t > p) { pushIssue(c, "too_big", { type: "date", maximum: p, inclusive: true, ...(msg ? { message: msg } : {}) }); fail = true; }
+      }
+      if (fail) throw FAILED;
+      return v;
+    }
+    case 0x21: { // symbol
+      if (typeof v !== "symbol") { pushIssue(c, "invalid_type", { expected: "symbol", received: typeName(v) }); throw FAILED; }
+      return v;
+    }
+    case 0x22: { // custom
+      const id = Number(r.u64()); const msg = msgOf(r);
+      let ok = false;
+      try { ok = reg.custom[id](v); } catch (e) { c.pendingThrow = e; }
+      if (!ok) { pushIssue(c, "custom", msg ? { message: msg } : {}); throw FAILED; }
+      return v;
+    }
+    default:
+      throw new Error(`asmzod: bad opcode 0x${op.toString(16)} at ${node}`);
+  }
+}
+
+const FAILED = Symbol("asmzod.fail");
+
+// validate that swallows FAILED — used for union arms, catch, intersect
+function tryValidate(r: R, v: unknown, c: Ctx): { ok: true; value: unknown } | { ok: false } {
+  const save = c.issues.length;
+  try {
+    const out = validate(r, v, c);
+    return { ok: true, value: out };
+  } catch (e) {
+    if (e === FAILED) return { ok: false };
+    throw e;
+  }
+}
+
+function literalEq(a: unknown, b: unknown): boolean {
+  if (typeof a === "bigint" || typeof b === "bigint") return a === b;
+  if (typeof a === "number" && typeof b === "number") {
+    if (Number.isNaN(a) && Number.isNaN(b)) return true;
+  }
+  return a === b;
+}
+
+function isPlain(v: object): boolean {
+  const p = Object.getPrototypeOf(v);
+  return p === Object.prototype || p === null;
+}
+
+// coerce hostref/primitive -> target primitive, then validate inner node
+function coerceTo(r: R, v: unknown, c: Ctx, target: 1 | 2 | 3 | 4): unknown {
+  const fp = r.pos; const ip = fp + Number(r.i64());
+  let out: unknown;
+  try {
+    if (target === 1) out = typeof v === "symbol" ? (() => { throw new Error("no") })() : String(v);
+    else if (target === 2) out = Number(v);
+    else if (target === 3) out = Boolean(v);
+    else out = BigInt(v as any);
+  } catch { throw FAILED; }
+  if (target === 2 && typeof out === "number" && Number.isNaN(out)) {
+    // Number(symbol/bigint-garbage) can throw; NaN falls through to inner
+    // which emits invalid_type — same as the asm path
+  }
+  const rr = new R(r.b); rr.pos = ip;
+  return validate(rr, out, c);
+}
+
+// export the raw issue codes the shared normalizer expects
+export { TYPE_FAIL_CODES };

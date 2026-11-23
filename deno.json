@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    "test": "deno test --no-check deno/deno.test.ts",
+    "smoke": "deno run --no-check test/smoke.ts"
+  }
+}

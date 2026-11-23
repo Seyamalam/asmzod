@@ -5,13 +5,13 @@ import {
   ZodArray, ZodTuple, ZodRecord, ZodUnion, ZodDiscriminatedUnion,
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
-  ZodBranded, ZodType, ZodTypeAny, type ZodRawShape,
-} from "./schema";
-import { reg, regId } from "./ffi";
+  ZodBranded, ZodMap, ZodSet, ZodType, type ZodTypeAny, type ZodRawShape,
+} from "./schema.ts";
+import { reg, regId } from "./ffi.ts";
 
-export * from "./schema";
-export * from "./error";
-export { engineVersion } from "./ffi";
+export * from "./schema.ts";
+export * from "./error.ts";
+export { engineVersion, engineBackend } from "./ffi.ts";
 
 export const z = {
   string: () => new ZodString(),
@@ -44,6 +44,10 @@ export const z = {
     <V extends ZodTypeAny>(value: V): ZodRecord<ZodString, V>;
     <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V): ZodRecord<K, V>;
   },
+  map: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V) =>
+    new ZodMap<K, V>({ type: "map", keyType: key, valueType: value }),
+  set: <V extends ZodTypeAny>(value: V) =>
+    new ZodSet<V>({ type: "set", valueType: value }),
 
   union: <T extends ZodTypeAny[]>(options: [...T]) =>
     new ZodUnion<T>({ type: "union", options }),
@@ -109,15 +113,15 @@ export const z = {
 };
 
 // attach the real class
-import { ZodError } from "./error";
+import { ZodError } from "./error.ts";
 (z as any).ZodError = ZodError;
 
 export default z;
-export type { ZodType } from "./schema";
+export type { ZodType } from "./schema.ts";
 export type infer<T extends ZodType<any, any>> = T["_output"];
 export type input<T extends ZodType<any, any>> = T["_input"];
 export type output<T extends ZodType<any, any>> = T["_output"];
-export namespace z {
+export declare namespace z {
   export type infer<T extends ZodType<any, any>> = T["_output"];
   export type input<T extends ZodType<any, any>> = T["_input"];
   export type output<T extends ZodType<any, any>> = T["_output"];

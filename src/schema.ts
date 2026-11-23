@@ -1,8 +1,8 @@
 // schema.ts — schema classes + chaining API (zod3-compatible surface)
-import { compile, type Compiled } from "./bytecode";
-import { engineParse, reg, regId } from "./ffi";
-import { encodeValue, type HostTable } from "./codec";
-import { ZodError, type ZodIssue } from "./error";
+import { compile, type Compiled } from "./bytecode.ts";
+import { engineParse, reg, regId } from "./ffi.ts";
+import { encodeValue, type HostTable } from "./codec.ts";
+import { ZodError, type ZodIssue } from "./error.ts";
 
 export type ParsePath = (string | number)[];
 export interface SafeParseSuccess<T> { success: true; data: T }
@@ -20,7 +20,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return (this._compiled ??= compile(this));
   }
 
-  private _run(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
+  protected _run(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const c = this._compile();
     const hosts: HostTable = [...c.hosts];
     const input = encodeValue(data, hosts);
@@ -111,14 +111,15 @@ export abstract class ZodType<Output = unknown, Input = Output> {
 }
 
 class ZodIssueThrow extends Error {
-  constructor(public issue: any) { super(issue.message ?? "invalid"); }
+  issue: any;
+  constructor(issue: any) { super(issue.message ?? "invalid"); this.issue = issue; }
 }
 
 export type ZodTypeAny = ZodType<any, any>;
 
 // ---------- primitives ----------
 export class ZodString extends ZodType<string> {
-  constructor(public _def: any = { type: "string", checks: [] }) { super(); }
+  constructor(_def: any = { type: "string", checks: [] }) { super(); this._def = _def; }
   private _check(c: any) { return new ZodString({ ...this._def, checks: [...this._def.checks, c] }); }
   min(n: number, message?: string) { return this._check({ kind: "min", value: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "max", value: n, message }); }
@@ -151,7 +152,7 @@ export class ZodString extends ZodType<string> {
 }
 
 export class ZodNumber extends ZodType<number> {
-  constructor(public _def: any = { type: "number", checks: [] }) { super(); }
+  constructor(_def: any = { type: "number", checks: [] }) { super(); this._def = _def; }
   private _check(c: any) { return new ZodNumber({ ...this._def, checks: [...this._def.checks, c] }); }
   gt(n: number, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -171,7 +172,7 @@ export class ZodNumber extends ZodType<number> {
 }
 
 export class ZodBigInt extends ZodType<bigint> {
-  constructor(public _def: any = { type: "bigint", checks: [] }) { super(); }
+  constructor(_def: any = { type: "bigint", checks: [] }) { super(); this._def = _def; }
   private _check(c: any) { return new ZodBigInt({ ...this._def, checks: [...this._def.checks, c] }); }
   gt(n: bigint, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -187,35 +188,35 @@ export class ZodBigInt extends ZodType<bigint> {
 }
 
 export class ZodBoolean extends ZodType<boolean> {
-  constructor(public _def: any = { type: "boolean" }) { super(); }
+  constructor(_def: any = { type: "boolean" }) { super(); this._def = _def; }
 }
 export class ZodAny extends ZodType<any> {
-  constructor(public _def: any = { type: "any" }) { super(); }
+  constructor(_def: any = { type: "any" }) { super(); this._def = _def; }
 }
 export class ZodUnknown extends ZodType<unknown> {
-  constructor(public _def: any = { type: "unknown" }) { super(); }
+  constructor(_def: any = { type: "unknown" }) { super(); this._def = _def; }
 }
 export class ZodNever extends ZodType<never> {
-  constructor(public _def: any = { type: "never" }) { super(); }
+  constructor(_def: any = { type: "never" }) { super(); this._def = _def; }
 }
 export class ZodNull extends ZodType<null> {
-  constructor(public _def: any = { type: "null" }) { super(); }
+  constructor(_def: any = { type: "null" }) { super(); this._def = _def; }
 }
 export class ZodUndefined extends ZodType<undefined> {
-  constructor(public _def: any = { type: "undefined" }) { super(); }
+  constructor(_def: any = { type: "undefined" }) { super(); this._def = _def; }
 }
 export class ZodVoid extends ZodType<void> {
-  constructor(public _def: any = { type: "void" }) { super(); }
+  constructor(_def: any = { type: "void" }) { super(); this._def = _def; }
 }
 export class ZodNaN extends ZodType<number> {
-  constructor(public _def: any = { type: "nan" }) { super(); }
+  constructor(_def: any = { type: "nan" }) { super(); this._def = _def; }
 }
 export class ZodSymbol extends ZodType<symbol> {
-  constructor(public _def: any = { type: "symbol" }) { super(); }
+  constructor(_def: any = { type: "symbol" }) { super(); this._def = _def; }
 }
 
 export class ZodDate extends ZodType<Date> {
-  constructor(public _def: any = { type: "date", checks: [] }) { super(); }
+  constructor(_def: any = { type: "date", checks: [] }) { super(); this._def = _def; }
   private _check(c: any) { return new ZodDate({ ...this._def, checks: [...this._def.checks, c] }); }
   min(d: Date, message?: string) { return this._check({ kind: "min", value: d.getTime(), message }); }
   max(d: Date, message?: string) { return this._check({ kind: "max", value: d.getTime(), message }); }
@@ -223,38 +224,38 @@ export class ZodDate extends ZodType<Date> {
 
 // ---------- wrappers ----------
 export class ZodOptional<T extends ZodTypeAny> extends ZodType<T["_output"] | undefined, T["_input"] | undefined> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
 }
 export class ZodNullable<T extends ZodTypeAny> extends ZodType<T["_output"] | null, T["_input"] | null> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
 }
 export class ZodDefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"] | undefined> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   removeDefault() { return this._def.inner as T; }
 }
 export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   removeCatch() { return this._def.inner as T; }
 }
 export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<N, T["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   innerType() { return this._def.inner as T; }
   sourceType() { return this._def.inner as T; }
 }
 export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<B["_output"], A["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
 }
 export class ZodBranded<T extends ZodTypeAny, B extends string> extends ZodType<T["_output"] & { __brand: B }, T["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
 }
 
 // ---------- composites ----------
 export type ZodRawShape = { [k: string]: ZodTypeAny };
 
 export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T>, objectInputType<T>> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   get shape(): T { return this._def.shape; }
   strict() { return new ZodObject({ ...this._def, mode: "strict" }); }
   strip() { return new ZodObject({ ...this._def, mode: "strip" }); }
@@ -292,7 +293,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
 }
 
 export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_input"][]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   get element(): T { return this._def.element; }
   min(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, _minMsg: message }); }
   max(n: number, message?: string) { return new ZodArray({ ...this._def, maxLen: n, _maxMsg: message }); }
@@ -301,37 +302,138 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
 }
 
 export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType<{ [k in keyof Items]: Items[k]["_output"] }> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   rest<R extends ZodTypeAny>(r: R) {
     return new ZodTuple({ ...this._def, rest: r }) as ZodTuple<[...Items, ...R[]]>;
   }
 }
 
 export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodType<Record<string, V["_output"]>> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
+}
+
+// Map/Set: the container walk is JS (can't enumerate a Map in machine
+// code), but every key/value still validates through the ARM64 engine.
+function typeIssue(expected: string, received: unknown): ZodIssue {
+  return {
+    code: "invalid_type",
+    path: [],
+    expected,
+    message: `Invalid input: expected ${expected}, received ${typeof received}`,
+  } as ZodIssue;
+}
+
+export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
+  extends ZodType<Map<K["_output"], V["_output"]>, Map<K["_input"], V["_input"]>> {
+  constructor(_def: any) { super(); this._def = _def; }
+
+  protected override _run(data: unknown) {
+    if (!(data instanceof Map)) return { ok: false as const, issues: [typeIssue("map", data)] };
+    const { keyType, valueType } = this._def as { keyType: ZodTypeAny; valueType: ZodTypeAny };
+    const out = new Map();
+    const issues: ZodIssue[] = [];
+    for (const [k, v] of data) {
+      const kr = keyType._run(k);
+      const vr = valueType._run(v);
+      if (!kr.ok) issues.push(...kr.issues.map((i) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+      if (!vr.ok) issues.push(...vr.issues.map((i) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+      if (kr.ok && vr.ok) out.set(kr.value, vr.value);
+    }
+    return issues.length ? { ok: false as const, issues } : { ok: true as const, value: out };
+  }
+}
+
+export class ZodSet<V extends ZodTypeAny>
+  extends ZodType<Set<V["_output"]>, Set<V["_input"]>> {
+  constructor(_def: any) { super(); this._def = _def; }
+
+  protected override _run(data: unknown) {
+    if (!(data instanceof Set)) return { ok: false as const, issues: [typeIssue("set", data)] };
+    const { valueType } = this._def as { valueType: ZodTypeAny };
+    const out = new Set();
+    const issues: ZodIssue[] = [];
+    for (const v of data) {
+      const r = valueType._run(v);
+      if (r.ok) out.add(r.value);
+      else issues.push(...r.issues);
+    }
+    return issues.length ? { ok: false as const, issues } : { ok: true as const, value: out };
+  }
 }
 
 export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   get options(): T { return this._def.options; }
+
+  override parse(data: unknown): T[number]["_output"] {
+    const r = this._run(data);
+    if (!r.ok) { this._resolve(r.issues, data); throw new ZodError(r.issues); }
+    return r.value as T[number]["_output"];
+  }
+  override safeParse(data: unknown): SafeParseResult<T[number]["_output"]> {
+    const r = this._run(data);
+    if (r.ok) return { success: true, data: r.value as T[number]["_output"] };
+    this._resolve(r.issues, data);
+    return { success: false, error: new ZodError(r.issues) };
+  }
+  // zod 4 best-match: exactly one option that got past its type check
+  // (no invalid_type/invalid_value issues) -> surface its issues directly;
+  // otherwise -> invalid_union carrying per-option errors arrays.
+  private _resolve(issues: ZodIssue[], data: unknown): void {
+    const runs = this._def.options.map((o: ZodTypeAny) => o._run(data));
+    const candidates = runs.filter(
+      (r): r is { ok: false; issues: ZodIssue[] } =>
+        !r.ok && !r.issues.some((i) => i.code === "invalid_type" || i.code === "invalid_value"));
+    if (candidates.length === 1) {
+      issues.splice(0, issues.length, ...candidates[0].issues);
+      return;
+    }
+    for (const i of issues) {
+      if (i.code === "invalid_union" && (i as any).errors === undefined) {
+        (i as any).errors = runs.map((r) => (r.ok ? [] : r.issues));
+      }
+    }
+  }
 }
 
 export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   get options(): T { return [...this._def.optionsMap.values()] as T; }
+
+  override parse(data: unknown): T[number]["_output"] {
+    const r = this._run(data);
+    if (!r.ok) { this._attachFields(r.issues); throw new ZodError(r.issues); }
+    return r.value as T[number]["_output"];
+  }
+  override safeParse(data: unknown): SafeParseResult<T[number]["_output"]> {
+    const r = this._run(data);
+    if (r.ok) return { success: true, data: r.value as T[number]["_output"] };
+    this._attachFields(r.issues);
+    return { success: false, error: new ZodError(r.issues) };
+  }
+  private _attachFields(issues: ZodIssue[]): void {
+    for (const i of issues) {
+      if (i.code === "invalid_union" && (i as any).errors === undefined) {
+        (i as any).errors = [];
+        (i as any).note = "No matching discriminator";
+        (i as any).discriminator = this._def.disc;
+        (i as any).options = [...this._def.optionsMap.keys()];
+      }
+    }
+  }
 }
 
 export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<A["_output"] & B["_output"], A["_input"] & B["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
 }
 
 export class ZodLiteral<T> extends ZodType<T> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   get value(): T { return this._def.value; }
 }
 
 export class ZodEnum<T extends string = string> extends ZodType<T> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   get options(): T[] { return this._def.values; }
   get enum(): Record<T, T> {
     return Object.fromEntries(this._def.values.map((v: string) => [v, v]));
@@ -345,16 +447,16 @@ export class ZodEnum<T extends string = string> extends ZodType<T> {
 }
 
 export class ZodLazy<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
   get schema(): T { return this._def.getter(); }
 }
 
 export class ZodInstanceof<T> extends ZodType<T> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
 }
 
 export class ZodCustom<T> extends ZodType<T> {
-  constructor(public _def: any) { super(); }
+  constructor(_def: any) { super(); this._def = _def; }
 }
 
 // ---------- type machinery ----------
