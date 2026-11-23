@@ -22,7 +22,7 @@ _az_validate:
     mov x27, x0
     mov x28, x1
     ldrb w9, [x27]
-    cmp w9, #0x22
+    cmp w9, #0x23
     b.hi .Lv_badop
     AZ_ADR x10, .Lv_jt
     ldr x11, [x10, x9, lsl #3]
@@ -59,7 +59,7 @@ _az_validate:
     ldr x10, [x9]
     add x27, x9, x10
     ldrb w9, [x27]
-    cmp w9, #0x22
+    cmp w9, #0x23
     b.hi .Lv_badop
     AZ_ADR x10, .Lv_jt
     ldr x11, [x10, x9, lsl #3]
@@ -352,27 +352,10 @@ _az_vtype:
 .Llit_ok:
     b .Lv_pass
 .Llit_fail:
-    // invalid_literal {expected: rawval} msg "Invalid literal value, expected R"
-    // build msg into stack buf (sp+64, cap 56+repr)
-    add x10, sp, #64
-    AZ_ADR x11, .Lm_litpre
-    mov x12, #33
-.Llit_m1:
-    ldrb w13, [x11], #1
-    strb w13, [x10], #1
-    subs x12, x12, #1
-    b.ne .Llit_m1
-    add x0, x27, #1
-    mov x1, x10
-    str x10, [sp, #480]
-    bl _az_lit_repr
-    ldr x10, [sp, #480]
-    add x10, x10, x0
-    add x6, sp, #64
-    sub x7, x10, x6
+    // invalid_literal {expected: rawval} — msg supplied by TS normalizer
     mov x0, #1                 // invalid_literal
-    mov x1, x6
-    mov x2, x7
+    mov x1, #0
+    mov x2, #0
     bl _az_issue_begin
     cbnz x0, .Lv_ret
     // field expected: rawval = embedded value bytes
@@ -425,76 +408,10 @@ _az_vtype:
     b .Lv_passn
 .Len_fail:
     // invalid_enum_value {received: rawval, options: strseq}
-    // msg: "Invalid enum value. Expected 'a' | 'b', received 'x'"
-    // build joined options+received into buf at sp+40 (cap ~80)
-    add x10, sp, #40
-    AZ_ADR x11, .Lm_enpre
-    mov x12, #30
-.Len_m1:
-    ldrb w13, [x11], #1
-    strb w13, [x10], #1
-    subs x12, x12, #1
-    b.ne .Len_m1
-    // join options: entries at x27+9, count [x27+1]
-    ldr x13, [x27, #1]
-    add x14, x27, #9
-    mov x15, #0
-.Len_j:
-    cbz x13, .Len_jd
-    cbz x15, .Len_j1
-    // " | "
-    mov w16, #' '
-    strb w16, [x10], #1
-    mov w16, #'|'
-    strb w16, [x10], #1
-    mov w16, #' '
-    strb w16, [x10], #1
-.Len_j1:
-    mov w16, #'\''
-    strb w16, [x10], #1
-    ldr x9, [x14]
-    add x11, x14, #8
-.Len_jc:
-    cbz x9, .Len_j2
-    ldrb w16, [x11], #1
-    strb w16, [x10], #1
-    sub x9, x9, #1
-    b .Len_jc
-.Len_j2:
-    mov w16, #'\''
-    strb w16, [x10], #1
-    ldr x9, [x14]
-    add x14, x14, x9
-    add x14, x14, #8
-    sub x13, x13, #1
-    mov x15, #1
-    // cap: stop after 6 options in msg (issue still lists all)
-    cmp x15, #6
-    b.hs .Len_jd
-    mov x15, x13               // remaining -> treat as "has joined"
-    mov x13, #0
-    b .Len_jd
-.Len_jd:
-    // ", received " (11)
-    AZ_ADR x11, .Lm_enmid
-    mov x12, #12
-.Len_m2:
-    ldrb w13, [x11], #1
-    strb w13, [x10], #1
-    subs x12, x12, #1
-    b.ne .Len_m2
-    // received repr (lit_repr works on any scalar; for objects gives "{}")
-    mov x0, x28
-    mov x1, x10
-    str x10, [sp, #480]
-    bl _az_lit_repr
-    ldr x10, [sp, #480]
-    add x10, x10, x0
-    add x6, sp, #40
-    sub x7, x10, x6
+    // msg supplied by TS normalizer
     mov x0, #4                 // invalid_enum_value
-    mov x1, x6
-    mov x2, x7
+    mov x1, #0
+    mov x2, #0
     bl _az_issue_begin
     cbnz x0, .Lv_ret
     // received: raw input value
@@ -564,6 +481,18 @@ _az_vtype:
     mov x1, #0
     mov x2, #0
     bl _az_issue_begin
+    cbnz x0, .Lv_ret
+    // `_u` = union index (trailing field) so TS can attach per-option errors
+    ldr x9, [sp, #40]          // node ptr saved at union entry
+    ldr x10, [sp, #32]         // wait — sp32 holds remaining count (0 now)
+    ldr x10, [x9, #1]          // nopts from node
+    lsl x10, x10, #3
+    add x10, x10, #9
+    ldr x10, [x9, x10]         // uidx
+    ucvtf d0, x10
+    AZ_ADR x0, .Lk_u
+    mov x1, #2
+    bl _az_issue_f_f64
     cbnz x0, .Lv_ret
     bl _az_issue_commit
     b .Lv_invalid
@@ -792,6 +721,18 @@ _az_vtype:
     cbnz x0, .Lv_ret
     bl _az_issue_commit
     b .Lv_invalid
+
+// ---------- 0x23 NONOPTIONAL (inner) ----------
+.Lv_nonopt:
+    ldrb w9, [x28]
+    cbnz w9, .Lno_inner
+    AZ_ADR x0, .Lex_nonopt
+    mov x1, #11
+    b _az_vtype
+.Lno_inner:
+    mov x9, x27
+    add x9, x9, #1
+    b .Lv_tail
 
 // ---------- az_lit_repr(x0=valptr, x1=buf) -> x0 len ----------
 // repr of scalar value for messages
@@ -1329,6 +1270,7 @@ _az_strtoi:
     .quad .Lv_date
     .quad .Lv_symbol
     .quad .Lv_custom
+    .quad .Lv_nonopt
 
     AZ_RODATA
 .Lex_string:    .ascii "string"
@@ -1336,6 +1278,7 @@ _az_strtoi:
 .Lex_boolean:   .ascii "boolean"
 .Lex_bigint:    .ascii "bigint"
 .Lex_object:    .ascii "object"
+.Lex_record:    .ascii "record"
 .Lex_null:      .ascii "null"
 .Lex_undefined: .ascii "undefined"
 .Lex_nan:       .ascii "nan"
@@ -1343,13 +1286,15 @@ _az_strtoi:
 .Lex_symbol:    .ascii "symbol"
 .Lex_date:      .ascii "date"
 .Lex_array:     .ascii "array"
+.Lex_tuple:     .ascii "tuple"
+.Lex_nonopt:    .ascii "nonoptional"
 .Lty_array:     .ascii "array"
 .Lk_expected2:  .ascii "expected"
 .Lk_received2:  .ascii "received"
 .Lk_options:    .ascii "options"
-.Lm_litpre:     .ascii "Invalid literal value, expected "
-.Lm_enpre:      .ascii "Invalid enum value. Expected "
-.Lm_enmid:      .ascii ", received "
+.Lk_u:          .ascii "_u"
+.Lm_litpre:     .ascii "Invalid input: expected "
+.Lm_enpre:      .ascii "Invalid option: expected one of "
 .Lrp_und:       .ascii "undefined"
 .Lrp_nul:       .ascii "null"
 .Lrp_tru:       .ascii "true"
@@ -1392,15 +1337,7 @@ _az_strtoi:
     b.hs .Lar_chkmax
     // too_small array min
     str x10, [sp, #80]
-    add x0, sp, #88            // msg buf
-    AZ_ADR x1, .Lma_atleast
-    mov x2, #28
-    ldr x3, [sp, #80]
-    AZ_ADR x4, .Lma_elems
-    mov x5, #11
-    bl _az_msg_size
-    add x6, sp, #88
-    mov x7, x0
+    mov x7, #0             // default msg -> TS normalizer
     mov x0, #8
     AZ_ADR x1, .Lty_array
     mov x2, #5
@@ -1408,7 +1345,7 @@ _az_strtoi:
     ucvtf d0, x3
     fmov x3, d0
     mov w4, #1
-    mov w5, #0
+    ldrb w5, [x27, #25]        // exactLen flag
     bl _az_issue_size
     cbnz x0, .Lv_ret
     mov x9, #1
@@ -1422,15 +1359,7 @@ _az_strtoi:
     cmp x12, x11
     b.ls .Lar_size_done
     str x11, [sp, #80]
-    add x0, sp, #88
-    AZ_ADR x1, .Lma_atmost
-    mov x2, #28
-    ldr x3, [sp, #80]
-    AZ_ADR x4, .Lma_elems
-    mov x5, #11
-    bl _az_msg_size
-    add x6, sp, #88
-    mov x7, x0
+    mov x7, #0             // default msg -> TS normalizer
     mov x0, #9
     AZ_ADR x1, .Lty_array
     mov x2, #5
@@ -1438,7 +1367,7 @@ _az_strtoi:
     ucvtf d0, x3
     fmov x3, d0
     mov w4, #1
-    mov w5, #0
+    ldrb w5, [x27, #25]        // exactLen flag
     bl _az_issue_size
     cbnz x0, .Lv_ret
     mov x9, #1
@@ -1555,7 +1484,7 @@ _az_strtoi:
     ldrb w9, [x28]
     cmp w9, #7
     b.eq .Ltu_tok
-    AZ_ADR x0, .Lex_array
+    AZ_ADR x0, .Lex_tuple
     mov x1, #5
     b _az_vtype
 .Ltu_tok:
@@ -1593,16 +1522,8 @@ _az_strtoi:
     ldr x11, [sp, #56]
     ldr x11, [x11]
     cbnz x11, .Ltu_lenok
-    // too_small exact
-    add x0, sp, #88
-    AZ_ADR x1, .Lma_exactly
-    mov x2, #29
-    mov x3, x10
-    AZ_ADR x4, .Lma_elems
-    mov x5, #11
-    bl _az_msg_size
-    add x6, sp, #88
-    mov x7, x0
+    // too_small, non-exact; length mismatch skips element validation
+    mov x7, #0             // default msg -> TS normalizer
     mov x0, #8
     AZ_ADR x1, .Lty_array
     mov x2, #5
@@ -1610,12 +1531,13 @@ _az_strtoi:
     ucvtf d0, x3
     fmov x3, d0
     mov w4, #1
-    mov w5, #1
+    mov w5, #0
     bl _az_issue_size
     cbnz x0, .Lv_ret
     mov x9, #1
     str x9, [sp, #168]
-    b .Ltu_lenok
+    str x20, [sp, #32]
+    b .Ltu_emit
 .Ltu_over:
     ldr x11, [sp, #56]
     ldr x11, [x11]
@@ -1624,16 +1546,8 @@ _az_strtoi:
     ldr x10, [sp, #48]
     cmp x9, x10
     b.ls .Ltu_lenok
-    // too_big exact
-    add x0, sp, #88
-    AZ_ADR x1, .Lma_exactly
-    mov x2, #29
-    mov x3, x10
-    AZ_ADR x4, .Lma_elems
-    mov x5, #11
-    bl _az_msg_size
-    add x6, sp, #88
-    mov x7, x0
+    // too_big, non-exact; extra positions still get element-validated
+    mov x7, #0             // default msg -> TS normalizer
     mov x0, #9
     AZ_ADR x1, .Lty_array
     mov x2, #5
@@ -1641,7 +1555,7 @@ _az_strtoi:
     ucvtf d0, x3
     fmov x3, d0
     mov w4, #1
-    mov w5, #1
+    mov w5, #0
     bl _az_issue_size
     cbnz x0, .Lv_ret
     mov x9, #1
@@ -1787,7 +1701,7 @@ _az_strtoi:
     ldrb w9, [x28]
     cmp w9, #6
     b.eq .Lrc_tok
-    AZ_ADR x0, .Lex_object
+    AZ_ADR x0, .Lex_record
     mov x1, #6
     b _az_vtype
 .Lrc_tok:
@@ -2279,11 +2193,9 @@ _az_strtoi:
     sub x14, x14, #1
     b .Lob_mj
 .Lob_md:
-    add x6, sp, #256
-    sub x7, x10, x6
-    mov x0, #5                 // unrecognized_keys
-    mov x1, x6
-    mov x2, x7
+    mov x0, #5                 // unrecognized_keys — msg from TS normalizer
+    mov x1, #0
+    mov x2, #0
     bl _az_issue_begin
     cbnz x0, .Lv_ret
     // keys field: strarr2(base=u0=x20+(unk-1)*40, stride=-40, count=unk)
@@ -2724,7 +2636,7 @@ _az_strtoi:
     blr x9
     fmov d0, x0                // t bits
     fcmp d0, d0
-    b.vs .Ldt_fail             // NaN time = Invalid Date
+    b.vs .Ldt_nanfail          // NaN time = Invalid Date
     str d0, [sp, #32]
     // checks
     ldrb w9, [x27, #1]
@@ -2757,18 +2669,7 @@ _az_strtoi:
     fmov x9, d1
     str x9, [sp, #80]
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Ldt_mh
-    add x0, sp, #256
-    AZ_ADR x1, amd_min
-    mov x2, #24
-    fmov d0, d1
-    mov x3, #0
-    mov x4, #0
-    bl _az_msg_f64
-    mov x6, x0
-    add x0, sp, #256
-    mov x7, x6
-    mov x6, x0
+    b .Ldt_mh
 .Ldt_mh:
     mov x0, #8
     AZ_ADR x1, .Lty_date
@@ -2785,18 +2686,7 @@ _az_strtoi:
     fmov x9, d1
     str x9, [sp, #80]
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Ldt_xh
-    add x0, sp, #256
-    AZ_ADR x1, amd_max
-    mov x2, #26
-    fmov d0, d1
-    mov x3, #0
-    mov x4, #0
-    bl _az_msg_f64
-    mov x6, x0
-    add x0, sp, #256
-    mov x7, x6
-    mov x6, x0
+    b .Ldt_xh
 .Ldt_xh:
     mov x0, #9
     AZ_ADR x1, .Lty_date
@@ -2822,6 +2712,10 @@ _az_strtoi:
     AZ_ADR x0, .Lex_date
     mov x1, #4
     b _az_vtype
+.Ldt_nanfail:
+    bl _az_issue_invalid_date
+    cbnz x0, .Lv_ret
+    b .Lv_invalid
 
 // ---------- coerces ----------
 // shared: produce primitive in arena, then inner(node+1)
@@ -3176,13 +3070,27 @@ _az_strtoi:
     b.lo .Lvs_asize
     mov x0, #9
 .Lvs_asize:
-    // (x0=code, x12=n, w5=exact) origin "string"
+    // (x0=code, x12=n, w5=exact) origin = received type (string|array)
     str x12, [sp, #480]
     str x11, [sp, #472]        // params ptr survives issue_size
     ucvtf d0, x12
     fmov x3, d0
+    ldrb w8, [x28]
+    cmp w8, #7
+    b.eq .Lss_origin_arr
+    cmp w8, #8
+    b.eq .Lss_origin_unk
     AZ_ADR x1, .Lty_as_str
     mov x2, #6
+    b .Lss_go
+.Lss_origin_arr:
+    AZ_ADR x1, .Lty_as_arr
+    mov x2, #5
+    b .Lss_go
+.Lss_origin_unk:
+    AZ_ADR x1, .Lty_as_unk
+    mov x2, #7
+.Lss_go:
     mov w4, #1
     mov x6, #0
     mov x7, #0
@@ -3215,7 +3123,7 @@ _az_strtoi:
     cmp x13, x12
     b.hs .Lar_amaxc
     mov x0, #8
-    mov w5, #0
+    ldrb w5, [x27, #25]        // exactLen flag
     b .Lar_asize
 .Lar_amaxc:
     ldr x12, [x27, #17]        // max
@@ -3224,12 +3132,26 @@ _az_strtoi:
     cmp x13, x12
     b.ls .Lv_invalid
     mov x0, #9
-    mov w5, #0
+    ldrb w5, [x27, #25]        // exactLen flag
 .Lar_asize:
     ucvtf d0, x12
     fmov x3, d0
+    ldrb w8, [x28]
+    cmp w8, #4               // string input -> origin "string"
+    b.ne .Las_ns
+    AZ_ADR x1, .Lty_as_str
+    mov x2, #6
+    b .Las_go
+.Las_ns:
+    cmp w8, #8               // hostref with .length -> origin "unknown"
+    b.ne .Las_origin_arr
+    AZ_ADR x1, .Lty_as_unk
+    mov x2, #7
+    b .Las_go
+.Las_origin_arr:
     AZ_ADR x1, .Lty_as_arr
     mov x2, #5
+.Las_go:
     mov w4, #1
     mov x6, #0
     mov x7, #0
@@ -3240,4 +3162,5 @@ _az_strtoi:
     AZ_RODATA
 .Lty_as_str: .ascii "string"
 .Lty_as_arr: .ascii "array"
+.Lty_as_unk: .ascii "unknown"
     .text

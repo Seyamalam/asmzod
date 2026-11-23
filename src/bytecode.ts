@@ -5,6 +5,7 @@ import { reg, regId } from "./ffi.ts";
 export interface Compiled {
   blob: Uint8Array;
   hosts: HostTable; // seed values for embedded hostrefs (literal/default/catch)
+  unions: SchemaLike[]; // union defs in emission order — issues carry `_u` index
 }
 
 export interface SchemaLike { _def: any }
@@ -29,8 +30,9 @@ const NUM_CHECK: Record<string, number> = {
 export function compile(schema: SchemaLike): Compiled {
   const w = new BW();
   const hosts: HostTable = [];
-  emit(w, schema, hosts);
-  return { blob: w.out(), hosts };
+  const unions: SchemaLike[] = [];
+  emit(w, schema, hosts, unions);
+  return { blob: w.out(), hosts, unions };
 }
 
 function checkMsg(w: BW, msg: string | undefined) {
@@ -55,8 +57,12 @@ function emitStrChecks(w: BW, checks: any[]) {
         const b = enc.encode(c.value);
         w.u64(b.length); w.raw(b); break;
       }
-      case "regex":
-        w.u64(regId(reg.regex, c.regex)); break;
+      case "regex": {
+        w.u64(regId(reg.regex, c.regex));
+        // embed /src/flags so the engine can emit zod's `pattern` issue field
+        const src = enc.encode(`/${c.regex.source}/${c.regex.flags}`);
+        w.u64(src.length); w.raw(src); break;
+      }
       default: break; // no params
     }
   }
@@ -77,7 +83,7 @@ function emitNumChecks(w: BW, checks: any[], isBig: boolean) {
   }
 }
 
-function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
+function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): void {
   const d = s._def;
   switch (d.type) {
     case "string": w.u8(0x01); emitStrChecks(w, d.checks); return;
@@ -99,12 +105,12 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       }
       if (d.catchall) {
         const at = w.pos;
-        emit(w, d.catchall, hosts);
+        emit(w, d.catchall, hosts, unions);
         w.patchField(cf, at);
       }
       keys.forEach((k, i) => {
         const at = w.pos;
-        emit(w, d.shape[k], hosts);
+        emit(w, d.shape[k], hosts, unions);
         w.patchField(fps[i], at);
       });
       return;
@@ -115,8 +121,9 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       const f = w.field();
       w.u64(d.minLen ?? -1n); // u64_MAX = absent; -1n encodes as all-ones
       w.u64(d.maxLen ?? -1n);
+      w.u8(d.exactLen ? 1 : 0);
       const at = w.pos;
-      emit(w, d.element, hosts);
+      emit(w, d.element, hosts, unions);
       w.patchField(f, at);
       return;
     }
@@ -125,9 +132,12 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       w.u8(0x07);
       w.u64(d.options.length);
       const fps = d.options.map(() => w.field());
+      const uidx = unions.length;
+      unions.push(s);
+      w.u64(BigInt(uidx)); // fixed slot after fields — asm reads it on allfail
       d.options.forEach((o: SchemaLike, i: number) => {
         const at = w.pos;
-        emit(w, o, hosts);
+        emit(w, o, hosts, unions);
         w.patchField(fps[i], at);
       });
       return;
@@ -147,7 +157,7 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       }
       entries.forEach(([, o], i) => {
         const at = w.pos;
-        emit(w, o as SchemaLike, hosts);
+        emit(w, o as SchemaLike, hosts, unions);
         w.patchField(fps[i], at);
       });
       return;
@@ -167,11 +177,11 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       }
       return;
 
-    case "optional": case "nullable": {
-      w.u8(d.type === "optional" ? 0x0b : 0x0c);
+    case "optional": case "nullable": case "nonoptional": {
+      w.u8(d.type === "optional" ? 0x0b : d.type === "nullable" ? 0x0c : 0x23);
       const f = w.field();
       const at = w.pos;
-      emit(w, d.inner, hosts);
+      emit(w, d.inner, hosts, unions);
       w.patchField(f, at);
       return;
     }
@@ -181,7 +191,7 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       const f = w.field();
       w.raw(encodeValue(d.value, hosts));
       const at = w.pos;
-      emit(w, d.inner, hosts);
+      emit(w, d.inner, hosts, unions);
       w.patchField(f, at);
       return;
     }
@@ -192,7 +202,7 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       w.u64(d.cbid);
       checkMsg(w, d.message);
       const at = w.pos;
-      emit(w, d.inner, hosts);
+      emit(w, d.inner, hosts, unions);
       w.patchField(f, at);
       return;
     }
@@ -202,23 +212,23 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       const f = w.field();
       w.u64(d.cbid);
       const at = w.pos;
-      emit(w, d.inner, hosts);
+      emit(w, d.inner, hosts, unions);
       w.patchField(f, at);
       return;
     }
 
     case "brand":
-      emit(w, d.inner, hosts);
+      emit(w, d.inner, hosts, unions);
       return;
 
     case "pipe": {
       w.u8(0x11);
       const fi = w.field(), fo = w.field();
       let at = w.pos;
-      emit(w, d.in, hosts);
+      emit(w, d.in, hosts, unions);
       w.patchField(fi, at);
       at = w.pos;
-      emit(w, d.out, hosts);
+      emit(w, d.out, hosts, unions);
       w.patchField(fo, at);
       return;
     }
@@ -227,10 +237,10 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       w.u8(0x12);
       const fl = w.field(), fr = w.field();
       let at = w.pos;
-      emit(w, d.left, hosts);
+      emit(w, d.left, hosts, unions);
       w.patchField(fl, at);
       at = w.pos;
-      emit(w, d.right, hosts);
+      emit(w, d.right, hosts, unions);
       w.patchField(fr, at);
       return;
     }
@@ -242,12 +252,12 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       const rf = w.field();
       d.items.forEach((it: SchemaLike, i: number) => {
         const at = w.pos;
-        emit(w, it, hosts);
+        emit(w, it, hosts, unions);
         w.patchField(fps[i], at);
       });
       if (d.rest) {
         const at = w.pos;
-        emit(w, d.rest, hosts);
+        emit(w, d.rest, hosts, unions);
         w.patchField(rf, at);
       }
       return;
@@ -258,11 +268,11 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       const fk = w.field(), fv = w.field();
       if (d.keyType) {
         const at = w.pos;
-        emit(w, d.keyType, hosts);
+        emit(w, d.keyType, hosts, unions);
         w.patchField(fk, at);
       }
       const at = w.pos;
-      emit(w, d.valueType, hosts);
+      emit(w, d.valueType, hosts, unions);
       w.patchField(fv, at);
       return;
     }
@@ -295,7 +305,7 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       w.u8(op);
       const f = w.field();
       const at = w.pos;
-      emit(w, d.inner, hosts);
+      emit(w, d.inner, hosts, unions);
       w.patchField(f, at);
       return;
     }

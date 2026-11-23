@@ -140,6 +140,17 @@ const cbHost = new JSCallback(
         case 6: { // hostref type name index: a=hostidx
           return BigInt(hostTypeIndex(curHosts[Number(a)]));
         }
+        case 8: { // write ctor name for an "other object" hostref: a=hostidx b=destptr c=cap
+          const v = curHosts[Number(a)] as any;
+          let name = "object";
+          if (v !== null && typeof v === "object" &&
+              Object.getPrototypeOf(v) !== Object.prototype &&
+              "constructor" in v && v.constructor?.name) name = v.constructor.name;
+          const nb = new TextEncoder().encode(name);
+          const n = Math.min(nb.length, Number(c));
+          view(Number(b), n).set(nb.subarray(0, n));
+          return BigInt(n);
+        }
         case 7: { // .length of host value: a=hostidx -> len or -1
           const v = curHosts[Number(a)] as any;
           const l = v?.length;
@@ -207,6 +218,11 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
     if (status === -2n) {
       const base = ptr(oute);
       const cnt = Number(read.u64(base) as bigint);
+      if ((process.env as any).AZ_DEBUG_ERR) {
+        const n = Math.min(Number(read.u64(base + 3104 - 8) as bigint) ? 512 : 512, errCap);
+        const bytes = new Uint8Array(toArrayBuffer(base + ERR_ISSUES_OFF, 0, n));
+        console.error("ERR[0..512]:", [...bytes].map(b => b.toString(16).padStart(2, "0")).join(" "));
+      }
       const issues: any[] = [];
       let cur = base + ERR_ISSUES_OFF;
       for (let i = 0; i < cnt; i++) {

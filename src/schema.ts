@@ -1,8 +1,13 @@
 // schema.ts — schema classes + chaining API (zod3-compatible surface)
 import { compile, type Compiled } from "./bytecode.ts";
 import { engineParse, reg, regId } from "./ffi.ts";
+import { parsedTypeName, defaultMessage } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, type ZodIssue } from "./error.ts";
+
+// issues added via ctx.addIssue inside superRefine callbacks during the
+// in-flight engine run; _run splices them over the engine's `custom` slots
+const pendingRefineIssues: any[] = [];
 
 export type ParsePath = (string | number)[];
 export interface SafeParseSuccess<T> { success: true; data: T }
@@ -24,7 +29,46 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     const c = this._compile();
     const hosts: HostTable = [...c.hosts];
     const input = encodeValue(data, hosts);
-    return engineParse(c.blob, input, hosts);
+    const r = engineParse(c.blob, input, hosts);
+    // `_u`-tagged invalid_union issues (union nodes reached inside containers)
+    // get their per-option errors by re-running the registered options on the
+    // value at the issue's path
+    if (!r.ok) {
+      for (const i of r.issues) {
+        if (i.code === "invalid_union" && (i as any)._u !== undefined &&
+            (i as any).errors === undefined) {
+          const u = (c.unions as any[])[(i as any)._u];
+          delete (i as any)._u;
+          if (u) {
+            let v: any = data;
+            for (const p of i.path ?? []) v = v?.[p as any];
+            const runs = (u._def.options as ZodTypeAny[]).map((o) => o._run(v));
+            (i as any).errors = runs.map((x) => (x.ok ? [] : x.issues));
+          }
+        } else if ((i as any)._u !== undefined) {
+          delete (i as any)._u;
+        }
+      }
+    }
+    // superRefine issues pushed by refine callbacks during this run replace the
+    // engine's generic `custom` placeholder issues, in order
+    if (!r.ok && pendingRefineIssues.length) {
+      const extra = pendingRefineIssues.splice(0);
+      const out: ZodIssue[] = [];
+      for (const i of r.issues) {
+        if (i.code === "custom" && extra.length) {
+          const st = extra.shift()!;
+          const { path: sp, ...rest } = st;
+          out.push({ ...rest, path: [...(i.path ?? []), ...(sp ?? [])] } as ZodIssue);
+          continue;
+        }
+        out.push(i);
+      }
+      while (extra.length) out.push(extra.shift()!);
+      return { ok: false, issues: out };
+    }
+    pendingRefineIssues.length = 0;
+    return r;
   }
 
   parse(data: unknown): Output {
@@ -83,12 +127,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return this.refine(fn, message);
   }
   superRefine(fn: (v: Output, ctx: { addIssue: (i: any) => void }) => void): ZodEffects<this, Output> {
-    // superRefine can emit multiple issues — approximate: first added issue wins
     return new ZodEffects({
       type: "refine", inner: this,
       cbid: regId(reg.refine, ((v: unknown) => {
         let ok = true;
-        fn(v as Output, { addIssue: (i: any) => { ok = false; } });
+        fn(v as Output, {
+          addIssue: (i: any) => { ok = false; pendingRefineIssues.push(i); },
+        });
         return ok;
       }) as (v: unknown) => unknown),
       message: undefined,
@@ -283,8 +328,9 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     const shape: any = {};
     for (const k of Object.keys(this._def.shape)) {
       let s = this._def.shape[k];
-      while (s instanceof ZodOptional) s = s.unwrap();
-      shape[k] = s;
+      let wasOpt = false;
+      while (s instanceof ZodOptional) { wasOpt = true; s = s.unwrap(); }
+      shape[k] = wasOpt ? new ZodNonOptional({ inner: s }) : s;
     }
     return new ZodObject({ ...this._def, shape });
   }
@@ -297,7 +343,7 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
   get element(): T { return this._def.element; }
   min(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, _minMsg: message }); }
   max(n: number, message?: string) { return new ZodArray({ ...this._def, maxLen: n, _maxMsg: message }); }
-  length(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, maxLen: n }); }
+  length(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, maxLen: n, exactLen: true }); }
   nonempty(message?: string) { return this.min(1, message); }
 }
 
@@ -314,12 +360,21 @@ export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodTy
 
 // Map/Set: the container walk is JS (can't enumerate a Map in machine
 // code), but every key/value still validates through the ARM64 engine.
+export class ZodNonOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodType<NonNullable<T["_output"]>, T["_input"]> {
+  constructor(_def: any) { super(); this._def = { ..._def, type: "nonoptional" }; }
+  protected override _run(data: unknown) {
+    if (data === undefined) return { ok: false as const, issues: [typeIssue("nonoptional", data)] };
+    return (this._def.inner as ZodTypeAny)._run(data);
+  }
+}
+
 function typeIssue(expected: string, received: unknown): ZodIssue {
+  const recvd = parsedTypeName(received);
   return {
     code: "invalid_type",
     path: [],
     expected,
-    message: `Invalid input: expected ${expected}, received ${typeof received}`,
+    message: `Invalid input: expected ${expected === "nan" ? "NaN" : expected}, received ${recvd}`,
   } as ZodIssue;
 }
 
@@ -417,7 +472,10 @@ export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[num
         (i as any).errors = [];
         (i as any).note = "No matching discriminator";
         (i as any).discriminator = this._def.disc;
-        (i as any).options = [...this._def.optionsMap.keys()];
+        const opts = [...this._def.optionsMap.keys()];
+        (i as any).options = opts;
+        if (i.message === "Invalid input")
+          i.message = `Invalid discriminator value. Expected ${opts.map((o) => `'${o}'`).join(" | ")}`;
       }
     }
   }

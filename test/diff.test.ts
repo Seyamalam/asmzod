@@ -25,12 +25,14 @@ interface Case {
   inputs: unknown[];
   // compare full issue messages too (defaults: codes+paths only)
   strictIssues?: boolean;
+  // compare every issue field + message verbatim
+  fullIssues?: boolean;
 }
 
 const cases: Case[] = [];
 
-function C(name: string, az: () => any, zz: () => any, inputs: unknown[], strictIssues = false) {
-  cases.push({ name, az, zz, inputs, strictIssues });
+function C(name: string, az: () => any, zz: () => any, inputs: unknown[], strictIssues = false, fullIssues = true) {
+  cases.push({ name, az, zz, inputs, strictIssues, fullIssues });
 }
 
 const corpus: unknown[] = [
@@ -311,6 +313,17 @@ for (const c of cases) {
               if ((zi as any)[f] !== undefined) expect((ai as any)[f]).toEqual((zi as any)[f]);
             }
           }
+        }
+        if (c.fullIssues) {
+          // full issue-object parity: all fields + messages (sorted view)
+          const skeys = (o: any): any => Array.isArray(o)
+            ? o.map(skeys)
+            : (o && typeof o === "object"
+                ? Object.fromEntries(Object.keys(o).sort().map((k) => [k, skeys(o[k])]))
+                : (typeof o === "bigint" ? `${o}n` : o));
+          const norm = (iss: any[]) => iss.map((x: any) => JSON.stringify(skeys(x))).sort();
+          expect(norm(ar.error.issues), `issues mismatch for ${JSON.stringify(String(input))}`)
+            .toEqual(norm(zr.error.issues));
         }
       }
     }

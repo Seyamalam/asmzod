@@ -3,7 +3,7 @@
 // engine uses, so it works on Node, Deno, Cloudflare Workers, browsers —
 // everywhere asm/libasmzod.dylib can't load.
 import type { HostTable } from "./codec.ts";
-import { reg } from "./shared.ts";
+import { reg, parsedTypeName } from "./shared.ts";
 
 // ---- byte reader over a blob ----
 class R {
@@ -58,22 +58,14 @@ function atKey<T>(c: Ctx, k: string | number, f: () => T): T {
   c.path.push(k); try { return f(); } finally { c.path.pop(); }
 }
 
-// type names matching asm/.Lt* + hostref table
-function typeName(v: unknown): string {
-  if (v === undefined) return "undefined";
-  if (v === null) return "null";
-  if (typeof v === "boolean") return "boolean";
-  if (typeof v === "number") return Number.isNaN(v) ? "nan" : "number";
-  if (typeof v === "string") return "string";
-  if (typeof v === "bigint") return "bigint";
-  if (typeof v === "symbol") return "symbol";
-  if (typeof v === "function") return "function";
-  if (Array.isArray(v)) return "array";
-  if (v instanceof Date) return "date";
-  if (v instanceof Map) return "map";
-  if (v instanceof Set) return "set";
-  return "object";
-}
+// type names matching asm/.Lt* + hostref table (zod parsedType)
+const typeName = parsedTypeName;
+// zod's size-check origin for a received value: string/array keep their name,
+// anything else with a .length (functions, host objects) reports "unknown"
+const sizeOrigin = (v: unknown) => {
+  const t = typeName(v);
+  return t === "string" || t === "array" ? t : "unknown";
+};
 
 // az_input_len: strings count code points (matches asm utf16_units)
 function inputLen(v: unknown): number {
@@ -135,13 +127,13 @@ function runStrChecks(r: R, v: unknown, c: Ctx): boolean {
     const save = r.pos; r.pos = rc.p;
     try {
       switch (rc.code) {
-        case 0x01: { const l = r.u64(); if (alen >= 0 && BigInt(alen) < l) { sizeFail(c, "too_small", "string", l, true, false, rc.msg); fail = true; } break; }
-        case 0x02: { const l = r.u64(); if (alen >= 0 && BigInt(alen) > l) { sizeFail(c, "too_big", "string", l, true, false, rc.msg); fail = true; } break; }
-        case 0x03: { const l = r.u64(); if (alen >= 0 && BigInt(alen) !== l) { sizeFail(c, BigInt(alen) < l ? "too_small" : "too_big", "string", l, true, true, rc.msg); fail = true; } break; }
-        case 0x07: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).startsWith(s)) { fmtFail(c, "startsWith", rc.msg); fail = true; } break; }
-        case 0x08: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).endsWith(s)) { fmtFail(c, "endsWith", rc.msg); fail = true; } break; }
-        case 0x09: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).includes(s)) { fmtFail(c, "includes", rc.msg); fail = true; } break; }
-        case 0x0a: { const re = reg.regex[Number(r.u64())]; if (isStr) { re.lastIndex = 0; if (!re.test(v as string)) { fmtFail(c, "regex", rc.msg); fail = true; } } break; }
+        case 0x01: { const l = r.u64(); if (alen >= 0 && BigInt(alen) < l) { sizeFail(c, "too_small", sizeOrigin(v), l, true, false, rc.msg); fail = true; } break; }
+        case 0x02: { const l = r.u64(); if (alen >= 0 && BigInt(alen) > l) { sizeFail(c, "too_big", sizeOrigin(v), l, true, false, rc.msg); fail = true; } break; }
+        case 0x03: { const l = r.u64(); if (alen >= 0 && BigInt(alen) !== l) { sizeFail(c, BigInt(alen) < l ? "too_small" : "too_big", sizeOrigin(v), l, true, true, rc.msg); fail = true; } break; }
+        case 0x07: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).startsWith(s)) { fmtFail(c, "startsWith", rc.msg, { prefix: s }); fail = true; } break; }
+        case 0x08: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).endsWith(s)) { fmtFail(c, "endsWith", rc.msg, { suffix: s }); fail = true; } break; }
+        case 0x09: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).includes(s)) { fmtFail(c, "includes", rc.msg, { includes: s }); fail = true; } break; }
+        case 0x0a: { const re = reg.regex[Number(r.u64())]; const src = r.str(Number(r.u64())); if (isStr) { re.lastIndex = 0; if (!re.test(v as string)) { fmtFail(c, "regex", rc.msg, { pattern: src }); fail = true; } } break; }
         default: {
           if (isStr && !STR_FMT[rc.code]?.(v as string)) { fmtFail(c, STR_NAMES[rc.code] ?? "format", rc.msg); fail = true; }
         }
@@ -151,8 +143,8 @@ function runStrChecks(r: R, v: unknown, c: Ctx): boolean {
   return !fail;
 }
 
-function fmtFail(c: Ctx, validation: string, msg?: string) {
-  pushIssue(c, "invalid_string", { validation, ...(msg ? { message: msg } : {}) });
+function fmtFail(c: Ctx, validation: string, msg?: string, extra?: Record<string, unknown>) {
+  pushIssue(c, "invalid_string", { validation, ...extra, ...(msg ? { message: msg } : {}) });
 }
 
 function checkParamEnd(r: R, code: number, str_: boolean): number {
@@ -161,7 +153,7 @@ function checkParamEnd(r: R, code: number, str_: boolean): number {
     if (code === 0x01 || code === 0x02 || code === 0x03) { r.pos += 8; }
     else if (code === 0x05) { r.pos += 1; }
     else if (code === 0x07 || code === 0x08 || code === 0x09) { r.pos += 8 + Number(r.u64()); }
-    else if (code === 0x0a) { r.pos += 8; }
+    else if (code === 0x0a) { r.pos += 8; r.pos += 8 + Number(r.u64()); }
   } else {
     if (code >= 0x01 && code <= 0x04 || code === 0x07) { r.pos += 8; }
   }
@@ -207,21 +199,21 @@ function runNumChecks(r: R, v: number | bigint, isBig: boolean, c: Ctx): boolean
       case 0x04: { const p = isBig ? r.i64() : r.f64(); if (!(v <= (p as any))) { sizeFail(c, "too_big", isBig ? "bigint" : "number", BigInt(p as any), true, false, msg); fail = true; } break; }
       case 0x05: {
         const ok = isBig || Number.isInteger(v as number);
-        if (!ok) { pushIssue(c, "invalid_type", { expected: "int", ...(msg ? { message: msg } : {}) }); fail = true; }
+        if (!ok) { pushIssue(c, "invalid_type", { expected: "int", received: typeName(v), ...(msg ? { message: msg } : {}) }); fail = true; }
         break;
       }
       case 0x06: {
         if (!isBig && !Number.isFinite(v as number)) { pushIssue(c, "not_finite", { ...(msg ? { message: msg } : {}) }); fail = true; }
         break;
       }
-      case 0x07: { const p = isBig ? r.i64() : r.f64(); if ((v as any) % (p as any) !== (isBig ? 0n : 0)) { pushIssue(c, "not_multiple_of", { divisor: BigInt(p as any), ...(msg ? { message: msg } : {}) }); fail = true; } break; }
+      case 0x07: { const p = isBig ? r.i64() : r.f64(); if ((v as any) % (p as any) !== (isBig ? 0n : 0)) { pushIssue(c, "not_multiple_of", { divisor: p, ...(msg ? { message: msg } : {}) }); fail = true; } break; }
       case 0x08: {
         const nonInt = !isBig && !Number.isInteger(v as number);
         const ok = nonInt ? false : isBig
           ? (v as bigint) >= BigInt(Number.MIN_SAFE_INTEGER) && (v as bigint) <= BigInt(Number.MAX_SAFE_INTEGER)
           : Number.isSafeInteger(v as number);
         if (!ok && nonInt) {
-          pushIssue(c, "invalid_type", { expected: "int", ...(msg ? { message: msg } : {}) });
+          pushIssue(c, "invalid_type", { expected: "int", received: typeName(v), ...(msg ? { message: msg } : {}) });
           fail = true;
         } else if (!ok) {
           const over = isBig ? (v as bigint) > 0n : (v as number) > 0;
@@ -305,22 +297,23 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       if (c.issues.length !== before) throw FAILED;
       return out;
     }
-    case 0x06: { // array — layout: elemoff | min | max
+    case 0x06: { // array — layout: elemoff | min | max | exact u8
       const ep = r.pos; const epos = ep + Number(r.i64());
       const min = r.i64(); const max = r.i64();
+      const exact = r.u8() !== 0;
       if (!Array.isArray(v)) {
         pushIssue(c, "invalid_type", { expected: "array", received: typeName(v) });
         // uniform .length semantics: size checks still run on the input's length
         const alen = inputLen(v);
         if (alen >= 0) {
-          if (min !== -1n && BigInt(alen) < min) sizeFail(c, "too_small", "array", min, true, min === max, undefined);
-          if (max !== -1n && BigInt(alen) > max) sizeFail(c, "too_big", "array", max, true, min === max, undefined);
+          if (min !== -1n && BigInt(alen) < min) sizeFail(c, "too_small", sizeOrigin(v), min, true, exact, undefined);
+          if (max !== -1n && BigInt(alen) > max) sizeFail(c, "too_big", sizeOrigin(v), max, true, exact, undefined);
         }
         throw FAILED;
       }
       const before = c.issues.length;
-      if (min !== -1n && BigInt(v.length) < min) sizeFail(c, "too_small", "array", min, true, min === max, undefined);
-      if (max !== -1n && BigInt(v.length) > max) sizeFail(c, "too_big", "array", max, true, min === max, undefined);
+      if (min !== -1n && BigInt(v.length) < min) sizeFail(c, "too_small", "array", min, true, exact, undefined);
+      if (max !== -1n && BigInt(v.length) > max) sizeFail(c, "too_big", "array", max, true, exact, undefined);
       const out: unknown[] = new Array(v.length);
       for (let i = 0; i < v.length; i++) {
         const res = atKey(c, i, () => tryValidate(new R(r.b, epos), v[i], c));
@@ -333,6 +326,7 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const n = Number(r.u64());
       const offs: number[] = [];
       for (let i = 0; i < n; i++) { const fp = r.pos; offs.push(fp + Number(r.i64())); }
+      const uidx = Number(r.u64()); // after fps, before option subtrees
       for (const p of offs) {
         const save = c.issues.length;
         const rr = new R(r.b); rr.pos = p;
@@ -340,7 +334,7 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
         if (res.ok) { c.issues.length = save; return res.value; }
         c.issues.length = save;
       }
-      pushIssue(c, "invalid_union", {});
+      pushIssue(c, "invalid_union", { _u: uidx });
       throw FAILED;
     }
     case 0x08: { // discriminated union
@@ -369,7 +363,7 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
     case 0x0a: { // enum
       const n = Number(r.u64()); const vals: string[] = [];
       for (let i = 0; i < n; i++) vals.push(r.str(Number(r.u64())));
-      if (typeof v !== "string" || !vals.includes(v)) { pushIssue(c, "invalid_enum_value", {}); throw FAILED; }
+      if (typeof v !== "string" || !vals.includes(v)) { pushIssue(c, "invalid_value", { values: vals }); throw FAILED; }
       return v;
     }
     case 0x0b: { // optional
@@ -380,6 +374,11 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
     case 0x0c: { // nullable
       const fp = r.pos; const ip = fp + Number(r.i64());
       if (v === null) return null;
+      const rr = new R(r.b); rr.pos = ip; return validate(rr, v, c);
+    }
+    case 0x23: { // nonoptional
+      const fp = r.pos; const ip = fp + Number(r.i64());
+      if (v === undefined) { pushIssue(c, "invalid_type", { expected: "nonoptional", received: "undefined" }); throw FAILED; }
       const rr = new R(r.b); rr.pos = ip; return validate(rr, v, c);
     }
     case 0x0d: { // default — layout: inneroff | tagged value
@@ -444,11 +443,13 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       for (let i = 0; i < n; i++) { const fp = r.pos; ips.push(fp + Number(r.i64())); }
       const rf = r.pos; const restRel = r.i64(); const restPos = rf + Number(restRel);
       const items = Array.isArray(v) ? v : null;
-      if (!items) { pushIssue(c, "invalid_type", { expected: "array", received: typeName(v) }); throw FAILED; }
+      if (!items) { pushIssue(c, "invalid_type", { expected: "tuple", received: typeName(v) }); throw FAILED; }
       const before = c.issues.length;
-      if (restRel === 0n) {
-        if (items.length < n) sizeFail(c, "too_small", "array", BigInt(n), true, true, undefined);
-        else if (items.length > n) sizeFail(c, "too_big", "array", BigInt(n), true, true, undefined);
+      if (restRel === 0n && items.length !== n) {
+        // zod: arity mismatch emits a non-exact size issue; under-length skips
+        // element validation, over-length still validates the fixed slots
+        sizeFail(c, items.length < n ? "too_small" : "too_big", "array", BigInt(n), true, false, undefined);
+        if (items.length < n) throw FAILED;
       }
       const eff = restRel !== 0n ? Math.max(items.length, n) : Math.min(items.length, n);
       const out: unknown[] = [];
@@ -465,7 +466,7 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const fk = r.pos; const kp = fk + Number(r.i64());
       const fv = r.pos; const vp = fv + Number(r.i64());
       if (typeof v !== "object" || v === null || Array.isArray(v) || !isPlain(v)) {
-        pushIssue(c, "invalid_type", { expected: "object", received: typeName(v) }); throw FAILED;
+        pushIssue(c, "invalid_type", { expected: "record", received: typeName(v) }); throw FAILED;
       }
       const before = c.issues.length;
       const out: Record<string, unknown> = {};
@@ -507,7 +508,12 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
     case 0x20: { // date
       const t = v instanceof Date ? v.getTime() : NaN;
       if (!(v instanceof Date) || Number.isNaN(t)) {
-        pushIssue(c, "invalid_type", { expected: "date", received: typeName(v) }); throw FAILED;
+        // zod: NaN-time Date carries received:"Invalid Date" (message shows "Date")
+        pushIssue(c, "invalid_type", {
+          expected: "date",
+          received: v instanceof Date ? "Invalid Date" : typeName(v),
+        });
+        throw FAILED;
       }
       const nc = r.u8();
       let fail = false;

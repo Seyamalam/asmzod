@@ -887,14 +887,17 @@ _az_is_datetime:
     ret
 
 // ---------- az_issue_invstr ----------
-// (x0=validation ptr, x1=len, x2=msgptr, x3=msglen) -> x0 0/-4
-// issue code 7 (invalid_string) + field "validation"
+// (x0=validation ptr, x1=len, x2=msgptr, x3=msglen,
+//  x4=extraKey ptr, x5=extraKeyLen, x6=extraVal ptr, x7=extraValLen) -> x0 0/-4
+// issue code 7 (invalid_string) + field "validation" (+optional extra field)
     .globl _az_issue_invstr
     AZ_HIDDEN _az_issue_invstr
 _az_issue_invstr:
-    stp x29, x30, [sp, #-48]!
+    stp x29, x30, [sp, #-96]!
     mov x29, sp
     stp x0, x1, [sp, #16]
+    stp x4, x5, [sp, #48]       // extra key
+    stp x6, x7, [sp, #64]       // extra val
     mov x1, x2
     mov x2, x3
     mov x0, #7
@@ -905,10 +908,17 @@ _az_issue_invstr:
     ldp x2, x3, [sp, #16]
     bl _az_issue_f_str
     cbnz x0, .Lis_out
+    ldr x1, [sp, #56]           // extra key len
+    cbz x1, .Lis_commit
+    ldr x0, [sp, #48]
+    ldp x2, x3, [sp, #64]
+    bl _az_issue_f_str
+    cbnz x0, .Lis_out
+.Lis_commit:
     bl _az_issue_commit
     mov x0, #0
 .Lis_out:
-    ldp x29, x30, [sp], #48
+    ldp x29, x30, [sp], #96
     ret
 
 // ---------- az_issue_size ----------
@@ -1115,7 +1125,9 @@ _az_msg_f64:
 .Lmfb2:
     ldr d0, [sp, #48]
     mov x0, x10
+    str x10, [sp, #56]         // x10 is caller-saved; f64_dec clobbers it
     bl _az_f64_dec
+    ldr x10, [sp, #56]
     add x10, x10, x0
     ldp x11, x12, [sp, #24]
 .Lmfb3:

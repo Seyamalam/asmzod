@@ -385,23 +385,18 @@ _az_issue_begin:
     sub x27, x27, #1
     b .Lib_pathloop
 .Lib_pathdone:
-    // field "message"
-    ldr x1, [sp, #16 + 8]       // msgptr
+    // field "message" — emitted only for custom messages (msglen>0);
+    // the TS layer supplies zod-style defaults when absent
     ldr x2, [sp, #32]           // msglen
-    cbnz x2, .Lib_havemsg
-    // default message from table: stride 32, msg pair at +16
-    ldr x27, [sp, #16]          // code idx (x27 was reused as loop counter)
-    AZ_ADR x9, _az_code_table
-    lsl x10, x27, #5
-    add x9, x9, x10
-    ldp x1, x2, [x9, #16]
-.Lib_havemsg:
+    cbz x2, .Lib_done
+    ldr x1, [sp, #16 + 8]       // msgptr
     mov x3, x2
     mov x2, x1
     AZ_ADR x0, .Lk_message
     mov x1, #7
     bl _az_issue_f_str
     cbnz x0, .Lib_fail
+.Lib_done:
     mov x0, #0
     b .Lib_out
 .Lib_oom:
@@ -449,11 +444,29 @@ _az_issue_type:
     // NaN check: tag f64 + val NaN => "nan"
     ldr d0, [x3, #1]
     fcmp d0, d0
-    b.vc .Lit_notf64
+    b.vc .Lit_f64fin
     AZ_ADR x9, .Ln_nan
     str x9, [sp, #48]
     mov x10, #3
     str x10, [sp, #56]
+    b .Lit_gotname
+.Lit_f64fin:
+    // +-Infinity => "Infinity"/"-Infinity"
+    fabs d1, d0
+    mov x9, #0x7FF0000000000000
+    fmov d2, x9
+    fcmp d1, d2
+    b.ne .Lit_notf64
+    fcmp d0, #0.0
+    AZ_ADR x9, .Ln_inf
+    mov x10, #8
+    b.mi .Lit_infneg
+    b .Lit_infstore
+.Lit_infneg:
+    AZ_ADR x9, .Ln_ninf
+    mov x10, #9
+.Lit_infstore:
+    stp x9, x10, [sp, #48]
     b .Lit_gotname
 .Lit_notf64:
     cmp x2, #8
@@ -465,6 +478,24 @@ _az_issue_type:
     mov x2, #0
     mov x3, #0
     blr x9
+    // idx 5 = other object -> zod uses constructor.name; fetch it (cb kind 8)
+    cmp x0, #5
+    b.ne .Lit_tabname
+    ldr x9, [x24, #24]
+    mov x0, #8
+    ldr x10, [sp, #40]          // valptr (x3 clobbered by blr)
+    ldr x1, [x10, #1]           // hostref idx
+    sub x2, x23, #256           // scratch name buffer at err-arena tail
+    mov x3, #255
+    blr x9
+    // x0 = name len written at x23-256 (0 -> fall back to "object")
+    cbz x0, .Lit_tabname5
+    sub x9, x23, #256
+    stp x9, x0, [sp, #48]
+    b .Lit_gotname
+.Lit_tabname5:
+    mov x0, #5
+.Lit_tabname:
     // x0 = host type idx into host_names table
     AZ_ADR x9, _az_hosttype_table
     mov x10, #16
@@ -481,57 +512,10 @@ _az_issue_type:
     ldp x11, x12, [x13]
     stp x11, x12, [sp, #48]
 .Lit_gotname:
-    // build message into stack buf at sp+64 (cap 240)
-    ldr x9, [sp, #32]           // tag
-    cbnz x9, .Lit_buildmsg
-    // tag==0 (undefined) -> "Required"
-    AZ_ADR x1, .Lm_required
-    mov x2, #8
+    // msglen 0 — TS normalizer composes "Invalid input: expected X, received Y"
+    mov x1, #0
+    mov x2, #0
     mov x0, #0                  // code = invalid_type
-    bl _az_issue_begin
-    cbnz x0, .Lit_out
-    b .Lit_fields
-.Lit_buildmsg:
-    add x10, sp, #64
-    // "Expected " (9)
-    AZ_ADR x11, .Lm_expected
-    mov x12, #9
-.Lit_c1:
-    ldrb w13, [x11], #1
-    strb w13, [x10], #1
-    subs x12, x12, #1
-    b.ne .Lit_c1
-    // exp
-    ldp x11, x12, [sp, #16]
-.Lit_c2:
-    cbz x12, .Lit_c2d
-    ldrb w13, [x11], #1
-    strb w13, [x10], #1
-    sub x12, x12, #1
-    b .Lit_c2
-.Lit_c2d:
-    // ", received " (11)
-    AZ_ADR x11, .Lm_received
-    mov x12, #11
-.Lit_c3:
-    ldrb w13, [x11], #1
-    strb w13, [x10], #1
-    subs x12, x12, #1
-    b.ne .Lit_c3
-    // name
-    ldp x11, x12, [sp, #48]
-.Lit_c4:
-    cbz x12, .Lit_c4d
-    ldrb w13, [x11], #1
-    strb w13, [x10], #1
-    sub x12, x12, #1
-    b .Lit_c4
-.Lit_c4d:
-    add x0, sp, #64
-    sub x1, x10, x0             // msglen... wait x0 must be ptr: set regs
-    mov x2, x1
-    mov x1, x0                  // x1=msgptr (sp+64)
-    mov x0, #0                  // code=invalid_type
     bl _az_issue_begin
     cbnz x0, .Lit_out
 .Lit_fields:
@@ -551,6 +535,36 @@ _az_issue_type:
     mov x0, #0
 .Lit_out:
     ldp x29, x30, [sp], #128
+    ret
+
+// ---------- az_issue_invalid_date: invalid_type for NaN-time Dates ----------
+// zod exposes received:"Invalid Date" while the message shows "Date"
+    .globl _az_issue_invalid_date
+    AZ_HIDDEN _az_issue_invalid_date
+_az_issue_invalid_date:
+    stp x29, x30, [sp, #-64]!
+    mov x29, sp
+    mov x1, #0
+    mov x2, #0
+    mov x0, #0                  // code = invalid_type
+    bl _az_issue_begin
+    cbnz x0, .Lid_out
+    AZ_ADR x0, .Lk_expected
+    mov x1, #8
+    AZ_ADR x2, .Lhv_date
+    mov x3, #4
+    bl _az_issue_f_str
+    cbnz x0, .Lid_out
+    AZ_ADR x0, .Lk_received
+    mov x1, #8
+    AZ_ADR x2, .Lh7
+    mov x3, #12
+    bl _az_issue_f_str
+    cbnz x0, .Lid_out
+    bl _az_issue_commit
+    mov x0, #0
+.Lid_out:
+    ldp x29, x30, [sp], #64
     ret
 
 // ---------- tables ----------
@@ -601,6 +615,7 @@ _az_hosttype_table:
     .quad .Lh4, 8               // function
     .quad .Lh5, 5               // class / object
     .quad .Lh6, 7               // unknown
+    .quad .Lh7, 12              // Invalid Date
 
     AZ_RODATA
 .Lc0:  .ascii "invalid_type"
@@ -639,12 +654,14 @@ _az_hosttype_table:
 .Lt7:  .ascii "array"
 .Lt8:  .ascii "unknown"
 .Lh0:  .ascii "symbol"
-.Lh1:  .ascii "date"
-.Lh2:  .ascii "map"
-.Lh3:  .ascii "set"
+.Lh1:  .ascii "Date"
+.Lh2:  .ascii "Map"
+.Lh3:  .ascii "Set"
 .Lh4:  .ascii "function"
 .Lh5:  .ascii "object"
 .Lh6:  .ascii "unknown"
+.Lh7:  .ascii "Invalid Date"
+.Lhv_date: .ascii "date"
 .Lk_code:     .ascii "code"
 .Lk_path:     .ascii "path"
 .Lk_message:  .ascii "message"
@@ -653,7 +670,9 @@ _az_hosttype_table:
 .Lm_expected: .ascii "Expected "
 .Lm_received: .ascii ", received "
 .Lm_required: .ascii "Required"
-.Ln_nan:      .ascii "nan"
+.Ln_nan:      .ascii "NaN"
+.Ln_inf:      .ascii "Infinity"
+.Ln_ninf:     .ascii "-Infinity"
 
     .text
     .p2align 2

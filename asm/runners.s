@@ -82,15 +82,15 @@ _az_run_strchecks:
     b.eq .Lsc_next8
     b.hi .Lsc_len_big
     AZ_ADR x1, ams_exactly
-    mov x2, #29
+    mov x2, #28
     AZ_ADR x4, ams_chars
-    mov x5, #14
+    mov x5, #13
     b .Lsc_sizefail_small
 .Lsc_len_big:
     AZ_ADR x1, ams_exactly
-    mov x2, #29
+    mov x2, #28
     AZ_ADR x4, ams_chars
-    mov x5, #14
+    mov x5, #13
     b .Lsc_sizefail_big
 .Lsc_min:
     cmp x14, x13
@@ -98,20 +98,20 @@ _az_run_strchecks:
     AZ_ADR x1, ams_atleast
     mov x2, #29
     AZ_ADR x4, ams_chars
-    mov x5, #14
+    mov x5, #13
     b .Lsc_sizefail_small
 .Lsc_max:
     cmp x14, x13
     b.ls .Lsc_next8
     AZ_ADR x1, ams_atmost
-    mov x2, #29
+    mov x2, #28
     AZ_ADR x4, ams_chars
-    mov x5, #14
+    mov x5, #13
     b .Lsc_sizefail_big
 .Lsc_sizefail_small:
     // build msg (custom override if msglen>0)
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Lsc_sf_have
+    b .Lsc_sf_have
     add x0, sp, #96
     mov x3, x13
     bl _az_msg_size
@@ -138,7 +138,7 @@ _az_run_strchecks:
     b .Lsc_next8
 .Lsc_sizefail_big:
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Lsc_sf_have2
+    b .Lsc_sf_have2
     add x0, sp, #96
     mov x3, x13
     bl _az_msg_size
@@ -370,7 +370,7 @@ _az_run_strchecks:
     b .Lsc_se_msg
 .Lsc_se_fail_ew:
     AZ_ADR x9, .Lv_endswith
-    mov x10, #9
+    mov x10, #8
     AZ_ADR x11, .Lm_ew_pre
     mov x12, #29
     b .Lsc_se_msg
@@ -393,7 +393,7 @@ _az_run_strchecks:
     // build "prefix \"needle\"" into buf; custom msg overrides
     stp x9, x10, [sp, #88]
     ldp x6, x7, [sp, #56]        // custom msg
-    cbnz x7, .Lsc_se_issue
+    b .Lsc_se_issue
     add x10, sp, #104            // buf past the x88/x96 saves
     mov x13, x11
     mov x16, x12
@@ -424,13 +424,33 @@ _az_run_strchecks:
     ldp x0, x1, [sp, #88]
     mov x2, x6
     mov x3, x7
+    // extra field: prefix/suffix/includes = needle
+    ldr x12, [sp, #72]
+    ldr x7, [x12]              // needle len
+    add x6, x12, #8            // needle bytes
+    ldr w9, [sp, #80]
+    cmp w9, #8
+    b.eq .Lsc_se_suf
+    cmp w9, #9
+    b.eq .Lsc_se_inc
+    AZ_ADR x4, .Lk_prefix
+    mov x5, #6
+    b .Lsc_se_call
+.Lsc_se_suf:
+    AZ_ADR x4, .Lk_suffix
+    mov x5, #6
+    b .Lsc_se_call
+.Lsc_se_inc:
+    AZ_ADR x4, .Lk_includes
+    mov x5, #8
+.Lsc_se_call:
     bl _az_issue_invstr
     cbnz x0, .Lsc_retx
     mov x9, #1
     str x9, [sp, #400]
     b .Lsc_nextv
 
-// ---- regex (param u64 cbid) ----
+// ---- regex (param u64 cbid + u64 srclen + src) ----
 .Lsc_regex:
     ldr x12, [sp, #72]
     ldr x13, [x12]               // cbid
@@ -441,9 +461,12 @@ _az_run_strchecks:
     mov x2, x14
     mov x3, x15
     blr x16
-    mov x9, #8
     cbz w0, .Lsc_fmt_regex
-    b .Lsc_next
+    ldr x12, [sp, #72]
+    ldr x9, [x12, #8]            // srclen
+    add x27, x12, x9
+    add x27, x27, #16
+    b .Lsc_cont
 .Lsc_fmt_regex:
     AZ_ADR x9, .Lv_regex
     mov x10, #5
@@ -505,20 +528,38 @@ _az_run_strchecks:
 // shared format-fail tail: x9=vname x10=vlen x11=dmsg x12=dmsglen
 .Lsc_fmt_fail:
     ldp x2, x3, [sp, #56]        // custom msg override
-    cbnz x3, .Lsc_ff2
+    b .Lsc_ff2
     mov x2, x11
     mov x3, x12
 .Lsc_ff2:
     mov x1, x10
     mov x0, x9
+    mov x4, #0
+    mov x5, #0
+    ldr w9, [sp, #80]
+    cmp w9, #0x0A
+    b.ne .Lsc_ff_call
+    // regex: extra field pattern = embedded src
+    ldr x12, [sp, #72]
+    ldr x7, [x12, #8]          // srclen
+    add x6, x12, #16           // src bytes
+    AZ_ADR x4, .Lk_pattern
+    mov x5, #7
+.Lsc_ff_call:
     bl _az_issue_invstr
     cbnz x0, .Lsc_retx
     mov x9, #1
     str x9, [sp, #400]
     ldr w9, [sp, #80]
-    cmp w9, #0x0A               // regex carries an 8B cbid param
-    b.eq .Lsc_next8
+    cmp w9, #0x0A               // regex: cbid + srclen + src
+    b.eq .Lsc_nextrx
     b .Lsc_next0
+.Lsc_nextrx:
+    ldr x12, [sp, #72]
+    ldr x13, [x12, #8]
+    add x27, x12, x13
+    add x27, x27, #16
+    b .Lsc_cont
 
 // advance: x9 = param size (or .Lsc_nextv recomputes for var-len)
 .Lsc_next:
@@ -636,7 +677,7 @@ _az_run_numchecks:
     str x9, [sp, #116]           // bound bits (unaligned ok on stack? keep aligned)
     // msg: custom or build "prefix<bound>"
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Lnc_bf_have
+    b .Lnc_bf_have
     add x0, sp, #128
     fmov d0, d1
     mov x3, #0
@@ -674,9 +715,9 @@ _az_run_numchecks:
     b.hs .Lnc_int_fail
     b .Lnc_next0
 .Lnc_int_fail:
-    // invalid_type expected "integer"
+    // invalid_type expected "int" (+format:"safeint" via normalizer)
     AZ_ADR x0, .Lty_integer
-    mov x1, #7
+    mov x1, #3
     mov w2, #3                   // tag f64
     ldr x3, [sp, #40]
     bl _az_issue_type
@@ -718,7 +759,7 @@ _az_run_numchecks:
     fmov x9, d1
     str x9, [sp, #88]
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Lnc_m_have
+    b .Lnc_m_have
     add x0, sp, #128
     AZ_ADR x1, amn_mult
     mov x2, #29
@@ -737,7 +778,7 @@ _az_run_numchecks:
     bl _az_issue_begin
     cbnz x0, .Lnc_retx
     AZ_ADR x0, .Lk_multof
-    mov x1, #10
+    mov x1, #7
     ldr d0, [sp, #88]
     bl _az_issue_f_f64
     cbnz x0, .Lnc_retx
@@ -774,7 +815,7 @@ _az_run_numchecks:
     stp x1, x2, [sp, #96]
     str w4, [sp, #112]
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Lnc_bf_have
+    b .Lnc_bf_have
     add x0, sp, #128
     ldr d0, [sp, #116]
     mov x3, #0
@@ -846,7 +887,7 @@ _az_run_bigintchecks:
     cmp x14, x13
     b.le .Lbc_next8
     AZ_ADR x1, amb_lte
-    mov x2, #38
+    mov x2, #37
     mov w4, #1
     mov x0, #9
     b .Lbc_boundfail
@@ -854,7 +895,7 @@ _az_run_bigintchecks:
     cmp x14, x13
     b.gt .Lbc_next8
     AZ_ADR x1, amb_gt
-    mov x2, #29
+    mov x2, #28
     mov w4, #0
     mov x0, #8
     b .Lbc_boundfail
@@ -862,7 +903,7 @@ _az_run_bigintchecks:
     cmp x14, x13
     b.ge .Lbc_next8
     AZ_ADR x1, amb_gte
-    mov x2, #41
+    mov x2, #40
     mov w4, #1
     mov x0, #8
     b .Lbc_boundfail
@@ -870,7 +911,7 @@ _az_run_bigintchecks:
     cmp x14, x13
     b.lt .Lbc_next8
     AZ_ADR x1, amb_lt
-    mov x2, #26
+    mov x2, #25
     mov w4, #0
     mov x0, #9
     b .Lbc_boundfail
@@ -881,7 +922,7 @@ _az_run_bigintchecks:
     str w4, [sp, #112]
     str x13, [sp, #116]
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Lbc_bf_have
+    b .Lbc_bf_have
     // build msg "prefix<N>" via sdec
     add x0, sp, #128
     mov x10, x0
@@ -943,11 +984,11 @@ _az_run_bigintchecks:
     cbz x15, .Lbc_next8
     str x13, [sp, #116]
     ldp x6, x7, [sp, #56]
-    cbnz x7, .Lbc_mb_have
+    b .Lbc_mb_have
     add x0, sp, #128
     mov x10, x0
     AZ_ADR x11, amb_mult
-    mov x12, #30
+    mov x12, #29
 .Lbc_mm1:
     ldrb w15, [x11], #1
     strb w15, [x10], #1
@@ -966,7 +1007,7 @@ _az_run_bigintchecks:
     bl _az_issue_begin
     cbnz x0, .Lbc_retx
     AZ_ADR x0, .Lk_multof
-    mov x1, #10
+    mov x1, #7
     ldr x2, [sp, #116]
     bl _az_issue_f_i64
     cbnz x0, .Lbc_retx
@@ -1071,8 +1112,8 @@ _az_is_url:
 .Lty_string:   .ascii "string"
 .Lty_number:   .ascii "number"
 .Lty_bigint:   .ascii "bigint"
-.Lty_integer:  .ascii "integer"
-.Lk_multof:    .ascii "multipleOf"
+.Lty_integer:  .ascii "int"
+.Lk_multof:    .ascii "divisor"
 .Lv_email:     .ascii "email"
 .Lv_uuid:      .ascii "uuid"
 .Lv_url:       .ascii "url"
@@ -1092,6 +1133,10 @@ _az_is_url:
 .Lv_includes:  .ascii "includes"
 .Lv_lowercase: .ascii "lowercase"
 .Lv_uppercase: .ascii "uppercase"
+.Lk_prefix:    .ascii "prefix"
+.Lk_suffix:    .ascii "suffix"
+.Lk_includes:  .ascii "includes"
+.Lk_pattern:   .ascii "pattern"
 .Lm_email:     .ascii "Invalid email"
 .Lm_uuid:      .ascii "Invalid UUID"
 .Lm_url:       .ascii "Invalid url"
