@@ -140,7 +140,7 @@ _az_issue_f_str:
     mov w0, #4                 // STRING tag
     bl _az_ew1
     cbnz x0, .Lfs_fail
-    ldr x0, [sp, #32]
+    ldr x0, [sp, #40]          // vlen
     bl _az_ew8
     cbnz x0, .Lfs_fail
     ldp x0, x1, [sp, #32]
@@ -597,7 +597,7 @@ _az_hosttype_table:
     .quad .Lh5, 5               // class / object
     .quad .Lh6, 7               // unknown
 
-    .section __TEXT,__cstring
+    .section __TEXT,__const
 .Lc0:  .ascii "invalid_type"
 .Lc1:  .ascii "invalid_literal"
 .Lc2:  .ascii "custom"

@@ -30,8 +30,8 @@ _az_validate:
 // ---------- shared exits ----------
 .Lv_ret:
     ldp x27, x28, [sp, #16]
-    add sp, sp, #496
-    ldp x29, x30, [sp], #16
+    ldp x29, x30, [sp]
+    add sp, sp, #512
     ret
 .Lv_invalid:
     mov x0, #-2
@@ -1150,6 +1150,7 @@ _az_strtoi:
     .section __DATA,__const
     .p2align 3
 .Lv_jt:
+    .quad .Lv_badop
     .quad .Lv_string
     .quad .Lv_number
     .quad .Lv_boolean
@@ -1185,7 +1186,7 @@ _az_strtoi:
     .quad .Lv_symbol
     .quad .Lv_custom
 
-    .section __TEXT,__cstring
+    .section __TEXT,__const
 .Lex_string:    .ascii "string"
 .Lex_number:    .ascii "number"
 .Lex_boolean:   .ascii "boolean"
@@ -2909,7 +2910,7 @@ _az_strtoi:
     mov x1, #6
     b _az_vtype
 
-    .section __TEXT,__cstring
+    .section __TEXT,__const
 .Lk_keys:   .ascii "keys"
 .Lm_unk:    .ascii "Unrecognized key(s) in object: "
 .Lty_date:  .ascii "date"

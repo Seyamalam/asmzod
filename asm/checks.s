@@ -960,7 +960,7 @@ _az_issue_size:
     ldp x29, x30, [sp], #96
     ret
 
-    .section __TEXT,__cstring
+    .section __TEXT,__const
     .globl ams_atleast
     .globl ams_atmost
     .globl ams_exactly

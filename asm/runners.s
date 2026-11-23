@@ -573,8 +573,8 @@ _az_run_strchecks:
     mov x0, #0
 .Lsc_retx:
     ldp x27, x28, [sp, #16]
-    add sp, sp, #496
-    ldp x29, x30, [sp], #16
+    ldp x29, x30, [sp]
+    add sp, sp, #512
     ret
 
 // ============ az_run_numchecks(x0=chkptr,x1=count,d0=val,x2=valptr)
@@ -823,8 +823,8 @@ _az_run_numchecks:
     mov x0, #0
 .Lnc_retx:
     ldp x27, x28, [sp, #16]
-    add sp, sp, #496
-    ldp x29, x30, [sp], #16
+    ldp x29, x30, [sp]
+    add sp, sp, #512
     ret
 
 // ============ az_run_bigintchecks(x0=chkptr,x1=count,x2=i64 val,x3=valptr)
@@ -1013,8 +1013,8 @@ _az_run_bigintchecks:
     mov x0, #0
 .Lbc_retx:
     ldp x27, x28, [sp, #16]
-    add sp, sp, #496
-    ldp x29, x30, [sp], #16
+    ldp x29, x30, [sp]
+    add sp, sp, #512
     ret
 
 // az_is_url(x0=ptr,x1=len) -> w0 : scheme://rest approximation of new URL()
@@ -1087,7 +1087,7 @@ _az_is_url:
     mov w0, #0
     ret
 
-    .section __TEXT,__cstring
+    .section __TEXT,__const
 .Lty_string:   .ascii "string"
 .Lty_number:   .ascii "number"
 .Lty_bigint:   .ascii "bigint"
