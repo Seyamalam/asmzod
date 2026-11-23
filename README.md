@@ -114,16 +114,18 @@ an M-series Mac, Bun 1.4:
 
 | workload | asmzod | zod@4.6.7 | ratio |
 |---|---|---|---|
-| small object | 11.8µs | 0.13µs | ~92× slower |
-| union dispatch | 10.1µs | 0.16µs | ~62× slower |
-| failure + issues | 17.7µs | 0.55µs | ~32× slower |
-| array of 2000 objects | 4.23ms | 121µs | ~35× slower |
-| deep nested + 500-elem array | 104µs | 22µs | ~4.7× slower |
+| small object | 2.1µs | 0.13µs | ~17× slower |
+| union dispatch | 0.62µs | 0.17µs | ~3.8× slower |
+| failure + issues | 6.9µs | 0.41µs | ~17× slower |
+| array of 2000 objects | 3.35ms | 98µs | ~34× slower |
+| deep nested + 500-elem array | 81µs | 20µs | ~4.0× slower |
 
-The ratio shrinks as inputs grow (92× → 4.7×) — the marshaling, not the
-engine, is the bottleneck. This project was never about speed; it's
-about answering the question "can you make `z.object()` run on raw ARM64"
-with "yes, and here's a 50-case differential suite to prove it."
+The ratio shrinks as inputs grow (17× → 4×) — the marshaling, not the
+engine, is the bottleneck. Buffer pooling took small-input parses from
+11.8µs to 2.1µs (encode→FFI→decode arenas are reused across calls).
+This project was never about speed; it's about answering the question
+"can you make `z.object()` run on raw ARM64" with "yes, and here's a
+117-case differential suite to prove it."
 
 ## Honest limitations
 

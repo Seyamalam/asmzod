@@ -165,11 +165,17 @@ export type ParseResult = ParseOk | ParseFail;
 
 const ERR_ISSUES_OFF = 3104;
 
+// pooled parse arenas — reused across calls; grow to the largest size seen
+// and stay there. Buffers are fully consumed before returning, so sharing
+// is safe within a thread.
+let poolOut = new ArrayBuffer(1 << 16), poolOutCap = 1 << 16;
+let poolErr = new ArrayBuffer(1 << 16), poolErrCap = 1 << 16;
+
 export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): ParseResult {
-  let outCap = 1 << 16;
-  let errCap = 1 << 16;
-  let outv = new ArrayBuffer(outCap);
-  let oute = new ArrayBuffer(errCap);
+  let outCap = poolOutCap;
+  let errCap = poolErrCap;
+  let outv = poolOut;
+  let oute = poolErr;
   curHosts = hosts;
   pendingThrow = null;
 
@@ -183,8 +189,8 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
     ) as bigint;
 
     if (process.env.AZ_DEBUG) console.error("az status", status, "outCap", outCap, "errCap", errCap);
-    if (status === -3n) { outCap *= 4; outv = new ArrayBuffer(outCap); continue; }
-    if (status === -4n) { if (process.env.AZ_DEBUG) throw new Error("ENOSPC"); errCap *= 4; oute = new ArrayBuffer(errCap); continue; }
+    if (status === -3n) { outCap *= 4; outv = new ArrayBuffer(outCap); poolOut = outv; poolOutCap = outCap; continue; }
+    if (status === -4n) { if (process.env.AZ_DEBUG) throw new Error("ENOSPC"); errCap *= 4; oute = new ArrayBuffer(errCap); poolErr = oute; poolErrCap = errCap; continue; }
     if (pendingThrow !== null) { const e = pendingThrow; pendingThrow = null; throw e; }
 
     if (status === 0n) {
