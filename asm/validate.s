@@ -225,7 +225,8 @@ _az_vtype:
     ldr x2, [x28, #1]
     mov x3, #0
     blr x9
-    cbz x0, .Lvsym_no
+    cmp x0, #0
+    b.eq .Lvsym_no
     mov x9, #9
     b .Lv_passn
 .Lvsym_no:
@@ -676,7 +677,8 @@ _az_vtype:
     ldr x9, [x24, #16]         // cb_lazy = table[2]
     ldr x0, [x27, #1]
     blr x9
-    cbz x0, .Lv_badop
+    cmp x0, #0
+    b.eq .Lv_badop
     mov x1, x28
     bl _az_validate            // x0=node ptr
     b .Lv_ret
@@ -693,7 +695,8 @@ _az_vtype:
     ldr x2, [x28, #1]          // hostref idx
     mov x3, #0
     blr x9
-    cbz x0, .Lio_fail
+    cmp x0, #0
+    b.eq .Lio_fail
     mov x9, #9
     b .Lv_passn
 .Lio_fail:
@@ -711,7 +714,8 @@ _az_vtype:
     mov x2, x28
     mov x3, #0
     blr x9
-    cbz x0, .Lcu_fail
+    cmp x0, #0
+    b.eq .Lcu_fail
     b .Lv_pass
 .Lcu_fail:
     ldr x2, [x27, #9]
@@ -1788,7 +1792,8 @@ _az_strtoi:
     mov x1, x0
     ldr x0, [sp, #80]
     bl _az_validate
-    cbz x0, .Lrc_vval
+    cmp x0, #0
+    b.eq .Lrc_vval
     cmp x0, #-2
     b.ne .Lv_ret
     mov x9, #1
@@ -2652,7 +2657,8 @@ _az_strtoi:
     ldr x2, [x28, #1]
     mov x3, #0
     blr x9
-    cbz x0, .Ldt_fail
+    cmp x0, #0
+    b.eq .Ldt_fail
     // getTime
     ldr x9, [x24, #24]
     mov x0, #3
@@ -2830,11 +2836,16 @@ _az_strtoi:
     mov x3, x19
     blr x9
     cmp x0, #0
+    b.eq .Lczs_cbfail          // coercion threw -> invalid_type w/ original type
     b.lt .Lv_ret
     mov x1, x19
     add x19, x19, x0
     mov x0, x1
     b .Lcz_inner
+.Lczs_cbfail:
+    AZ_ADR x0, .Lex_string
+    mov x1, #6
+    b _az_vtype
 
 // ---------- 0x1D COERCE_NUM ----------
 .Lv_coerce_num:
@@ -2888,11 +2899,16 @@ _az_strtoi:
     mov x3, x19
     blr x9
     cmp x0, #0
+    b.eq .Lczn_cbfail
     b.lt .Lv_ret
     mov x1, x19
     add x19, x19, x0
     mov x0, x1
     b .Lcz_inner
+.Lczn_cbfail:
+    AZ_ADR x0, .Lex_number
+    mov x1, #6
+    b _az_vtype
 
 // ---------- 0x1E COERCE_BOOL ----------
 .Lv_coerce_bool:
@@ -3001,6 +3017,7 @@ _az_strtoi:
     mov x3, x19
     blr x9
     cmp x0, #0
+    b.eq .Lcbi_fail
     b.lt .Lv_ret
     mov x1, x19
     add x19, x19, x0
