@@ -1,5 +1,12 @@
 # AsmZod
 
+> **This project is for shits and giggles.** Nobody asked for this. Nobody
+> needed this. We took a perfectly good, JIT-optimized, battle-tested
+> TypeScript validation library and reimplemented its core in **hand-written
+> ARM64 assembly** — because "it works" was never the point. If you're
+> evaluating this for production: seek help. If you're reading the source:
+> welcome, bring popcorn and a debugger.
+
 A drop-in [Zod](https://zod.dev) replacement where the **entire validation
 engine is written in ARM64 assembly**.
 
