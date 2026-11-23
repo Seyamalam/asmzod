@@ -197,6 +197,7 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
   pendingThrow = null;
 
   for (;;) {
+    if ((process.env as any)?.AZ_POISON) { new Uint8Array(outv).fill(0xaa); new Uint8Array(oute).fill(0xaa); }
     curOut = { base: ptr(outv), cap: outCap };
     const status = (lib.symbols as any)[P + "az_parse"](
       ptr(blob), ptr(input),

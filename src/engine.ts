@@ -101,7 +101,7 @@ function msgOf(r: R): string | undefined {
 }
 
 function sizeFail(c: Ctx, code: "too_small" | "too_big", origin: string,
-  limit: bigint, inclusive: boolean, exact: boolean, msg?: string) {
+  limit: bigint, inclusive: boolean, exact: boolean, msg?: string, nc?: boolean) {
   // zod emits number for f64-origin limits, bigint for bigint-schema limits;
   // coerce when it fits so issues stay JSON-serializable
   const lim: number | bigint =
@@ -110,7 +110,8 @@ function sizeFail(c: Ctx, code: "too_small" | "too_big", origin: string,
         ? Number(limit) : limit;
   pushIssue(c, code, {
     type: origin, [code === "too_small" ? "minimum" : "maximum"]: lim,
-    inclusive, ...(exact ? { exact: true } : {}), ...(msg ? { message: msg } : {}),
+    inclusive, ...(exact ? { exact: true } : {}), ...(nc ? { _nc: true } : {}),
+    ...(msg ? { message: msg } : {}),
   });
 }
 
@@ -442,24 +443,32 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const ips: number[] = [];
       for (let i = 0; i < n; i++) { const fp = r.pos; ips.push(fp + Number(r.i64())); }
       const rf = r.pos; const restRel = r.i64(); const restPos = rf + Number(restRel);
+      const minItems = Number(r.u64());
+      const optoutStart = Number(r.u64());
       const items = Array.isArray(v) ? v : null;
       if (!items) { pushIssue(c, "invalid_type", { expected: "tuple", received: typeName(v) }); throw FAILED; }
       const before = c.issues.length;
-      if (restRel === 0n && items.length !== n) {
+      if (restRel === 0n && (items.length < minItems || items.length > n)) {
         // zod: arity mismatch emits a non-exact size issue; under-length skips
         // element validation, over-length still validates the fixed slots
-        sizeFail(c, items.length < n ? "too_small" : "too_big", "array", BigInt(n), true, false, undefined);
-        if (items.length < n) throw FAILED;
+        sizeFail(c, items.length < minItems ? "too_small" : "too_big", "array",
+          BigInt(items.length < minItems ? minItems : n), true, false, undefined, true);
+        if (items.length < minItems) throw FAILED;
       }
-      const eff = restRel !== 0n ? Math.max(items.length, n) : Math.min(items.length, n);
-      const out: unknown[] = [];
+      // absent fixed slots still get validated as undefined: catch fills them,
+      // optional accepts them
+      const eff = restRel !== 0n ? Math.max(items.length, n) : n;
+      const results: { ok: boolean; value: unknown }[] = [];
       for (let i = 0; i < eff; i++) {
         const res = atKey(c, i, () =>
-          tryValidate(new R(r.b, i < n ? ips[i] : restPos), items[i], c));
-        out[i] = res.ok ? res.value : items[i];
+          tryValidate(new R(r.b, i < n ? ips[i] : restPos), i < items.length ? items[i] : undefined, c));
+        results.push(res);
       }
-      for (let i = eff; i < items.length; i++) out[i] = items[i];
       if (c.issues.length !== before) throw FAILED;
+      const outLen = Math.max(Math.min(items.length, eff), optoutStart);
+      const out: unknown[] = [];
+      for (let i = 0; i < outLen; i++)
+        out[i] = results[i]!.ok ? results[i]!.value : (i < items.length ? items[i] : undefined);
       return out;
     }
     case 0x14: { // record

@@ -250,6 +250,38 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): voi
       w.u64(d.items.length);
       const fps = d.items.map(() => w.field());
       const rf = w.field();
+      // optinStart: trailing items that can be absent in input. Omittable =
+      // optional/default/prefault/catch; transparent wrappers propagate;
+      // pipe truncates (its optin is its own).
+      const omittable = (s: SchemaLike): boolean => {
+        const d = (s as any)._def;
+        switch (d?.type) {
+          case "optional": case "default": case "prefault": case "catch": return true;
+          case "nullable": case "readonly": case "refine": case "brand": case "transform":
+            return omittable(d.inner ?? d.innerType ?? d.in);
+          case "union": return (d.options as SchemaLike[]).some(omittable);
+          default: return false;
+        }
+      };
+      let minItems = d.items.length;
+      while (minItems > 0 && omittable(d.items[minItems - 1])) minItems--;
+      w.u64(BigInt(minItems));
+      // optoutStart: trailing items whose output may be absent — optional and
+      // transparent wrappers; everything else truncates the count there
+      const optoutOptional = (s: SchemaLike): boolean => {
+        const d = (s as any)._def;
+        switch (d?.type) {
+          case "optional": return true;
+          case "nullable": case "readonly": case "refine": case "brand":
+          case "transform": case "catch":
+            return optoutOptional(d.inner ?? d.innerType ?? d.in);
+          case "pipe": return optoutOptional(d.out ?? d.inner ?? d.in);
+          default: return false;
+        }
+      };
+      let optoutStart = d.items.length;
+      while (optoutStart > 0 && optoutOptional(d.items[optoutStart - 1])) optoutStart--;
+      w.u64(BigInt(optoutStart));
       d.items.forEach((it: SchemaLike, i: number) => {
         const at = w.pos;
         emit(w, it, hosts, unions);

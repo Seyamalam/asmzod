@@ -34,7 +34,17 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     // get their per-option errors by re-running the registered options on the
     // value at the issue's path
     if (!r.ok) {
+      // aborted is judged on the raw issue set — `_nc` (payload-level size
+      // issues like tuple arity) counts before it is stripped
+      let aborted = isAborted(r.issues);
+      // `_u`-tagged invalid_union issues re-run their registered options on the
+      // value at the issue's path: exactly one non-aborted option (all issues
+      // from continue:true checks) surfaces its issues in place of the union
+      // issue; otherwise the union issue carries per-option errors arrays
+      const out: ZodIssue[] = [];
+      let spliced = false;
       for (const i of r.issues) {
+        delete (i as any)._nc;
         if (i.code === "invalid_union" && (i as any)._u !== undefined &&
             (i as any).errors === undefined) {
           const u = (c.unions as any[])[(i as any)._u];
@@ -43,12 +53,23 @@ export abstract class ZodType<Output = unknown, Input = Output> {
             let v: any = data;
             for (const p of i.path ?? []) v = v?.[p as any];
             const runs = (u._def.options as ZodTypeAny[]).map((o) => o._run(v));
+            const cands = runs.filter(
+              (x): x is { ok: false; issues: ZodIssue[] } =>
+                !x.ok && !((x as any).aborted ?? isAborted(x.issues)));
+            if (cands.length === 1) {
+              spliced = true;
+              for (const iss of cands[0].issues)
+                out.push({ ...iss, path: [...(i.path ?? []), ...(iss.path ?? [])] });
+              continue;
+            }
             (i as any).errors = runs.map((x) => (x.ok ? [] : x.issues));
           }
-        } else if ((i as any)._u !== undefined) {
-          delete (i as any)._u;
         }
+        if ((i as any)._u !== undefined) delete (i as any)._u;
+        out.push(i);
       }
+      if (spliced) { r.issues = out; aborted = isAborted(r.issues); }
+      (r as any).aborted = aborted;
     }
     // superRefine issues pushed by refine callbacks during this run replace the
     // engine's generic `custom` placeholder issues, in order
@@ -363,9 +384,20 @@ export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodTy
 export class ZodNonOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodType<NonNullable<T["_output"]>, T["_input"]> {
   constructor(_def: any) { super(); this._def = { ..._def, type: "nonoptional" }; }
   protected override _run(data: unknown) {
-    if (data === undefined) return { ok: false as const, issues: [typeIssue("nonoptional", data)] };
+    if (data === undefined) return { ok: false as const, issues: [typeIssue("nonoptional", data)], aborted: true };
     return (this._def.inner as ZodTypeAny)._run(data);
   }
+}
+
+// zod abort semantics: issues raised by checks (continue:true) can still be
+// surfaced by a union's single-nonaborted-option rule; structural issues —
+// and payload-level size issues like tuple arity — always abort the option
+const CONTINUING_CODES = new Set([
+  "too_small", "too_big", "invalid_format", "not_multiple_of",
+  "unrecognized_keys", "custom",
+]);
+function isAborted(issues: any[]): boolean {
+  return issues.some((i) => i._nc || !CONTINUING_CODES.has(i.code));
 }
 
 function typeIssue(expected: string, received: unknown): ZodIssue {
@@ -383,7 +415,7 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
   constructor(_def: any) { super(); this._def = _def; }
 
   protected override _run(data: unknown) {
-    if (!(data instanceof Map)) return { ok: false as const, issues: [typeIssue("map", data)] };
+    if (!(data instanceof Map)) return { ok: false as const, issues: [typeIssue("map", data)], aborted: true };
     const { keyType, valueType } = this._def as { keyType: ZodTypeAny; valueType: ZodTypeAny };
     const out = new Map();
     const issues: ZodIssue[] = [];
@@ -394,7 +426,7 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
       if (!vr.ok) issues.push(...vr.issues.map((i) => ({ ...i, path: [k, ...(i.path ?? [])] })));
       if (kr.ok && vr.ok) out.set(kr.value, vr.value);
     }
-    return issues.length ? { ok: false as const, issues } : { ok: true as const, value: out };
+    return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
   }
 }
 
@@ -403,7 +435,7 @@ export class ZodSet<V extends ZodTypeAny>
   constructor(_def: any) { super(); this._def = _def; }
 
   protected override _run(data: unknown) {
-    if (!(data instanceof Set)) return { ok: false as const, issues: [typeIssue("set", data)] };
+    if (!(data instanceof Set)) return { ok: false as const, issues: [typeIssue("set", data)], aborted: true };
     const { valueType } = this._def as { valueType: ZodTypeAny };
     const out = new Set();
     const issues: ZodIssue[] = [];
@@ -412,7 +444,7 @@ export class ZodSet<V extends ZodTypeAny>
       if (r.ok) out.add(r.value);
       else issues.push(...r.issues);
     }
-    return issues.length ? { ok: false as const, issues } : { ok: true as const, value: out };
+    return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
   }
 }
 
@@ -420,35 +452,9 @@ export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output
   constructor(_def: any) { super(); this._def = _def; }
   get options(): T { return this._def.options; }
 
-  override parse(data: unknown): T[number]["_output"] {
-    const r = this._run(data);
-    if (!r.ok) { this._resolve(r.issues, data); throw new ZodError(r.issues); }
-    return r.value as T[number]["_output"];
-  }
-  override safeParse(data: unknown): SafeParseResult<T[number]["_output"]> {
-    const r = this._run(data);
-    if (r.ok) return { success: true, data: r.value as T[number]["_output"] };
-    this._resolve(r.issues, data);
-    return { success: false, error: new ZodError(r.issues) };
-  }
-  // zod 4 best-match: exactly one option that got past its type check
-  // (no invalid_type/invalid_value issues) -> surface its issues directly;
-  // otherwise -> invalid_union carrying per-option errors arrays.
-  private _resolve(issues: ZodIssue[], data: unknown): void {
-    const runs = this._def.options.map((o: ZodTypeAny) => o._run(data));
-    const candidates = runs.filter(
-      (r): r is { ok: false; issues: ZodIssue[] } =>
-        !r.ok && !r.issues.some((i) => i.code === "invalid_type" || i.code === "invalid_value"));
-    if (candidates.length === 1) {
-      issues.splice(0, issues.length, ...candidates[0].issues);
-      return;
-    }
-    for (const i of issues) {
-      if (i.code === "invalid_union" && (i as any).errors === undefined) {
-        (i as any).errors = runs.map((r) => (r.ok ? [] : r.issues));
-      }
-    }
-  }
+  // union resolution happens in ZodType._run via the engine's `_u` marker:
+  // exactly one non-aborted option surfaces its issues in place of the
+  // invalid_union issue; otherwise per-option errors arrays attach
 }
 
 export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {

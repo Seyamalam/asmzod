@@ -3,6 +3,7 @@
 #ifdef __APPLE__
 #define AZ_RODATA .section __TEXT,__const
 #define AZ_DATA   .section __DATA,__const
+#define AZ_WDATA  .section __DATA,__data
 .macro AZ_HIDDEN sym
 	.private_extern \sym
 .endm
@@ -13,6 +14,7 @@
 #else
 #define AZ_RODATA .section .rodata
 #define AZ_DATA   .section .data.rel.ro
+#define AZ_WDATA  .section .data
 .macro AZ_HIDDEN sym
 	.hidden \sym
 .endm

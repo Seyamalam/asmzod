@@ -967,9 +967,20 @@ _az_issue_size:
     cbnz x0, .Lsz_out
     // exact (only if set)
     ldr w9, [sp, #48]
-    cbz w9, .Lsz_commit
+    cbz w9, .Lsz_nc
     AZ_ADR x0, ak_exact
     mov x1, #5
+    mov w2, #1
+    bl _az_issue_f_bool
+    cbnz x0, .Lsz_out
+.Lsz_nc:
+    // _nc marker for payload-level (non-check) size issues, e.g. tuple arity —
+    // zod counts such failures as aborted for union best-match purposes
+    AZ_ADR x9, az_nc_flag
+    ldrb w9, [x9]
+    cbz w9, .Lsz_commit
+    AZ_ADR x0, ak_nc
+    mov x1, #3
     mov w2, #1
     bl _az_issue_f_bool
     cbnz x0, .Lsz_out
@@ -1039,6 +1050,14 @@ ak_inclusive:  .ascii "inclusive"
     .globl ak_exact
     AZ_HIDDEN ak_exact
 ak_exact:      .ascii "exact"
+    .globl ak_nc
+    AZ_HIDDEN ak_nc
+ak_nc:         .ascii "_nc"
+    AZ_WDATA
+    .globl az_nc_flag
+    AZ_HIDDEN az_nc_flag
+az_nc_flag:    .byte 0
+    .text
 ams_atleast:   .ascii "String must contain at least "
 ams_atmost:    .ascii "String must contain at most "
 ams_exactly:   .ascii "String must contain exactly "

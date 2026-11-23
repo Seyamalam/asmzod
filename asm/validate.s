@@ -1497,12 +1497,15 @@ _az_strtoi:
     lsl x12, x10, #3
     add x11, x11, x12
     str x11, [sp, #56]         // rest field addr
-    // eff_n = rest ? max(nin, nitems) : min(nin, nitems)
+    ldr x12, [x11, #8]         // minItems (optinStart) — sits after rest field
+    str x12, [sp, #176]
+    ldr x12, [x11, #16]        // optoutStart — trailing optional-out count
+    str x12, [sp, #184]
+    // eff_n = rest ? max(nin, nitems) : nitems
+    // (absent fixed slots still get validated as undefined — a catch fills
+    // them, an optional accepts them)
     ldr x11, [x11]
     cbnz x11, .Ltu_effall
-    ldr x9, [sp, #40]
-    cmp x9, x10
-    b.ls .Ltu_eff
     mov x9, x10
     b .Ltu_eff
 .Ltu_effall:
@@ -1515,7 +1518,8 @@ _az_strtoi:
     str xzr, [sp, #168]        // lenfail
     // length checks: emit issue + flag, still validate present elems
     ldr x9, [sp, #40]
-    cmp x9, x10
+    ldr x13, [sp, #176]
+    cmp x9, x13
     b.hs .Ltu_over
     // under-length: with rest, missing fixed items are validated as
     // undefined (-> invalid_type@idx) rather than a size issue
@@ -1523,20 +1527,26 @@ _az_strtoi:
     ldr x11, [x11]
     cbnz x11, .Ltu_lenok
     // too_small, non-exact; length mismatch skips element validation
+    AZ_ADR x9, az_nc_flag
+    mov w10, #1
+    strb w10, [x9]
     mov x7, #0             // default msg -> TS normalizer
     mov x0, #8
     AZ_ADR x1, .Lty_array
     mov x2, #5
-    ldr x3, [sp, #48]
+    ldr x3, [sp, #176]
     ucvtf d0, x3
     fmov x3, d0
     mov w4, #1
     mov w5, #0
     bl _az_issue_size
+    AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
     cbnz x0, .Lv_ret
     mov x9, #1
     str x9, [sp, #168]
     str x20, [sp, #32]
+    str xzr, [sp, #64]         // pushed count = 0 (validation skipped)
     b .Ltu_emit
 .Ltu_over:
     ldr x11, [sp, #56]
@@ -1547,6 +1557,9 @@ _az_strtoi:
     cmp x9, x10
     b.ls .Ltu_lenok
     // too_big, non-exact; extra positions still get element-validated
+    AZ_ADR x9, az_nc_flag
+    mov w10, #1
+    strb w10, [x9]
     mov x7, #0             // default msg -> TS normalizer
     mov x0, #9
     AZ_ADR x1, .Lty_array
@@ -1557,6 +1570,8 @@ _az_strtoi:
     mov w4, #1
     mov w5, #0
     bl _az_issue_size
+    AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
     cbnz x0, .Lv_ret
     mov x9, #1
     str x9, [sp, #168]
@@ -1601,6 +1616,7 @@ _az_strtoi:
 .Ltu_undef:
     AZ_ADR x1, .Lundef_val
 .Ltu_havev:
+    str x1, [sp, #200]         // actual value ptr (cur or .Lundef_val)
     bl _az_validate
     str x0, [sp, #96]
     stp x1, x2, [sp, #104]
@@ -1619,11 +1635,11 @@ _az_strtoi:
     b.ne .Lv_ret
     mov x9, #1
     str x9, [sp, #80]
-    ldr x1, [sp, #72]
+    ldr x1, [sp, #200]
     mov x0, x1
     bl _az_vsize
     mov x3, x0
-    ldr x2, [sp, #72]
+    ldr x2, [sp, #200]
     mov x0, #0
     mov x1, #0
     mov x4, #0
@@ -1649,19 +1665,29 @@ _az_strtoi:
     cbnz x9, .Ltu_fail_pop
     ldr x9, [sp, #168]
     cbnz x9, .Ltu_fail_pop      // length mismatch also fails
+    // emit count = max(nin, optoutStart): absent optional-out tail truncates,
+    // absent slots that produced real values (catch) are kept
+    ldr x9, [sp, #40]
+    ldr x12, [sp, #184]
+    cmp x9, x12
+    b.hs .Ltu_olen
+    mov x9, x12
+.Ltu_olen:
+    str x9, [sp, #192]
     str x19, [sp, #120]        // emit start S
     mov w0, #7
     bl _az_vw1
     cbnz x0, .Lv_ret
-    ldr x0, [sp, #160]
+    ldr x0, [sp, #192]
     bl _az_vw8
     cbnz x0, .Lv_ret
     str xzr, [sp, #64]
 .Ltu_eloop:
     ldr x9, [sp, #64]
-    ldr x10, [sp, #160]
+    ldr x10, [sp, #192]
     cmp x9, x10
     b.hs .Ltu_edone
+    ldr x10, [sp, #160]        // pair buffer holds eff_n entries
     sub x11, x10, x9
     sub x11, x11, #1
     mov x12, #40
@@ -1685,7 +1711,7 @@ _az_strtoi:
     add x20, x20, x9
     b .Lv_ret
 .Ltu_fail_pop:
-    ldr x9, [sp, #160]
+    ldr x9, [sp, #64]          // pop only what was actually pushed
     mov x10, #40
     mul x9, x9, x10
     add x20, x20, x9
