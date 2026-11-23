@@ -1,0 +1,23 @@
+// port.h — dual-target (Mach-O / ELF) asm portability layer.
+// Assemble with `clang -x assembler-with-cpp` so these macros expand.
+#ifdef __APPLE__
+#define AZ_RODATA .section __TEXT,__const
+#define AZ_DATA   .section __DATA,__const
+.macro AZ_HIDDEN sym
+	.private_extern \sym
+.endm
+.macro AZ_ADR reg, sym
+	adrp \reg, \sym@PAGE
+	add  \reg, \reg, \sym@PAGEOFF
+.endm
+#else
+#define AZ_RODATA .section .rodata
+#define AZ_DATA   .section .data.rel.ro
+.macro AZ_HIDDEN sym
+	.hidden \sym
+.endm
+.macro AZ_ADR reg, sym
+	adrp \reg, \sym
+	add  \reg, \reg, :lo12:\sym
+.endm
+#endif

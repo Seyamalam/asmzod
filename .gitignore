@@ -8,3 +8,5 @@ dist/
 # test driver binaries
 test/drv
 test/drv[0-9]
+*.so
+core

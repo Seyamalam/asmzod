@@ -1,3 +1,4 @@
+#include "port.h"
 // issues.s — path stack + issue emission into err arena
 //
 // err buffer header:
@@ -15,6 +16,7 @@
 // ---------- path stack ----------
 // az_path_push_key(x0=keyptr, x1=keylen)
     .globl _az_path_push_key
+    AZ_HIDDEN _az_path_push_key
 _az_path_push_key:
     ldr x9, [x22, #8]
     cmp x9, #128
@@ -32,6 +34,7 @@ _az_path_push_key:
 
 // az_path_push_idx(x0=idx)
     .globl _az_path_push_idx
+    AZ_HIDDEN _az_path_push_idx
 _az_path_push_idx:
     ldr x9, [x22, #8]
     cmp x9, #128
@@ -49,6 +52,7 @@ _az_path_push_idx:
     ret
 
     .globl _az_path_pop
+    AZ_HIDDEN _az_path_pop
 _az_path_pop:
     ldr x9, [x22, #8]
     cbz x9, .Lpp_done
@@ -60,6 +64,7 @@ _az_path_pop:
 // ---------- low-level err writers ----------
 // _ew(x0=ptr, x1=len): append bytes at x21 -> x0=0 or -4 ENOSPC
     .globl _az_ew
+    AZ_HIDDEN _az_ew
 _az_ew:
     add x9, x21, x1
     cmp x9, x23
@@ -92,6 +97,7 @@ _az_ew:
 
 // _ew1(w0=byte)
     .globl _az_ew1
+    AZ_HIDDEN _az_ew1
 _az_ew1:
     cmp x21, x23
     b.hs .Lew1_oom
@@ -104,6 +110,7 @@ _az_ew1:
 
 // _ew8(x0=u64)
     .globl _az_ew8
+    AZ_HIDDEN _az_ew8
 _az_ew8:
     add x9, x21, #8
     cmp x9, x23
@@ -120,6 +127,7 @@ _az_ew8:
 
 // az_issue_f_str(x0=kptr,x1=klen, x2=vptr,x3=vlen) -> x0 0/-4
     .globl _az_issue_f_str
+    AZ_HIDDEN _az_issue_f_str
 _az_issue_f_str:
     stp x29, x30, [sp, #-64]!
     mov x29, sp
@@ -153,6 +161,7 @@ _az_issue_f_str:
 
 // az_issue_f_f64(x0=kptr,x1=klen, d0=val) -> 0/-4
     .globl _az_issue_f_f64
+    AZ_HIDDEN _az_issue_f_f64
 _az_issue_f_f64:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
@@ -181,6 +190,7 @@ _az_issue_f_f64:
 
 // az_issue_f_bool(x0=kptr,x1=klen, w2=val)
     .globl _az_issue_f_bool
+    AZ_HIDDEN _az_issue_f_bool
 _az_issue_f_bool:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
@@ -209,6 +219,7 @@ _az_issue_f_bool:
 
 // az_issue_f_rawval(x0=kptr,x1=klen, x2=vptr,x3=vlen): value bytes already tagged
     .globl _az_issue_f_rawval
+    AZ_HIDDEN _az_issue_f_rawval
 _az_issue_f_rawval:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
@@ -235,6 +246,7 @@ _az_issue_f_rawval:
 // az_issue_f_strarr(x0=kptr,x1=klen, x2=pairptr,x3=count)
 // pairptr -> array of {u64 ptr, u64 len}
     .globl _az_issue_f_strarr
+    AZ_HIDDEN _az_issue_f_strarr
 _az_issue_f_strarr:
     stp x29, x30, [sp, #-80]!
     mov x29, sp
@@ -287,6 +299,7 @@ _az_issue_f_strarr:
 // az_issue_begin(x0=code_idx, x1=msgptr, x2=msglen) -> x0 0/-4
 // writes {tag obj, cnt=0 patch, code, path, message}; count starts at 3
     .globl _az_issue_begin
+    AZ_HIDDEN _az_issue_begin
 _az_issue_begin:
     stp x29, x30, [sp, #-96]!
     mov x29, sp
@@ -310,12 +323,10 @@ _az_issue_begin:
     sub x9, x21, #8
     str x9, [x22, #16]         // patch ptr
     // field "code"
-    adrp x0, .Lk_code@PAGE
-    add x0, x0, .Lk_code@PAGEOFF
+    AZ_ADR x0, .Lk_code
     mov x1, #4
     // value = code name from table (stride 32)
-    adrp x2, _az_code_table@PAGE
-    add x2, x2, _az_code_table@PAGEOFF
+    AZ_ADR x2, _az_code_table
     lsl x10, x27, #5
     add x14, x2, x10
     ldp x2, x3, [x14]
@@ -329,8 +340,7 @@ _az_issue_begin:
     mov x0, #4
     bl _az_ew8                  // klen
     cbnz x0, .Lib_fail
-    adrp x0, .Lk_path@PAGE
-    add x0, x0, .Lk_path@PAGEOFF
+    AZ_ADR x0, .Lk_path
     mov x1, #4
     bl _az_ew
     cbnz x0, .Lib_fail
@@ -381,16 +391,14 @@ _az_issue_begin:
     cbnz x2, .Lib_havemsg
     // default message from table: stride 32, msg pair at +16
     ldr x27, [sp, #16]          // code idx (x27 was reused as loop counter)
-    adrp x9, _az_code_table@PAGE
-    add x9, x9, _az_code_table@PAGEOFF
+    AZ_ADR x9, _az_code_table
     lsl x10, x27, #5
     add x9, x9, x10
     ldp x1, x2, [x9, #16]
 .Lib_havemsg:
     mov x3, x2
     mov x2, x1
-    adrp x0, .Lk_message@PAGE
-    add x0, x0, .Lk_message@PAGEOFF
+    AZ_ADR x0, .Lk_message
     mov x1, #7
     bl _az_issue_f_str
     cbnz x0, .Lib_fail
@@ -407,6 +415,7 @@ _az_issue_begin:
 
 // az_issue_commit: ++issue_count
     .globl _az_issue_commit
+    AZ_HIDDEN _az_issue_commit
 _az_issue_commit:
     ldr x9, [x22]
     add x9, x9, #1
@@ -415,6 +424,7 @@ _az_issue_commit:
 
 // az_issue_rollback_open: restore x21 to open-issue start (uncommitted bytes)
     .globl _az_issue_rollback_open
+    AZ_HIDDEN _az_issue_rollback_open
 _az_issue_rollback_open:
     ldr x9, [x22, #24]
     cbz x9, .Lro_done
@@ -427,6 +437,7 @@ _az_issue_rollback_open:
 // emits code=invalid_type, msg "Expected X, received Y" (or "Required"),
 // fields expected/received
     .globl _az_issue_type
+    AZ_HIDDEN _az_issue_type
 _az_issue_type:
     stp x29, x30, [sp, #-128]!
     mov x29, sp
@@ -439,8 +450,7 @@ _az_issue_type:
     ldr d0, [x3, #1]
     fcmp d0, d0
     b.vc .Lit_notf64
-    adrp x9, .Ln_nan@PAGE
-    add x9, x9, .Ln_nan@PAGEOFF
+    AZ_ADR x9, .Ln_nan
     str x9, [sp, #48]
     mov x10, #3
     str x10, [sp, #56]
@@ -456,8 +466,7 @@ _az_issue_type:
     mov x3, #0
     blr x9
     // x0 = host type idx into host_names table
-    adrp x9, _az_hosttype_table@PAGE
-    add x9, x9, _az_hosttype_table@PAGEOFF
+    AZ_ADR x9, _az_hosttype_table
     mov x10, #16
     mul x10, x0, x10
     add x13, x9, x10
@@ -465,8 +474,7 @@ _az_issue_type:
     stp x11, x12, [sp, #48]
     b .Lit_gotname
 .Lit_named:
-    adrp x9, _az_tagname_table@PAGE
-    add x9, x9, _az_tagname_table@PAGEOFF
+    AZ_ADR x9, _az_tagname_table
     mov x10, #16
     mul x10, x2, x10
     add x13, x9, x10
@@ -477,8 +485,7 @@ _az_issue_type:
     ldr x9, [sp, #32]           // tag
     cbnz x9, .Lit_buildmsg
     // tag==0 (undefined) -> "Required"
-    adrp x1, .Lm_required@PAGE
-    add x1, x1, .Lm_required@PAGEOFF
+    AZ_ADR x1, .Lm_required
     mov x2, #8
     mov x0, #0                  // code = invalid_type
     bl _az_issue_begin
@@ -487,8 +494,7 @@ _az_issue_type:
 .Lit_buildmsg:
     add x10, sp, #64
     // "Expected " (9)
-    adrp x11, .Lm_expected@PAGE
-    add x11, x11, .Lm_expected@PAGEOFF
+    AZ_ADR x11, .Lm_expected
     mov x12, #9
 .Lit_c1:
     ldrb w13, [x11], #1
@@ -505,8 +511,7 @@ _az_issue_type:
     b .Lit_c2
 .Lit_c2d:
     // ", received " (11)
-    adrp x11, .Lm_received@PAGE
-    add x11, x11, .Lm_received@PAGEOFF
+    AZ_ADR x11, .Lm_received
     mov x12, #11
 .Lit_c3:
     ldrb w13, [x11], #1
@@ -531,15 +536,13 @@ _az_issue_type:
     cbnz x0, .Lit_out
 .Lit_fields:
     // expected
-    adrp x0, .Lk_expected@PAGE
-    add x0, x0, .Lk_expected@PAGEOFF
+    AZ_ADR x0, .Lk_expected
     mov x1, #8
     ldp x2, x3, [sp, #16]
     bl _az_issue_f_str
     cbnz x0, .Lit_out
     // received
-    adrp x0, .Lk_received@PAGE
-    add x0, x0, .Lk_received@PAGEOFF
+    AZ_ADR x0, .Lk_received
     mov x1, #8
     ldp x2, x3, [sp, #48]
     bl _az_issue_f_str
@@ -551,12 +554,13 @@ _az_issue_type:
     ret
 
 // ---------- tables ----------
-    .section __DATA,__const
+    AZ_DATA
     .p2align 3
 
 // code table: {name ptr, name len, default msg ptr, default msg len} x14
 // stride 32
     .globl _az_code_table
+    AZ_HIDDEN _az_code_table
 _az_code_table:
     .quad .Lc0, 12, .Ld0, 8     // invalid_type / "Required"
     .quad .Lc1, 15, .Ld1, 21
@@ -574,6 +578,7 @@ _az_code_table:
 
 // tag names
     .globl _az_tagname_table
+    AZ_HIDDEN _az_tagname_table
 _az_tagname_table:
     .quad .Lt0, 9               // undefined
     .quad .Lt1, 4               // null
@@ -587,6 +592,7 @@ _az_tagname_table:
 
 // host type names (cb kind 6 returns idx)
     .globl _az_hosttype_table
+    AZ_HIDDEN _az_hosttype_table
 _az_hosttype_table:
     .quad .Lh0, 6               // symbol
     .quad .Lh1, 4               // date
@@ -596,7 +602,7 @@ _az_hosttype_table:
     .quad .Lh5, 5               // class / object
     .quad .Lh6, 7               // unknown
 
-    .section __TEXT,__const
+    AZ_RODATA
 .Lc0:  .ascii "invalid_type"
 .Lc1:  .ascii "invalid_literal"
 .Lc2:  .ascii "custom"
@@ -653,6 +659,7 @@ _az_hosttype_table:
     .p2align 2
 // az_issue_f_i64(x0=kptr,x1=klen,x2=val) — writes field with BIGINT tagged value
     .globl _az_issue_f_i64
+    AZ_HIDDEN _az_issue_f_i64
 _az_issue_f_i64:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
@@ -682,6 +689,7 @@ _az_issue_f_i64:
 // az_issue_f_strseq(x0=kptr,x1=klen,x2=seqptr,x3=count)
 // seq = [u64 len + bytes]*count — for enum "options"
     .globl _az_issue_f_strseq
+    AZ_HIDDEN _az_issue_f_strseq
 _az_issue_f_strseq:
     stp x29, x30, [sp, #-80]!
     mov x29, sp
@@ -738,6 +746,7 @@ _az_issue_f_strseq:
 // az_issue_f_strarr2(x0=kptr,x1=klen,x2=base,x3=stride(i64),x4=count)
 // strided (ptr,len) pairs -> ARRAY of STRINGs
     .globl _az_issue_f_strarr2
+    AZ_HIDDEN _az_issue_f_strarr2
 _az_issue_f_strarr2:
     stp x29, x30, [sp, #-80]!
     mov x29, sp

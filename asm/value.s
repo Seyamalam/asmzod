@@ -1,3 +1,4 @@
+#include "port.h"
 // value.s — tagged value readers (see FORMAT.md)
     .text
     .p2align 2
@@ -6,6 +7,7 @@
 // tags: 0 undef(1) 1 null(1) 2 bool(2) 3 f64(9) 4 str(9+len)
 //       5 bigint(9) 6 obj 7 arr 8 hostref(9)
     .globl _az_vsize
+    AZ_HIDDEN _az_vsize
 _az_vsize:
     ldrb w9, [x0]
     cmp w9, #4
@@ -85,6 +87,7 @@ _az_vsize:
 
 // az_scalar_size(x0=tag) -> x0 (1,2,or 9; string/obj/arr -> 0 = variable)
     .globl _az_scalar_size
+    AZ_HIDDEN _az_scalar_size
 _az_scalar_size:
     cmp x0, #2
     b.eq .Lss2
@@ -112,6 +115,7 @@ _az_scalar_size:
 // bounds-checks against x20; returns dst ptr in x0 or x0=-1 on ENOSPC
 // clobbers x9-x12
     .globl _az_val_write
+    AZ_HIDDEN _az_val_write
 _az_val_write:
     add x9, x19, x2
     cmp x9, x20
@@ -146,6 +150,7 @@ _az_val_write:
 
 // az_val_reserve(x0=n) -> x0 write ptr (arena grows), or -1 ENOSPC
     .globl _az_val_reserve
+    AZ_HIDDEN _az_val_reserve
 _az_val_reserve:
     add x9, x19, x0
     cmp x9, x20
@@ -161,6 +166,7 @@ _az_val_reserve:
 // pair stack (ptr,len) for pending child outputs — grows DOWN from x20
 // az_pair_push(x0=ptr, x1=len): reserves 16B on pair stack; -> x0=0 ok / -1 oom
     .globl _az_pair_push
+    AZ_HIDDEN _az_pair_push
 _az_pair_push:
     sub x9, x20, #16
     cmp x9, x19
@@ -176,6 +182,7 @@ _az_pair_push:
 // az_pairs(x0=i) -> reads pair i above current x20: x0=ptr x1=len
 // caller keeps base in a reg; helper reads [x20 + i*16]
     .globl _az_pair_get
+    AZ_HIDDEN _az_pair_get
 _az_pair_get:
     lsl x9, x0, #4
     add x9, x20, x9
@@ -184,6 +191,7 @@ _az_pair_get:
 
 // az_vw1(w0=byte) -> 0 ok / -3 ENOSPC   (val arena byte append)
     .globl _az_vw1
+    AZ_HIDDEN _az_vw1
 _az_vw1:
     cmp x19, x20
     b.hs .Lvw1_oom
@@ -196,6 +204,7 @@ _az_vw1:
 
 // az_vw8(x0=u64) -> 0/-3
     .globl _az_vw8
+    AZ_HIDDEN _az_vw8
 _az_vw8:
     add x9, x19, #8
     cmp x9, x20
@@ -209,6 +218,7 @@ _az_vw8:
 
 // az_vw(x0=src, x1=len) -> 0/-3   (val arena raw append)
     .globl _az_vw
+    AZ_HIDDEN _az_vw
 _az_vw:
     add x9, x19, x1
     cmp x9, x20
@@ -242,6 +252,7 @@ _az_vw:
 // pair entries are 40B: {kptr,klen,vptr,vlen,flags}
 // az_pair_push40(x0=kptr,x1=klen,x2=vptr,x3=vlen,x4=flags) -> 0/-3
     .globl _az_pair_push40
+    AZ_HIDDEN _az_pair_push40
 _az_pair_push40:
     sub x9, x20, #40
     cmp x9, x19
@@ -258,6 +269,7 @@ _az_pair_push40:
 
 // az_pair_get40(x0=i) -> x0=kptr x1=klen x2=vptr x3=vlen x4=flags
     .globl _az_pair_get40
+    AZ_HIDDEN _az_pair_get40
 _az_pair_get40:
     mov x9, #40
     mul x9, x0, x9

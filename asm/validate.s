@@ -1,3 +1,4 @@
+#include "port.h"
 // validate.s — az_validate: recursive schema bytecode interpreter
 //
 //   az_validate(x0=node, x1=val) -> x0 status, x1=out ptr, x2=out len
@@ -13,6 +14,7 @@
     .p2align 2
 
     .globl _az_validate
+    AZ_HIDDEN _az_validate
 _az_validate:
     stp x29, x30, [sp, #-512]!
     mov x29, sp
@@ -22,8 +24,7 @@ _az_validate:
     ldrb w9, [x27]
     cmp w9, #0x22
     b.hi .Lv_badop
-    adrp x10, .Lv_jt@PAGE
-    add x10, x10, .Lv_jt@PAGEOFF
+    AZ_ADR x10, .Lv_jt
     ldr x11, [x10, x9, lsl #3]
     br x11
 
@@ -60,8 +61,7 @@ _az_validate:
     ldrb w9, [x27]
     cmp w9, #0x22
     b.hi .Lv_badop
-    adrp x10, .Lv_jt@PAGE
-    add x10, x10, .Lv_jt@PAGEOFF
+    AZ_ADR x10, .Lv_jt
     ldr x11, [x10, x9, lsl #3]
     br x11
 // type issue helper: x0=expptr x1=explen -> emit invalid_type then -2/-4
@@ -97,8 +97,7 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #3
     b.eq .Lvn_tok
-    adrp x0, .Lex_number@PAGE
-    add x0, x0, .Lex_number@PAGEOFF
+    AZ_ADR x0, .Lex_number
     mov x1, #6
     b _az_vtype
 .Lvn_tok:
@@ -106,8 +105,7 @@ _az_vtype:
     fcmp d0, d0
     b.vc .Lvn_infchk
     // NaN -> invalid_type (issue_type detects nan -> "nan")
-    adrp x0, .Lex_number@PAGE
-    add x0, x0, .Lex_number@PAGEOFF
+    AZ_ADR x0, .Lex_number
     mov x1, #6
     b _az_vtype
 .Lvn_infchk:
@@ -117,8 +115,7 @@ _az_vtype:
     fmov d2, x10
     fcmp d1, d2
     b.ne .Lvn_fin
-    adrp x0, .Lex_number@PAGE
-    add x0, x0, .Lex_number@PAGEOFF
+    AZ_ADR x0, .Lex_number
     mov x1, #6
     b _az_vtype
 .Lvn_fin:
@@ -139,8 +136,7 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #2
     b.eq .Lvb_ok
-    adrp x0, .Lex_boolean@PAGE
-    add x0, x0, .Lex_boolean@PAGEOFF
+    AZ_ADR x0, .Lex_boolean
     mov x1, #7
     b _az_vtype
 .Lvb_ok:
@@ -152,8 +148,7 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #5
     b.eq .Lvb_tok
-    adrp x0, .Lex_bigint@PAGE
-    add x0, x0, .Lex_bigint@PAGEOFF
+    AZ_ADR x0, .Lex_bigint
     mov x1, #6
     b _az_vtype
 .Lvb_tok:
@@ -174,8 +169,7 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #1
     b.eq .Lvnul_ok
-    adrp x0, .Lex_null@PAGE
-    add x0, x0, .Lex_null@PAGEOFF
+    AZ_ADR x0, .Lex_null
     mov x1, #4
     b _az_vtype
 .Lvnul_ok:
@@ -187,8 +181,7 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #0
     b.eq .Lvund_ok
-    adrp x0, .Lex_undefined@PAGE
-    add x0, x0, .Lex_undefined@PAGEOFF
+    AZ_ADR x0, .Lex_undefined
     mov x1, #9
     b _az_vtype
 .Lvund_ok:
@@ -204,8 +197,7 @@ _az_vtype:
     fcmp d0, d0
     b.vs .Lvnan_ok           // unordered -> NaN
 .Lvnan_no:
-    adrp x0, .Lex_nan@PAGE
-    add x0, x0, .Lex_nan@PAGEOFF
+    AZ_ADR x0, .Lex_nan
     mov x1, #3
     b _az_vtype
 .Lvnan_ok:
@@ -218,8 +210,7 @@ _az_vtype:
 
 // ---------- 0x16 NEVER ----------
 .Lv_never:
-    adrp x0, .Lex_never@PAGE
-    add x0, x0, .Lex_never@PAGEOFF
+    AZ_ADR x0, .Lex_never
     mov x1, #5
     b _az_vtype
 
@@ -238,8 +229,7 @@ _az_vtype:
     mov x9, #9
     b .Lv_passn
 .Lvsym_no:
-    adrp x0, .Lex_symbol@PAGE
-    add x0, x0, .Lex_symbol@PAGEOFF
+    AZ_ADR x0, .Lex_symbol
     mov x1, #6
     b _az_vtype
 
@@ -365,8 +355,7 @@ _az_vtype:
     // invalid_literal {expected: rawval} msg "Invalid literal value, expected R"
     // build msg into stack buf (sp+64, cap 56+repr)
     add x10, sp, #64
-    adrp x11, .Lm_litpre@PAGE
-    add x11, x11, .Lm_litpre@PAGEOFF
+    AZ_ADR x11, .Lm_litpre
     mov x12, #33
 .Llit_m1:
     ldrb w13, [x11], #1
@@ -387,8 +376,7 @@ _az_vtype:
     bl _az_issue_begin
     cbnz x0, .Lv_ret
     // field expected: rawval = embedded value bytes
-    adrp x0, .Lk_expected2@PAGE
-    add x0, x0, .Lk_expected2@PAGEOFF
+    AZ_ADR x0, .Lk_expected2
     mov x1, #8
     add x2, x27, #1
     mov x0, x0                 // keep
@@ -440,8 +428,7 @@ _az_vtype:
     // msg: "Invalid enum value. Expected 'a' | 'b', received 'x'"
     // build joined options+received into buf at sp+40 (cap ~80)
     add x10, sp, #40
-    adrp x11, .Lm_enpre@PAGE
-    add x11, x11, .Lm_enpre@PAGEOFF
+    AZ_ADR x11, .Lm_enpre
     mov x12, #30
 .Len_m1:
     ldrb w13, [x11], #1
@@ -489,8 +476,7 @@ _az_vtype:
     b .Len_jd
 .Len_jd:
     // ", received " (11)
-    adrp x11, .Lm_enmid@PAGE
-    add x11, x11, .Lm_enmid@PAGEOFF
+    AZ_ADR x11, .Lm_enmid
     mov x12, #12
 .Len_m2:
     ldrb w13, [x11], #1
@@ -512,8 +498,7 @@ _az_vtype:
     bl _az_issue_begin
     cbnz x0, .Lv_ret
     // received: raw input value
-    adrp x0, .Lk_received2@PAGE
-    add x0, x0, .Lk_received2@PAGEOFF
+    AZ_ADR x0, .Lk_received2
     mov x1, #8
     mov x2, x28
     mov x0, x0
@@ -526,8 +511,7 @@ _az_vtype:
     bl _az_issue_f_rawval
     cbnz x0, .Lv_ret
     // options: strseq from node+9
-    adrp x0, .Lk_options@PAGE
-    add x0, x0, .Lk_options@PAGEOFF
+    AZ_ADR x0, .Lk_options
     mov x1, #7
     add x2, x27, #9
     ldr x3, [x27, #1]
@@ -590,8 +574,7 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #6
     b.eq .Ldu_obj
-    adrp x0, .Lex_object@PAGE
-    add x0, x0, .Lex_object@PAGEOFF
+    AZ_ADR x0, .Lex_object
     mov x1, #6
     b _az_vtype
 .Ldu_obj:
@@ -813,6 +796,7 @@ _az_vtype:
 // ---------- az_lit_repr(x0=valptr, x1=buf) -> x0 len ----------
 // repr of scalar value for messages
     .globl _az_lit_repr
+    AZ_HIDDEN _az_lit_repr
 _az_lit_repr:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
@@ -838,25 +822,21 @@ _az_lit_repr:
     mov x0, #2
     b .Lrp_out
 .Lrp_undef:
-    adrp x2, .Lrp_und@PAGE
-    add x2, x2, .Lrp_und@PAGEOFF
+    AZ_ADR x2, .Lrp_und
     mov x3, #9
     b .Lrp_lit
 .Lrp_null:
-    adrp x2, .Lrp_nul@PAGE
-    add x2, x2, .Lrp_nul@PAGEOFF
+    AZ_ADR x2, .Lrp_nul
     mov x3, #4
     b .Lrp_lit
 .Lrp_bool:
     ldrb w10, [x0, #1]
     cbz w10, .Lrp_false
-    adrp x2, .Lrp_tru@PAGE
-    add x2, x2, .Lrp_tru@PAGEOFF
+    AZ_ADR x2, .Lrp_tru
     mov x3, #4
     b .Lrp_lit
 .Lrp_false:
-    adrp x2, .Lrp_fal@PAGE
-    add x2, x2, .Lrp_fal@PAGEOFF
+    AZ_ADR x2, .Lrp_fal
     mov x3, #5
     b .Lrp_lit
 .Lrp_lit:
@@ -900,6 +880,7 @@ _az_lit_repr:
 // ---------- coerce helpers ----------
 // az_emit_str(x0=ptr,x1=len) -> x0 outptr (tag4 tagged str in arena) / -3
     .globl _az_emit_str
+    AZ_HIDDEN _az_emit_str
 _az_emit_str:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
@@ -935,6 +916,7 @@ _az_emit_str:
 
 // az_emit_f64(d0) -> x0 outptr / -3
     .globl _az_emit_f64
+    AZ_HIDDEN _az_emit_f64
 _az_emit_f64:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
@@ -956,6 +938,7 @@ _az_emit_f64:
 
 // az_emit_i64(x0) -> x0 outptr / -3
     .globl _az_emit_i64
+    AZ_HIDDEN _az_emit_i64
 _az_emit_i64:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
@@ -977,6 +960,7 @@ _az_emit_i64:
 
 // az_strtod(x0=ptr,x1=len) -> d0 (NaN on invalid)
     .globl _az_strtod
+    AZ_HIDDEN _az_strtod
 _az_strtod:
     // JS Number(str): trim ws, ""->0, 0x->hex, Infinity, NaN, decimal
     mov x9, #0                 // i
@@ -1264,6 +1248,7 @@ _az_strtod:
 
 // az_strtoi(x0=ptr,x1=len) -> x0=i64, w1=ok
     .globl _az_strtoi
+    AZ_HIDDEN _az_strtoi
 _az_strtoi:
     mov x9, #0
     mov x10, #0                // val
@@ -1306,7 +1291,7 @@ _az_strtoi:
     mov w1, #0
     ret
 
-    .section __DATA,__const
+    AZ_DATA
     .p2align 3
 .Lv_jt:
     .quad .Lv_badop
@@ -1345,7 +1330,7 @@ _az_strtoi:
     .quad .Lv_symbol
     .quad .Lv_custom
 
-    .section __TEXT,__const
+    AZ_RODATA
 .Lex_string:    .ascii "string"
 .Lex_number:    .ascii "number"
 .Lex_boolean:   .ascii "boolean"
@@ -1374,7 +1359,7 @@ _az_strtoi:
 .Lma_exactly:   .ascii "Array must contain exactly "
 .Lma_elems:     .ascii " element(s)"
 
-    .section __TEXT,__const
+    AZ_RODATA
 .Lundef_val:    .byte 0
     .text
 
@@ -1408,19 +1393,16 @@ _az_strtoi:
     // too_small array min
     str x10, [sp, #80]
     add x0, sp, #88            // msg buf
-    adrp x1, .Lma_atleast@PAGE
-    add x1, x1, .Lma_atleast@PAGEOFF
+    AZ_ADR x1, .Lma_atleast
     mov x2, #28
     ldr x3, [sp, #80]
-    adrp x4, .Lma_elems@PAGE
-    add x4, x4, .Lma_elems@PAGEOFF
+    AZ_ADR x4, .Lma_elems
     mov x5, #11
     bl _az_msg_size
     add x6, sp, #88
     mov x7, x0
     mov x0, #8
-    adrp x1, .Lty_array@PAGE
-    add x1, x1, .Lty_array@PAGEOFF
+    AZ_ADR x1, .Lty_array
     mov x2, #5
     ldr x3, [sp, #80]
     ucvtf d0, x3
@@ -1441,19 +1423,16 @@ _az_strtoi:
     b.ls .Lar_size_done
     str x11, [sp, #80]
     add x0, sp, #88
-    adrp x1, .Lma_atmost@PAGE
-    add x1, x1, .Lma_atmost@PAGEOFF
+    AZ_ADR x1, .Lma_atmost
     mov x2, #28
     ldr x3, [sp, #80]
-    adrp x4, .Lma_elems@PAGE
-    add x4, x4, .Lma_elems@PAGEOFF
+    AZ_ADR x4, .Lma_elems
     mov x5, #11
     bl _az_msg_size
     add x6, sp, #88
     mov x7, x0
     mov x0, #9
-    adrp x1, .Lty_array@PAGE
-    add x1, x1, .Lty_array@PAGEOFF
+    AZ_ADR x1, .Lty_array
     mov x2, #5
     ldr x3, [sp, #80]
     ucvtf d0, x3
@@ -1576,8 +1555,7 @@ _az_strtoi:
     ldrb w9, [x28]
     cmp w9, #7
     b.eq .Ltu_tok
-    adrp x0, .Lex_array@PAGE
-    add x0, x0, .Lex_array@PAGEOFF
+    AZ_ADR x0, .Lex_array
     mov x1, #5
     b _az_vtype
 .Ltu_tok:
@@ -1617,19 +1595,16 @@ _az_strtoi:
     cbnz x11, .Ltu_lenok
     // too_small exact
     add x0, sp, #88
-    adrp x1, .Lma_exactly@PAGE
-    add x1, x1, .Lma_exactly@PAGEOFF
+    AZ_ADR x1, .Lma_exactly
     mov x2, #29
     mov x3, x10
-    adrp x4, .Lma_elems@PAGE
-    add x4, x4, .Lma_elems@PAGEOFF
+    AZ_ADR x4, .Lma_elems
     mov x5, #11
     bl _az_msg_size
     add x6, sp, #88
     mov x7, x0
     mov x0, #8
-    adrp x1, .Lty_array@PAGE
-    add x1, x1, .Lty_array@PAGEOFF
+    AZ_ADR x1, .Lty_array
     mov x2, #5
     ldr x3, [sp, #48]
     ucvtf d0, x3
@@ -1651,19 +1626,16 @@ _az_strtoi:
     b.ls .Ltu_lenok
     // too_big exact
     add x0, sp, #88
-    adrp x1, .Lma_exactly@PAGE
-    add x1, x1, .Lma_exactly@PAGEOFF
+    AZ_ADR x1, .Lma_exactly
     mov x2, #29
     mov x3, x10
-    adrp x4, .Lma_elems@PAGE
-    add x4, x4, .Lma_elems@PAGEOFF
+    AZ_ADR x4, .Lma_elems
     mov x5, #11
     bl _az_msg_size
     add x6, sp, #88
     mov x7, x0
     mov x0, #9
-    adrp x1, .Lty_array@PAGE
-    add x1, x1, .Lty_array@PAGEOFF
+    AZ_ADR x1, .Lty_array
     mov x2, #5
     ldr x3, [sp, #48]
     ucvtf d0, x3
@@ -1713,8 +1685,7 @@ _az_strtoi:
     ldr x1, [sp, #72]
     b .Ltu_havev
 .Ltu_undef:
-    adrp x1, .Lundef_val@PAGE
-    add x1, x1, .Lundef_val@PAGEOFF
+    AZ_ADR x1, .Lundef_val
 .Ltu_havev:
     bl _az_validate
     str x0, [sp, #96]
@@ -1816,8 +1787,7 @@ _az_strtoi:
     ldrb w9, [x28]
     cmp w9, #6
     b.eq .Lrc_tok
-    adrp x0, .Lex_object@PAGE
-    add x0, x0, .Lex_object@PAGEOFF
+    AZ_ADR x0, .Lex_object
     mov x1, #6
     b _az_vtype
 .Lrc_tok:
@@ -2024,8 +1994,7 @@ _az_strtoi:
     mov x28, x0
     b .Lob_tok
 .Lob_tfail:
-    adrp x0, .Lex_object@PAGE
-    add x0, x0, .Lex_object@PAGEOFF
+    AZ_ADR x0, .Lex_object
     mov x1, #6
     b _az_vtype
 .Lob_oom:
@@ -2113,8 +2082,7 @@ _az_strtoi:
     // val = fval or undef
     ldr x1, [sp, #120]
     cbnz x1, .Lob_gv
-    adrp x1, .Lundef_val@PAGE
-    add x1, x1, .Lundef_val@PAGEOFF
+    AZ_ADR x1, .Lundef_val
 .Lob_gv:
     str x1, [sp, #144]          // val to validate
     ldr x0, [sp, #96]           // keyptr
@@ -2270,8 +2238,7 @@ _az_strtoi:
     cbz x9, .Lob_emit
     // msg: "Unrecognized key(s) in object: 'a', 'b'"
     add x10, sp, #256
-    adrp x11, .Lm_unk@PAGE
-    add x11, x11, .Lm_unk@PAGEOFF
+    AZ_ADR x11, .Lm_unk
     mov x12, #31
 .Lob_m1:
     ldrb w13, [x11], #1
@@ -2320,8 +2287,7 @@ _az_strtoi:
     bl _az_issue_begin
     cbnz x0, .Lv_ret
     // keys field: strarr2(base=u0=x20+(unk-1)*40, stride=-40, count=unk)
-    adrp x0, .Lk_keys@PAGE
-    add x0, x0, .Lk_keys@PAGEOFF
+    AZ_ADR x0, .Lk_keys
     mov x1, #4
     ldr x9, [sp, #104]
     sub x9, x9, #1
@@ -2793,8 +2759,7 @@ _az_strtoi:
     ldp x6, x7, [sp, #56]
     cbnz x7, .Ldt_mh
     add x0, sp, #256
-    adrp x1, amd_min@PAGE
-    add x1, x1, amd_min@PAGEOFF
+    AZ_ADR x1, amd_min
     mov x2, #24
     fmov d0, d1
     mov x3, #0
@@ -2806,8 +2771,7 @@ _az_strtoi:
     mov x6, x0
 .Ldt_mh:
     mov x0, #8
-    adrp x1, .Lty_date@PAGE
-    add x1, x1, .Lty_date@PAGEOFF
+    AZ_ADR x1, .Lty_date
     mov x2, #4
     ldr x3, [sp, #80]
     mov w4, #1
@@ -2823,8 +2787,7 @@ _az_strtoi:
     ldp x6, x7, [sp, #56]
     cbnz x7, .Ldt_xh
     add x0, sp, #256
-    adrp x1, amd_max@PAGE
-    add x1, x1, amd_max@PAGEOFF
+    AZ_ADR x1, amd_max
     mov x2, #26
     fmov d0, d1
     mov x3, #0
@@ -2836,8 +2799,7 @@ _az_strtoi:
     mov x6, x0
 .Ldt_xh:
     mov x0, #9
-    adrp x1, .Lty_date@PAGE
-    add x1, x1, .Lty_date@PAGEOFF
+    AZ_ADR x1, .Lty_date
     mov x2, #4
     ldr x3, [sp, #80]
     mov w4, #1
@@ -2857,8 +2819,7 @@ _az_strtoi:
     mov x9, #9
     b .Lv_passn
 .Ldt_fail:
-    adrp x0, .Lex_date@PAGE
-    add x0, x0, .Lex_date@PAGEOFF
+    AZ_ADR x0, .Lex_date
     mov x1, #4
     b _az_vtype
 
@@ -2908,23 +2869,19 @@ _az_strtoi:
 .Lczs_bool:
     ldrb w9, [x28, #1]
     cbz w9, .Lczs_f
-    adrp x0, .Lrp_tru@PAGE
-    add x0, x0, .Lrp_tru@PAGEOFF
+    AZ_ADR x0, .Lrp_tru
     mov x1, #4
     b .Lczs_e
 .Lczs_f:
-    adrp x0, .Lrp_fal@PAGE
-    add x0, x0, .Lrp_fal@PAGEOFF
+    AZ_ADR x0, .Lrp_fal
     mov x1, #5
     b .Lczs_e
 .Lczs_null:
-    adrp x0, .Lrp_nul@PAGE
-    add x0, x0, .Lrp_nul@PAGEOFF
+    AZ_ADR x0, .Lrp_nul
     mov x1, #4
     b .Lczs_e
 .Lczs_und:
-    adrp x0, .Lrp_und@PAGE
-    add x0, x0, .Lrp_und@PAGEOFF
+    AZ_ADR x0, .Lrp_und
     mov x1, #9
     b .Lczs_e
 .Lczs_big:
@@ -3130,12 +3087,11 @@ _az_strtoi:
     mov x0, x1
     b .Lcz_inner
 .Lcbi_fail:
-    adrp x0, .Lex_bigint@PAGE
-    add x0, x0, .Lex_bigint@PAGEOFF
+    AZ_ADR x0, .Lex_bigint
     mov x1, #6
     b _az_vtype
 
-    .section __TEXT,__const
+    AZ_RODATA
 .Lk_keys:   .ascii "keys"
 .Lm_unk:    .ascii "Unrecognized key(s) in object: "
 .Lty_date:  .ascii "date"
@@ -3145,8 +3101,7 @@ _az_strtoi:
 // non-string input to string schema: emit invalid_type, then still run
 // size checks (codes 1-3) against .length; format checks are skipped.
 .Lvs_tfail:
-    adrp x0, .Lex_string@PAGE
-    add x0, x0, .Lex_string@PAGEOFF
+    AZ_ADR x0, .Lex_string
     mov x1, #6
     ldrb w2, [x28]
     mov x3, x28
@@ -3226,8 +3181,7 @@ _az_strtoi:
     str x11, [sp, #472]        // params ptr survives issue_size
     ucvtf d0, x12
     fmov x3, d0
-    adrp x1, .Lty_as_str@PAGE
-    add x1, x1, .Lty_as_str@PAGEOFF
+    AZ_ADR x1, .Lty_as_str
     mov x2, #6
     mov w4, #1
     mov x6, #0
@@ -3243,8 +3197,7 @@ _az_strtoi:
 
 // non-array input to array schema: invalid_type + size vs min/max
 .Lar_tfail:
-    adrp x0, .Lex_array@PAGE
-    add x0, x0, .Lex_array@PAGEOFF
+    AZ_ADR x0, .Lex_array
     mov x1, #5
     ldrb w2, [x28]
     mov x3, x28
@@ -3275,8 +3228,7 @@ _az_strtoi:
 .Lar_asize:
     ucvtf d0, x12
     fmov x3, d0
-    adrp x1, .Lty_as_arr@PAGE
-    add x1, x1, .Lty_as_arr@PAGEOFF
+    AZ_ADR x1, .Lty_as_arr
     mov x2, #5
     mov w4, #1
     mov x6, #0
@@ -3285,7 +3237,7 @@ _az_strtoi:
     cbnz x0, .Lv_ret
     b .Lv_invalid
 
-    .section __TEXT,__const
+    AZ_RODATA
 .Lty_as_str: .ascii "string"
 .Lty_as_arr: .ascii "array"
     .text

@@ -1,3 +1,4 @@
+#include "port.h"
 // runners.s — check record dispatchers
 // check := u8 code + u64 msglen + msg + params
 // x27/x28 used for cursor/count (saved/restored); ctx regs untouched
@@ -7,6 +8,7 @@
 // ============ az_run_strchecks(x0=chkptr, x1=count, x2=strptr, x3=strlen)
 // -> x0: 0 ok / -2 invalid / -4 enospc
     .globl _az_run_strchecks
+    AZ_HIDDEN _az_run_strchecks
 _az_run_strchecks:
     stp x29, x30, [sp, #-512]!
     mov x29, sp
@@ -79,39 +81,31 @@ _az_run_strchecks:
     cmp x14, x13
     b.eq .Lsc_next8
     b.hi .Lsc_len_big
-    adrp x1, ams_exactly@PAGE
-    add x1, x1, ams_exactly@PAGEOFF
+    AZ_ADR x1, ams_exactly
     mov x2, #29
-    adrp x4, ams_chars@PAGE
-    add x4, x4, ams_chars@PAGEOFF
+    AZ_ADR x4, ams_chars
     mov x5, #14
     b .Lsc_sizefail_small
 .Lsc_len_big:
-    adrp x1, ams_exactly@PAGE
-    add x1, x1, ams_exactly@PAGEOFF
+    AZ_ADR x1, ams_exactly
     mov x2, #29
-    adrp x4, ams_chars@PAGE
-    add x4, x4, ams_chars@PAGEOFF
+    AZ_ADR x4, ams_chars
     mov x5, #14
     b .Lsc_sizefail_big
 .Lsc_min:
     cmp x14, x13
     b.hs .Lsc_next8
-    adrp x1, ams_atleast@PAGE
-    add x1, x1, ams_atleast@PAGEOFF
+    AZ_ADR x1, ams_atleast
     mov x2, #29
-    adrp x4, ams_chars@PAGE
-    add x4, x4, ams_chars@PAGEOFF
+    AZ_ADR x4, ams_chars
     mov x5, #14
     b .Lsc_sizefail_small
 .Lsc_max:
     cmp x14, x13
     b.ls .Lsc_next8
-    adrp x1, ams_atmost@PAGE
-    add x1, x1, ams_atmost@PAGEOFF
+    AZ_ADR x1, ams_atmost
     mov x2, #29
-    adrp x4, ams_chars@PAGE
-    add x4, x4, ams_chars@PAGEOFF
+    AZ_ADR x4, ams_chars
     mov x5, #14
     b .Lsc_sizefail_big
 .Lsc_sizefail_small:
@@ -131,8 +125,7 @@ _az_run_strchecks:
     ucvtf d0, x3
     fmov x3, d0                  // bound bits (n as f64)
     mov x0, #8                   // too_small
-    adrp x1, .Lty_string@PAGE
-    add x1, x1, .Lty_string@PAGEOFF
+    AZ_ADR x1, .Lty_string
     mov x2, #6
     mov w4, #1                   // inclusive
     ldr w9, [sp, #80]
@@ -158,8 +151,7 @@ _az_run_strchecks:
     ucvtf d0, x3
     fmov x3, d0
     mov x0, #9                   // too_big
-    adrp x1, .Lty_string@PAGE
-    add x1, x1, .Lty_string@PAGEOFF
+    AZ_ADR x1, .Lty_string
     mov x2, #6
     mov w4, #1
     ldr w9, [sp, #80]
@@ -181,11 +173,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_email
     b .Lsc_next
 .Lsc_fmt_email:
-    adrp x9, .Lv_email@PAGE
-    add x9, x9, .Lv_email@PAGEOFF
+    AZ_ADR x9, .Lv_email
     mov x10, #5
-    adrp x11, .Lm_email@PAGE
-    add x11, x11, .Lm_email@PAGEOFF
+    AZ_ADR x11, .Lm_email
     mov x12, #13
     b .Lsc_fmt_fail
 .Lsc_uuid:
@@ -197,11 +187,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_uuid
     b .Lsc_next
 .Lsc_fmt_uuid:
-    adrp x9, .Lv_uuid@PAGE
-    add x9, x9, .Lv_uuid@PAGEOFF
+    AZ_ADR x9, .Lv_uuid
     mov x10, #4
-    adrp x11, .Lm_uuid@PAGE
-    add x11, x11, .Lm_uuid@PAGEOFF
+    AZ_ADR x11, .Lm_uuid
     mov x12, #12
     b .Lsc_fmt_fail
 .Lsc_url:
@@ -211,11 +199,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_url
     b .Lsc_next
 .Lsc_fmt_url:
-    adrp x9, .Lv_url@PAGE
-    add x9, x9, .Lv_url@PAGEOFF
+    AZ_ADR x9, .Lv_url
     mov x10, #3
-    adrp x11, .Lm_url@PAGE
-    add x11, x11, .Lm_url@PAGEOFF
+    AZ_ADR x11, .Lm_url
     mov x12, #11
     b .Lsc_fmt_fail
 .Lsc_ipv4:
@@ -225,11 +211,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_ipv4
     b .Lsc_next
 .Lsc_fmt_ipv4:
-    adrp x9, .Lv_ipv4@PAGE
-    add x9, x9, .Lv_ipv4@PAGEOFF
+    AZ_ADR x9, .Lv_ipv4
     mov x10, #4
-    adrp x11, .Lm_ip@PAGE
-    add x11, x11, .Lm_ip@PAGEOFF
+    AZ_ADR x11, .Lm_ip
     mov x12, #18
     b .Lsc_fmt_fail
 .Lsc_ipv6:
@@ -239,11 +223,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_ipv6
     b .Lsc_next
 .Lsc_fmt_ipv6:
-    adrp x9, .Lv_ipv6@PAGE
-    add x9, x9, .Lv_ipv6@PAGEOFF
+    AZ_ADR x9, .Lv_ipv6
     mov x10, #4
-    adrp x11, .Lm_ip@PAGE
-    add x11, x11, .Lm_ip@PAGEOFF
+    AZ_ADR x11, .Lm_ip
     mov x12, #18
     b .Lsc_fmt_fail
 .Lsc_ulid:
@@ -253,11 +235,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_ulid
     b .Lsc_next
 .Lsc_fmt_ulid:
-    adrp x9, .Lv_ulid@PAGE
-    add x9, x9, .Lv_ulid@PAGEOFF
+    AZ_ADR x9, .Lv_ulid
     mov x10, #4
-    adrp x11, .Lm_ulid@PAGE
-    add x11, x11, .Lm_ulid@PAGEOFF
+    AZ_ADR x11, .Lm_ulid
     mov x12, #12
     b .Lsc_fmt_fail
 .Lsc_nanoid:
@@ -267,11 +247,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_nanoid
     b .Lsc_next
 .Lsc_fmt_nanoid:
-    adrp x9, .Lv_nanoid@PAGE
-    add x9, x9, .Lv_nanoid@PAGEOFF
+    AZ_ADR x9, .Lv_nanoid
     mov x10, #6
-    adrp x11, .Lm_nanoid@PAGE
-    add x11, x11, .Lm_nanoid@PAGEOFF
+    AZ_ADR x11, .Lm_nanoid
     mov x12, #14
     b .Lsc_fmt_fail
 .Lsc_cuid2:
@@ -281,11 +259,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_cuid2
     b .Lsc_next
 .Lsc_fmt_cuid2:
-    adrp x9, .Lv_cuid2@PAGE
-    add x9, x9, .Lv_cuid2@PAGEOFF
+    AZ_ADR x9, .Lv_cuid2
     mov x10, #5
-    adrp x11, .Lm_cuid2@PAGE
-    add x11, x11, .Lm_cuid2@PAGEOFF
+    AZ_ADR x11, .Lm_cuid2
     mov x12, #13
     b .Lsc_fmt_fail
 .Lsc_b64:
@@ -295,11 +271,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_b64
     b .Lsc_next
 .Lsc_fmt_b64:
-    adrp x9, .Lv_base64@PAGE
-    add x9, x9, .Lv_base64@PAGEOFF
+    AZ_ADR x9, .Lv_base64
     mov x10, #6
-    adrp x11, .Lm_base64@PAGE
-    add x11, x11, .Lm_base64@PAGEOFF
+    AZ_ADR x11, .Lm_base64
     mov x12, #14
     b .Lsc_fmt_fail
 .Lsc_hex:
@@ -309,11 +283,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_hex
     b .Lsc_next
 .Lsc_fmt_hex:
-    adrp x9, .Lv_hex@PAGE
-    add x9, x9, .Lv_hex@PAGEOFF
+    AZ_ADR x9, .Lv_hex
     mov x10, #3
-    adrp x11, .Lm_hex@PAGE
-    add x11, x11, .Lm_hex@PAGEOFF
+    AZ_ADR x11, .Lm_hex
     mov x12, #11
     b .Lsc_fmt_fail
 .Lsc_dt:
@@ -325,11 +297,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_dt
     b .Lsc_next
 .Lsc_fmt_dt:
-    adrp x9, .Lv_datetime@PAGE
-    add x9, x9, .Lv_datetime@PAGEOFF
+    AZ_ADR x9, .Lv_datetime
     mov x10, #8
-    adrp x11, .Lm_datetime@PAGE
-    add x11, x11, .Lm_datetime@PAGEOFF
+    AZ_ADR x11, .Lm_datetime
     mov x12, #16
     b .Lsc_fmt_fail
 .Lsc_ds:
@@ -339,11 +309,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_ds
     b .Lsc_next
 .Lsc_fmt_ds:
-    adrp x9, .Lv_date@PAGE
-    add x9, x9, .Lv_date@PAGEOFF
+    AZ_ADR x9, .Lv_date
     mov x10, #4
-    adrp x11, .Lm_date@PAGE
-    add x11, x11, .Lm_date@PAGEOFF
+    AZ_ADR x11, .Lm_date
     mov x12, #12
     b .Lsc_fmt_fail
 .Lsc_ts:
@@ -353,11 +321,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_ts
     b .Lsc_next
 .Lsc_fmt_ts:
-    adrp x9, .Lv_time@PAGE
-    add x9, x9, .Lv_time@PAGEOFF
+    AZ_ADR x9, .Lv_time
     mov x10, #4
-    adrp x11, .Lm_time@PAGE
-    add x11, x11, .Lm_time@PAGEOFF
+    AZ_ADR x11, .Lm_time
     mov x12, #12
     b .Lsc_fmt_fail
 
@@ -397,27 +363,21 @@ _az_run_strchecks:
     cbz w0, .Lsc_se_fail_ew
     b .Lsc_nextv
 .Lsc_se_fail_sw:
-    adrp x9, .Lv_startswith@PAGE
-    add x9, x9, .Lv_startswith@PAGEOFF
+    AZ_ADR x9, .Lv_startswith
     mov x10, #10
-    adrp x11, .Lm_sw_pre@PAGE
-    add x11, x11, .Lm_sw_pre@PAGEOFF
+    AZ_ADR x11, .Lm_sw_pre
     mov x12, #31
     b .Lsc_se_msg
 .Lsc_se_fail_ew:
-    adrp x9, .Lv_endswith@PAGE
-    add x9, x9, .Lv_endswith@PAGEOFF
+    AZ_ADR x9, .Lv_endswith
     mov x10, #9
-    adrp x11, .Lm_ew_pre@PAGE
-    add x11, x11, .Lm_ew_pre@PAGEOFF
+    AZ_ADR x11, .Lm_ew_pre
     mov x12, #29
     b .Lsc_se_msg
 .Lsc_se_fail_inc:
-    adrp x9, .Lv_includes@PAGE
-    add x9, x9, .Lv_includes@PAGEOFF
+    AZ_ADR x9, .Lv_includes
     mov x10, #8
-    adrp x11, .Lm_inc_pre@PAGE
-    add x11, x11, .Lm_inc_pre@PAGEOFF
+    AZ_ADR x11, .Lm_inc_pre
     mov x12, #28
     b .Lsc_se_msg
 .Lsc_se_fail:
@@ -485,11 +445,9 @@ _az_run_strchecks:
     cbz w0, .Lsc_fmt_regex
     b .Lsc_next
 .Lsc_fmt_regex:
-    adrp x9, .Lv_regex@PAGE
-    add x9, x9, .Lv_regex@PAGEOFF
+    AZ_ADR x9, .Lv_regex
     mov x10, #5
-    adrp x11, .Lm_regex@PAGE
-    add x11, x11, .Lm_regex@PAGEOFF
+    AZ_ADR x11, .Lm_regex
     mov x12, #7
     b .Lsc_fmt_fail
 
@@ -532,19 +490,15 @@ _az_run_strchecks:
     ldr w9, [sp, #80]
     cmp w9, #0x0B
     b.eq .Lsc_fmt_lc
-    adrp x9, .Lv_uppercase@PAGE
-    add x9, x9, .Lv_uppercase@PAGEOFF
+    AZ_ADR x9, .Lv_uppercase
     mov x10, #9
-    adrp x11, .Lm_uc@PAGE
-    add x11, x11, .Lm_uc@PAGEOFF
+    AZ_ADR x11, .Lm_uc
     mov x12, #50
     b .Lsc_fmt_fail
 .Lsc_fmt_lc:
-    adrp x9, .Lv_lowercase@PAGE
-    add x9, x9, .Lv_lowercase@PAGEOFF
+    AZ_ADR x9, .Lv_lowercase
     mov x10, #9
-    adrp x11, .Lm_lc@PAGE
-    add x11, x11, .Lm_lc@PAGEOFF
+    AZ_ADR x11, .Lm_lc
     mov x12, #50
     b .Lsc_fmt_fail
 
@@ -602,6 +556,7 @@ _az_run_strchecks:
 
 // ============ az_run_numchecks(x0=chkptr,x1=count,d0=val,x2=valptr)
     .globl _az_run_numchecks
+    AZ_HIDDEN _az_run_numchecks
 _az_run_numchecks:
     stp x29, x30, [sp, #-512]!
     mov x29, sp
@@ -643,8 +598,7 @@ _az_run_numchecks:
     // LTE
     fcmp d0, d1
     b.ls .Lnc_next8
-    adrp x1, amn_lte@PAGE
-    add x1, x1, amn_lte@PAGEOFF
+    AZ_ADR x1, amn_lte
     mov x2, #37
     mov w4, #1
     mov x0, #9
@@ -652,8 +606,7 @@ _az_run_numchecks:
 .Lnc_gt:
     fcmp d0, d1
     b.gt .Lnc_next8
-    adrp x1, amn_gt@PAGE
-    add x1, x1, amn_gt@PAGEOFF
+    AZ_ADR x1, amn_gt
     mov x2, #28
     mov w4, #0
     mov x0, #8
@@ -661,8 +614,7 @@ _az_run_numchecks:
 .Lnc_gte:
     fcmp d0, d1
     b.ge .Lnc_next8
-    adrp x1, amn_gte@PAGE
-    add x1, x1, amn_gte@PAGEOFF
+    AZ_ADR x1, amn_gte
     mov x2, #40
     mov w4, #1
     mov x0, #8
@@ -670,8 +622,7 @@ _az_run_numchecks:
 .Lnc_lt:
     fcmp d0, d1
     b.mi .Lnc_next8
-    adrp x1, amn_lt@PAGE
-    add x1, x1, amn_lt@PAGEOFF
+    AZ_ADR x1, amn_lt
     mov x2, #25
     mov w4, #0
     mov x0, #9
@@ -698,8 +649,7 @@ _az_run_numchecks:
     mov x6, x0
 .Lnc_bf_have:
     ldr x0, [sp, #88]
-    adrp x1, .Lty_number@PAGE
-    add x1, x1, .Lty_number@PAGEOFF
+    AZ_ADR x1, .Lty_number
     mov x2, #6
     ldr x3, [sp, #116]
     ldr w4, [sp, #112]
@@ -725,8 +675,7 @@ _az_run_numchecks:
     b .Lnc_next0
 .Lnc_int_fail:
     // invalid_type expected "integer"
-    adrp x0, .Lty_integer@PAGE
-    add x0, x0, .Lty_integer@PAGEOFF
+    AZ_ADR x0, .Lty_integer
     mov x1, #7
     mov w2, #3                   // tag f64
     ldr x3, [sp, #40]
@@ -771,8 +720,7 @@ _az_run_numchecks:
     ldp x6, x7, [sp, #56]
     cbnz x7, .Lnc_m_have
     add x0, sp, #128
-    adrp x1, amn_mult@PAGE
-    add x1, x1, amn_mult@PAGEOFF
+    AZ_ADR x1, amn_mult
     mov x2, #29
     mov x3, #0
     mov x4, #0
@@ -788,8 +736,7 @@ _az_run_numchecks:
     mov x2, x7
     bl _az_issue_begin
     cbnz x0, .Lnc_retx
-    adrp x0, .Lk_multof@PAGE
-    add x0, x0, .Lk_multof@PAGEOFF
+    AZ_ADR x0, .Lk_multof
     mov x1, #10
     ldr d0, [sp, #88]
     bl _az_issue_f_f64
@@ -812,13 +759,11 @@ _az_run_numchecks:
     mov x9, #0x433FFFFFFFFFFFFF
     str x9, [sp, #116]
     fcmp d0, #0.0
-    adrp x1, amn_lte@PAGE
-    add x1, x1, amn_lte@PAGEOFF
+    AZ_ADR x1, amn_lte
     mov x2, #37
     mov x0, #9
     b.pl .Lnc_safe_b
-    adrp x1, amn_gte@PAGE
-    add x1, x1, amn_gte@PAGEOFF
+    AZ_ADR x1, amn_gte
     mov x2, #40
     mov x0, #8
 .Lnc_safe_b:
@@ -865,6 +810,7 @@ _az_run_numchecks:
 
 // ============ az_run_bigintchecks(x0=chkptr,x1=count,x2=i64 val,x3=valptr)
     .globl _az_run_bigintchecks
+    AZ_HIDDEN _az_run_bigintchecks
 _az_run_bigintchecks:
     stp x29, x30, [sp, #-512]!
     mov x29, sp
@@ -899,8 +845,7 @@ _az_run_bigintchecks:
     // LTE
     cmp x14, x13
     b.le .Lbc_next8
-    adrp x1, amb_lte@PAGE
-    add x1, x1, amb_lte@PAGEOFF
+    AZ_ADR x1, amb_lte
     mov x2, #38
     mov w4, #1
     mov x0, #9
@@ -908,8 +853,7 @@ _az_run_bigintchecks:
 .Lbc_gt:
     cmp x14, x13
     b.gt .Lbc_next8
-    adrp x1, amb_gt@PAGE
-    add x1, x1, amb_gt@PAGEOFF
+    AZ_ADR x1, amb_gt
     mov x2, #29
     mov w4, #0
     mov x0, #8
@@ -917,8 +861,7 @@ _az_run_bigintchecks:
 .Lbc_gte:
     cmp x14, x13
     b.ge .Lbc_next8
-    adrp x1, amb_gte@PAGE
-    add x1, x1, amb_gte@PAGEOFF
+    AZ_ADR x1, amb_gte
     mov x2, #41
     mov w4, #1
     mov x0, #8
@@ -926,8 +869,7 @@ _az_run_bigintchecks:
 .Lbc_lt:
     cmp x14, x13
     b.lt .Lbc_next8
-    adrp x1, amb_lt@PAGE
-    add x1, x1, amb_lt@PAGEOFF
+    AZ_ADR x1, amb_lt
     mov x2, #26
     mov w4, #0
     mov x0, #9
@@ -968,28 +910,23 @@ _az_run_bigintchecks:
     ldr x10, [sp, #88]
     cmp x10, #9
     b.eq .Lbc_max
-    adrp x0, ak_minimum@PAGE
-    add x0, x0, ak_minimum@PAGEOFF
+    AZ_ADR x0, ak_minimum
     mov x1, #7
     b .Lbc_b2
 .Lbc_max:
-    adrp x0, ak_maximum@PAGE
-    add x0, x0, ak_maximum@PAGEOFF
+    AZ_ADR x0, ak_maximum
     mov x1, #7
 .Lbc_b2:
     ldr x2, [sp, #116]
     bl _az_issue_f_i64
     cbnz x0, .Lbc_retx
-    adrp x0, ak_type@PAGE
-    add x0, x0, ak_type@PAGEOFF
+    AZ_ADR x0, ak_type
     mov x1, #4
-    adrp x2, .Lty_bigint@PAGE
-    add x2, x2, .Lty_bigint@PAGEOFF
+    AZ_ADR x2, .Lty_bigint
     mov x3, #6
     bl _az_issue_f_str
     cbnz x0, .Lbc_retx
-    adrp x0, ak_inclusive@PAGE
-    add x0, x0, ak_inclusive@PAGEOFF
+    AZ_ADR x0, ak_inclusive
     mov x1, #9
     ldr w2, [sp, #112]
     bl _az_issue_f_bool
@@ -1009,8 +946,7 @@ _az_run_bigintchecks:
     cbnz x7, .Lbc_mb_have
     add x0, sp, #128
     mov x10, x0
-    adrp x11, amb_mult@PAGE
-    add x11, x11, amb_mult@PAGEOFF
+    AZ_ADR x11, amb_mult
     mov x12, #30
 .Lbc_mm1:
     ldrb w15, [x11], #1
@@ -1029,8 +965,7 @@ _az_run_bigintchecks:
     mov x2, x7
     bl _az_issue_begin
     cbnz x0, .Lbc_retx
-    adrp x0, .Lk_multof@PAGE
-    add x0, x0, .Lk_multof@PAGEOFF
+    AZ_ADR x0, .Lk_multof
     mov x1, #10
     ldr x2, [sp, #116]
     bl _az_issue_f_i64
@@ -1063,6 +998,7 @@ _az_run_bigintchecks:
 
 // az_is_url(x0=ptr,x1=len) -> w0 : scheme://rest approximation of new URL()
     .globl _az_is_url
+    AZ_HIDDEN _az_is_url
 _az_is_url:
     // scheme: alpha (alnum|+|-|.)* then "://" then >=1 char
     cbz x1, .Lur_no
@@ -1131,7 +1067,7 @@ _az_is_url:
     mov w0, #0
     ret
 
-    .section __TEXT,__const
+    AZ_RODATA
 .Lty_string:   .ascii "string"
 .Lty_number:   .ascii "number"
 .Lty_bigint:   .ascii "bigint"

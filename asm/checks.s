@@ -1,3 +1,4 @@
+#include "port.h"
 // checks.s — string format validators + check runners
 // check record: u8 code + u64 msglen + msg + params
     .text
@@ -6,6 +7,7 @@
 // ---------- az_utf16_units(x0=ptr, x1=len) -> x0 units ----------
 // JS .length semantics: 1 unit per code point <=0xFFFF, 2 above
     .globl _az_utf16_units
+    AZ_HIDDEN _az_utf16_units
 _az_utf16_units:
     mov x9, #0               // units
     mov x10, #0              // i
@@ -41,6 +43,7 @@ _az_utf16_units:
 
 // ---------- az_memmem(x0=hay,x1=hlen,x2=ndl,x3=nlen) -> w0 1/0 ----------
     .globl _az_memmem
+    AZ_HIDDEN _az_memmem
 _az_memmem:
     cbz x3, .Lmm_yes
     cmp x3, x1
@@ -81,6 +84,7 @@ _az_memmem:
 // local[last char in A-Za-z0-9_+-, others also ' and .] @
 // domain: (label '.')+ letters{2,}
     .globl _az_is_email
+    AZ_HIDDEN _az_is_email
 _az_is_email:
     mov x9, #0               // i
 .Lem_scan:
@@ -229,14 +233,14 @@ _az_is_email:
 // ---------- az_is_uuid(x0=ptr,x1=len,x2=version) -> w0 ----------
 // 8-4-4-4-12 hex; version 0=any else nibble at pos 14 == version
     .globl _az_is_uuid
+    AZ_HIDDEN _az_is_uuid
 _az_is_uuid:
     cmp x1, #36
     b.ne .Luid_no
     mov x9, #0
     mov x10, #0              // group idx 0..4
     // group lengths
-    adrp x11, .Luid_groups@PAGE
-    add x11, x11, .Luid_groups@PAGEOFF
+    AZ_ADR x11, .Luid_groups
 .Luid_grp:
     cmp x10, #5
     b.hs .Luid_ver
@@ -287,12 +291,13 @@ _az_is_uuid:
 .Luid_no:
     mov w0, #0
     ret
-    .section __TEXT,__const
+    AZ_RODATA
 .Luid_groups: .byte 8,4,4,4,12
     .text
 
 // ---------- az_is_ulid(x0,x1) : 26 chars crockford b32 ----------
     .globl _az_is_ulid
+    AZ_HIDDEN _az_is_ulid
 _az_is_ulid:
     cmp x1, #26
     b.ne .Lul_no
@@ -332,6 +337,7 @@ _az_is_ulid:
 
 // ---------- az_is_nanoid: 21 chars [A-Za-z0-9_-] ----------
     .globl _az_is_nanoid
+    AZ_HIDDEN _az_is_nanoid
 _az_is_nanoid:
     cmp x1, #21
     b.ne .Lnn_no
@@ -372,6 +378,7 @@ _az_is_nanoid:
 
 // ---------- az_is_cuid2: [a-z][a-z0-9]* len>=2 ----------
     .globl _az_is_cuid2
+    AZ_HIDDEN _az_is_cuid2
 _az_is_cuid2:
     cmp x1, #2
     b.lo .Lcu_no
@@ -406,6 +413,7 @@ _az_is_cuid2:
 
 // ---------- az_is_base64: len%4==0, alphabet, <=2 '=' at end ----------
     .globl _az_is_base64
+    AZ_HIDDEN _az_is_base64
 _az_is_base64:
     cbz x1, .Lb64_no
     and x9, x1, #3
@@ -463,6 +471,7 @@ _az_is_base64:
 
 // ---------- az_is_hex ----------
     .globl _az_is_hex
+    AZ_HIDDEN _az_is_hex
 _az_is_hex:
     cbz x1, .Lhx_no
     mov x9, #0
@@ -494,6 +503,7 @@ _az_is_hex:
 
 // ---------- az_is_ipv4: a.b.c.d, 1-3 digits each, <=255, no leading 0 ----------
     .globl _az_is_ipv4
+    AZ_HIDDEN _az_is_ipv4
 _az_is_ipv4:
     mov x9, #0               // pos
     mov x10, #0              // part idx
@@ -564,6 +574,7 @@ _az_is_ipv4:
 
 // ---------- az_is_ipv6: simplified — hex groups + ':' , '::' once ----------
     .globl _az_is_ipv6
+    AZ_HIDDEN _az_is_ipv6
 _az_is_ipv6:
     cbz x1, .Lip6_no
     mov x9, #0               // i
@@ -640,6 +651,7 @@ _az_is_ipv6:
 
 // az_is_datestr(x0,x1): YYYY-MM-DD
     .globl _az_is_datestr
+    AZ_HIDDEN _az_is_datestr
 _az_is_datestr:
     cmp x1, #10
     b.ne .Lds_no
@@ -701,6 +713,7 @@ _az_is_datestr:
 
 // az_is_timestr(x0,x1): HH:MM[:SS[.frac]]  len 5|8|>8
     .globl _az_is_timestr
+    AZ_HIDDEN _az_is_timestr
 _az_is_timestr:
     cmp x1, #5
     b.lo .Lts_no
@@ -786,6 +799,7 @@ _az_is_timestr:
 // flags bit0: allow ±HH:MM offset (zod3 datetime({offset:true}))
 // format: datestr 'T' timestr tz ; tz = 'Z'|'z' or ±HH:MM (if allowed)
     .globl _az_is_datetime
+    AZ_HIDDEN _az_is_datetime
 _az_is_datetime:
     stp x29, x30, [sp, #-64]!
     mov x29, sp
@@ -876,6 +890,7 @@ _az_is_datetime:
 // (x0=validation ptr, x1=len, x2=msgptr, x3=msglen) -> x0 0/-4
 // issue code 7 (invalid_string) + field "validation"
     .globl _az_issue_invstr
+    AZ_HIDDEN _az_issue_invstr
 _az_issue_invstr:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
@@ -885,8 +900,7 @@ _az_issue_invstr:
     mov x0, #7
     bl _az_issue_begin
     cbnz x0, .Lis_out
-    adrp x0, ak_validation@PAGE
-    add x0, x0, ak_validation@PAGEOFF
+    AZ_ADR x0, ak_validation
     mov x1, #10
     ldp x2, x3, [sp, #16]
     bl _az_issue_f_str
@@ -902,6 +916,7 @@ _az_issue_invstr:
 // x0=code, x1=typeptr, x2=typelen, x3=bound f64 bits, w4=inclusive, w5=exact,
 // x6=msgptr, x7=msglen  -> x0 0/-4
     .globl _az_issue_size
+    AZ_HIDDEN _az_issue_size
 _az_issue_size:
     stp x29, x30, [sp, #-96]!
     mov x29, sp
@@ -918,28 +933,24 @@ _az_issue_size:
     ldr x10, [sp, #56]
     cmp x10, #9
     b.eq .Lsz_max
-    adrp x0, ak_minimum@PAGE
-    add x0, x0, ak_minimum@PAGEOFF
+    AZ_ADR x0, ak_minimum
     mov x1, #7
     b .Lsz_bound
 .Lsz_max:
-    adrp x0, ak_maximum@PAGE
-    add x0, x0, ak_maximum@PAGEOFF
+    AZ_ADR x0, ak_maximum
     mov x1, #7
 .Lsz_bound:
     ldr d0, [sp, #32]
     bl _az_issue_f_f64
     cbnz x0, .Lsz_out
     // type
-    adrp x0, ak_type@PAGE
-    add x0, x0, ak_type@PAGEOFF
+    AZ_ADR x0, ak_type
     mov x1, #4
     ldp x2, x3, [sp, #16]
     bl _az_issue_f_str
     cbnz x0, .Lsz_out
     // inclusive
-    adrp x0, ak_inclusive@PAGE
-    add x0, x0, ak_inclusive@PAGEOFF
+    AZ_ADR x0, ak_inclusive
     mov x1, #9
     ldr w2, [sp, #40]
     bl _az_issue_f_bool
@@ -947,8 +958,7 @@ _az_issue_size:
     // exact (only if set)
     ldr w9, [sp, #48]
     cbz w9, .Lsz_commit
-    adrp x0, ak_exact@PAGE
-    add x0, x0, ak_exact@PAGEOFF
+    AZ_ADR x0, ak_exact
     mov x1, #5
     mov w2, #1
     bl _az_issue_f_bool
@@ -960,38 +970,64 @@ _az_issue_size:
     ldp x29, x30, [sp], #96
     ret
 
-    .section __TEXT,__const
+    AZ_RODATA
     .globl ams_atleast
+    AZ_HIDDEN ams_atleast
     .globl ams_atmost
+    AZ_HIDDEN ams_atmost
     .globl ams_exactly
+    AZ_HIDDEN ams_exactly
     .globl ams_chars
+    AZ_HIDDEN ams_chars
     .globl ama_atleast
+    AZ_HIDDEN ama_atleast
     .globl ama_atmost
+    AZ_HIDDEN ama_atmost
     .globl ama_exactly
+    AZ_HIDDEN ama_exactly
     .globl ama_elems
+    AZ_HIDDEN ama_elems
     .globl amn_gt
+    AZ_HIDDEN amn_gt
     .globl amn_gte
+    AZ_HIDDEN amn_gte
     .globl amn_lt
+    AZ_HIDDEN amn_lt
     .globl amn_lte
+    AZ_HIDDEN amn_lte
     .globl amn_mult
+    AZ_HIDDEN amn_mult
     .globl amb_gt
+    AZ_HIDDEN amb_gt
     .globl amb_gte
+    AZ_HIDDEN amb_gte
     .globl amb_lt
+    AZ_HIDDEN amb_lt
     .globl amb_lte
+    AZ_HIDDEN amb_lte
     .globl amb_mult
+    AZ_HIDDEN amb_mult
     .globl amd_min
+    AZ_HIDDEN amd_min
     .globl amd_max
+    AZ_HIDDEN amd_max
     .globl ak_validation
+    AZ_HIDDEN ak_validation
 ak_validation: .ascii "validation"
     .globl ak_minimum
+    AZ_HIDDEN ak_minimum
 ak_minimum:    .ascii "minimum"
     .globl ak_maximum
+    AZ_HIDDEN ak_maximum
 ak_maximum:    .ascii "maximum"
     .globl ak_type
+    AZ_HIDDEN ak_type
 ak_type:       .ascii "type"
     .globl ak_inclusive
+    AZ_HIDDEN ak_inclusive
 ak_inclusive:  .ascii "inclusive"
     .globl ak_exact
+    AZ_HIDDEN ak_exact
 ak_exact:      .ascii "exact"
 ams_atleast:   .ascii "String must contain at least "
 ams_atmost:    .ascii "String must contain at most "
@@ -1021,6 +1057,7 @@ amd_max:       .ascii "Date must be earlier than "
 // az_msg_size(x0=outbuf, x1=prefixptr, x2=prefixlen, x3=n u64, x4=suffixptr, x5=suffixlen)
 // -> x0 = msglen. "prefix<n>suffix"
     .globl _az_msg_size
+    AZ_HIDDEN _az_msg_size
 _az_msg_size:
     stp x29, x30, [sp, #-64]!
     mov x29, sp
@@ -1059,6 +1096,7 @@ _az_msg_size:
 // az_msg_f64(x0=outbuf, x1=prefixptr, x2=prefixlen, d0=n, x3=suffixptr, x4=suffixlen)
 // -> x0 = msglen
     .globl _az_msg_f64
+    AZ_HIDDEN _az_msg_f64
 _az_msg_f64:
     stp x29, x30, [sp, #-64]!
     mov x29, sp
@@ -1096,6 +1134,7 @@ _az_msg_f64:
 // az_input_len(x0=valptr) -> x0 = ".length" of value or -1
 // str -> codepoints, arr -> count, hostref -> cb kind7, else -1
     .globl _az_input_len
+    AZ_HIDDEN _az_input_len
 _az_input_len:
     stp x29, x30, [sp, #-16]!
     mov x29, sp

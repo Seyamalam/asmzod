@@ -1,3 +1,4 @@
+#include "port.h"
 // engine.s — az_parse entry point + engine context
 //
 // ctx registers (callee-saved, stable across JS callbacks):

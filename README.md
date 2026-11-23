@@ -94,7 +94,8 @@ Two engines, one API:
 
 | runtime | backend | notes |
 |---|---|---|
-| **Bun** | ARM64 dylib via `bun:ffi` | the real deal — machine code does the validating |
+| **Bun** (macOS arm64) | ARM64 dylib via `bun:ffi` | the real deal — machine code does the validating |
+| **Bun** (Linux arm64) | ARM64 `.so` via `bun:ffi` | same engine — `make -C asm` emits `libasmzod.so`; verified via `bun run test:linux` (colima/Docker, 117/117) |
 | **Node ≥ 22.6** | portable interpreter | `node test.ts` — type-stripping runs the TS sources directly (no param-props/namespaces, `.ts` extensions everywhere) |
 | **Deno** | portable interpreter | `deno test --no-check` — works today |
 | **Cloudflare Workers / browsers** | portable interpreter | see `examples/worker/` — zero FFI, zero native deps |

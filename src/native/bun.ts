@@ -11,14 +11,20 @@ setMemBackend({
   u64: (p) => read.u64(p) as bigint,
 });
 
-const libPath = new URL("../../asm/libasmzod.dylib", import.meta.url).pathname;
+// ELF keeps the Mach-O-style `_` prefix (source symbols are `_az_*` on both)
+const isDarwin = (globalThis as any).process?.platform !== "linux";
+const libPath = new URL(
+  isDarwin ? "../../asm/libasmzod.dylib" : "../../asm/libasmzod.so",
+  import.meta.url,
+).pathname;
+const P = isDarwin ? "" : "_"; // symbol prefix on ELF
 
 const lib = dlopen(libPath, {
-  az_parse: {
+  [P + "az_parse"]: {
     args: ["pointer", "pointer", "pointer", "u64", "pointer", "u64", "pointer"],
     returns: "i64",
   },
-  az_version: { args: [], returns: "u32" },
+  [P + "az_version"]: { args: [], returns: "u32" },
 });
 
 // error thrown inside a callback — rethrown by the driver after the call
@@ -181,7 +187,7 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
 
   for (;;) {
     curOut = { base: ptr(outv), cap: outCap };
-    const status = lib.symbols.az_parse(
+    const status = (lib.symbols as any)[P + "az_parse"](
       ptr(blob), ptr(input),
       ptr(outv), BigInt(outCap),
       ptr(oute), BigInt(errCap),
@@ -214,4 +220,4 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
   }
 }
 
-export const version = lib.symbols.az_version();
+export const version = (lib.symbols as any)[P + "az_version"]();

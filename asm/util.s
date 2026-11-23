@@ -1,9 +1,11 @@
+#include "port.h"
 // util.s — leaf helpers: memory ops, integer to decimal
     .text
     .p2align 2
 
 // az_memcpy(x0=dst, x1=src, x2=n) — forward copy, dst may not overlap lower src
     .globl _az_memcpy
+    AZ_HIDDEN _az_memcpy
 _az_memcpy:
     cbz x2, .Lmcdone
     cmp x2, #16
@@ -26,6 +28,7 @@ _az_memcpy:
 
 // az_memeq(x0=a, x1=b, x2=n) -> w0 1 if equal else 0
     .globl _az_memeq
+    AZ_HIDDEN _az_memeq
 _az_memeq:
     cbz x2, .Lmeq1
     cmp x2, #8
@@ -57,6 +60,7 @@ _az_memeq:
 // az_u64_dec(x0=u64 value) -> writes decimal into 32-byte stack buf passed in x1
 // returns x0 = length written
     .globl _az_u64_dec
+    AZ_HIDDEN _az_u64_dec
 _az_u64_dec:
     mov x9, x0
     mov x10, x1
@@ -89,6 +93,7 @@ _az_u64_dec:
 
 // az_cat(x0=dst, x1=src, x2=len) -> x0 = dst+len  (append copy, returns new pos)
     .globl _az_cat
+    AZ_HIDDEN _az_cat
 _az_cat:
     cbz x2, .Lcat_done
 .Lcat_l:
@@ -101,6 +106,7 @@ _az_cat:
 
 // az_sdec(x0=i64, x1=buf) -> x0 len  (signed decimal)
     .globl _az_sdec
+    AZ_HIDDEN _az_sdec
 _az_sdec:
     stp x29, x30, [sp, #-16]!
     mov x29, sp
@@ -121,6 +127,7 @@ _az_sdec:
 // az_f64_dec(d0=val, x0=buf) -> x0=len
 // NaN->"NaN", integral->int digits, else int.frac up to 6 digits trimmed
     .globl _az_f64_dec
+    AZ_HIDDEN _az_f64_dec
 _az_f64_dec:
     stp x29, x30, [sp, #-48]!
     mov x29, sp
