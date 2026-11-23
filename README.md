@@ -68,10 +68,10 @@ bun run bench     # asm vs zod
 
 ## API coverage
 
-Drop-in target is the Zod 3 API (`zod@3.x` semantics). The differential test
-suite runs identical schemas and inputs through both AsmZod and real Zod and
-compares outcomes. The table below is the **target matrix** for v1 — see the
-todo/tests for what's actually green today.
+Drop-in target is `zod@4.6.7`. The differential suite
+(`test/diff.test.ts`) runs identical schemas and inputs through both
+AsmZod and real Zod and compares success, output values, and issue
+codes+paths — currently **50/50 cases green**, plus 15 API tests.
 
 | Area | Status |
 |---|---|
@@ -86,6 +86,26 @@ todo/tests for what's actually green today.
 | `map` `set` `promise` `function` | ❌ not yet |
 | `bigint` | i64 range only |
 | `unionErrors` detail on union failure | approximated (single `invalid_union` issue) |
+
+## Performance
+
+Honest answer: **slower than Zod on everything we've measured.** Zod 4
+JIT-compiles validators into tight JS; AsmZod pays a fixed toll per parse
+(encode JS value → FFI call → asm validate → decode result). Measured on
+an M-series Mac, Bun 1.4:
+
+| workload | asmzod | zod@4.6.7 | ratio |
+|---|---|---|---|
+| small object | 11.8µs | 0.13µs | ~92× slower |
+| union dispatch | 10.1µs | 0.16µs | ~62× slower |
+| failure + issues | 17.7µs | 0.55µs | ~32× slower |
+| array of 2000 objects | 4.23ms | 121µs | ~35× slower |
+| deep nested + 500-elem array | 104µs | 22µs | ~4.7× slower |
+
+The ratio shrinks as inputs grow (92× → 4.7×) — the marshaling, not the
+engine, is the bottleneck. This project was never about speed; it's
+about answering the question "can you make `z.object()` run on raw ARM64"
+with "yes, and here's a 50-case differential suite to prove it."
 
 ## Honest limitations
 
