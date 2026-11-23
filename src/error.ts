@@ -16,7 +16,8 @@ export class ZodError<T = unknown> extends Error {
     super();
     this.name = "ZodError";
     this.issues = issues;
-    this.message = JSON.stringify(issues, null, 2);
+    this.message = JSON.stringify(issues, (_k, v) =>
+      typeof v === "bigint" ? `${v}n` : v, 2);
   }
 
   get errors(): ZodIssue[] {

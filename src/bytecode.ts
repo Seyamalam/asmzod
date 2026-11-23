@@ -137,7 +137,7 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable): void {
       w.u8(0x08);
       const db = enc.encode(d.disc);
       w.u64(db.length); w.raw(db);
-      const entries = [...d.options.entries()];
+      const entries = [...d.optionsMap.entries()];
       w.u64(entries.length);
       const fps: number[] = [];
       for (const [k] of entries) {

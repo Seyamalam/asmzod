@@ -64,6 +64,7 @@ function isPlainObject(v: object): boolean {
 
 // ---- readers on absolute pointers ----
 export function view(p: number, n: number): Uint8Array {
+  if (n <= 0) return new Uint8Array(0);
   return new Uint8Array(toArrayBuffer(p, 0, n));
 }
 export function rd64u(p: number): bigint {

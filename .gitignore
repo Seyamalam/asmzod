@@ -4,3 +4,7 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# test driver binaries
+test/drv
+test/drv[0-9]

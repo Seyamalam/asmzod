@@ -155,7 +155,7 @@ _az_f64_dec:
     add x10, x10, x0
     mov w13, #'.'
     strb w13, [x10], #1
-    scvtf d1, x14
+    frintm d1, d0           // x14 was clobbered by az_u64_dec
     fsub d1, d0, d1
     mov x15, #6
 .Lfd_frac:

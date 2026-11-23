@@ -29,7 +29,7 @@ _az_utf16_units:
     b .Luu_loop
 .Luu_4:
     add x10, x10, #4
-    add x9, x9, #2           // surrogate pair
+    add x9, x9, #1           // code point (zod4 counts astral as 1)
     b .Luu_loop
 .Luu_1:
     add x10, x10, #1
@@ -1090,4 +1090,39 @@ _az_msg_f64:
     ldr x9, [sp, #16]
     sub x0, x10, x9
     ldp x29, x30, [sp], #64
+    ret
+
+// ---------- az_input_len ----------
+// az_input_len(x0=valptr) -> x0 = ".length" of value or -1
+// str -> codepoints, arr -> count, hostref -> cb kind7, else -1
+    .globl _az_input_len
+_az_input_len:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    ldrb w9, [x0]
+    cmp w9, #4
+    b.eq .Lil_str
+    cmp w9, #7
+    b.eq .Lil_arr
+    cmp w9, #8
+    b.eq .Lil_host
+    mov x0, #-1
+    b .Lil_out
+.Lil_str:
+    ldr x1, [x0, #1]
+    add x0, x0, #9
+    bl _az_utf16_units
+    b .Lil_out
+.Lil_arr:
+    ldr x0, [x0, #1]
+    b .Lil_out
+.Lil_host:
+    ldr x1, [x0, #1]         // hostidx
+    ldr x9, [x24, #24]       // cb_host
+    mov x0, #7               // kind7: .length
+    mov x2, #0
+    mov x3, #0
+    blr x9
+.Lil_out:
+    ldp x29, x30, [sp], #16
     ret

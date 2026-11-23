@@ -449,8 +449,7 @@ _az_issue_type:
     cmp x2, #8
     b.ne .Lit_named
     // HOSTREF -> ask JS for type name index (cb_host kind 6: a=hostref idx)
-    ldr x9, [x24]
-    ldr x9, [x9, #24]           // cb_host = table[3]
+    ldr x9, [x24, #24]          // cb_host = table[3]
     mov x0, #6
     ldr x1, [x3, #1]            // hostref idx
     mov x2, #0
@@ -478,10 +477,10 @@ _az_issue_type:
     ldr x9, [sp, #32]           // tag
     cbnz x9, .Lit_buildmsg
     // tag==0 (undefined) -> "Required"
-    adrp x0, .Lm_required@PAGE
-    add x0, x0, .Lm_required@PAGEOFF
-    mov x1, #8
-    mov x2, #0
+    adrp x1, .Lm_required@PAGE
+    add x1, x1, .Lm_required@PAGEOFF
+    mov x2, #8
+    mov x0, #0                  // code = invalid_type
     bl _az_issue_begin
     cbnz x0, .Lit_out
     b .Lit_fields

@@ -77,7 +77,7 @@ _az_run_strchecks:
     // LENGTH exact
     cmp x14, x13
     b.eq .Lsc_next8
-    // fail: too_small exact
+    b.hi .Lsc_len_big
     adrp x1, ams_exactly@PAGE
     add x1, x1, ams_exactly@PAGEOFF
     mov x2, #29
@@ -85,6 +85,14 @@ _az_run_strchecks:
     add x4, x4, ams_chars@PAGEOFF
     mov x5, #14
     b .Lsc_sizefail_small
+.Lsc_len_big:
+    adrp x1, ams_exactly@PAGE
+    add x1, x1, ams_exactly@PAGEOFF
+    mov x2, #29
+    adrp x4, ams_chars@PAGE
+    add x4, x4, ams_chars@PAGEOFF
+    mov x5, #14
+    b .Lsc_sizefail_big
 .Lsc_min:
     cmp x14, x13
     b.hs .Lsc_next8
@@ -152,7 +160,9 @@ _az_run_strchecks:
     add x1, x1, .Lty_string@PAGEOFF
     mov x2, #6
     mov w4, #1
-    mov w5, #0
+    ldr w9, [sp, #80]
+    cmp w9, #3
+    cset w5, eq                  // exact iff LENGTH
     bl _az_issue_size
     cbnz x0, .Lsc_retx
     mov x0, #-2
@@ -421,7 +431,7 @@ _az_run_strchecks:
     stp x9, x10, [sp, #88]
     ldp x6, x7, [sp, #56]        // custom msg
     cbnz x7, .Lsc_se_issue
-    add x10, sp, #96
+    add x10, sp, #104            // buf past the x88/x96 saves
     mov x13, x11
     mov x16, x12
     mov x11, x13
@@ -445,7 +455,7 @@ _az_run_strchecks:
     mov x10, x0
     mov w13, #'"'
     strb w13, [x10], #1
-    add x6, sp, #96
+    add x6, sp, #104
     sub x7, x10, x6
 .Lsc_se_issue:
     ldp x0, x1, [sp, #88]

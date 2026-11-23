@@ -77,10 +77,7 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #4
     b.eq .Lvs_tok
-    adrp x0, .Lex_string@PAGE
-    add x0, x0, .Lex_string@PAGEOFF
-    mov x1, #6
-    b _az_vtype
+    b .Lvs_tfail
 .Lvs_tok:
     ldrb w9, [x27, #1]
     cbz w9, .Lvs_ok
@@ -107,8 +104,19 @@ _az_vtype:
 .Lvn_tok:
     ldr d0, [x28, #1]
     fcmp d0, d0
-    b.vc .Lvn_fin
+    b.vc .Lvn_infchk
     // NaN -> invalid_type (issue_type detects nan -> "nan")
+    adrp x0, .Lex_number@PAGE
+    add x0, x0, .Lex_number@PAGEOFF
+    mov x1, #6
+    b _az_vtype
+.Lvn_infchk:
+    // zod4: +-Infinity is not a valid z.number()
+    fabs d1, d0
+    mov x10, #0x7FF0000000000000
+    fmov d2, x10
+    fcmp d1, d2
+    b.ne .Lvn_fin
     adrp x0, .Lex_number@PAGE
     add x0, x0, .Lex_number@PAGEOFF
     mov x1, #6
@@ -367,7 +375,9 @@ _az_vtype:
     b.ne .Llit_m1
     add x0, x27, #1
     mov x1, x10
+    str x10, [sp, #480]
     bl _az_lit_repr
+    ldr x10, [sp, #480]
     add x10, x10, x0
     add x6, sp, #64
     sub x7, x10, x6
@@ -490,7 +500,9 @@ _az_vtype:
     // received repr (lit_repr works on any scalar; for objects gives "{}")
     mov x0, x28
     mov x1, x10
+    str x10, [sp, #480]
     bl _az_lit_repr
+    ldr x10, [sp, #480]
     add x10, x10, x0
     add x6, sp, #40
     sub x7, x10, x6
@@ -662,12 +674,16 @@ _az_vtype:
     bl _az_validate
     b .Lv_ret
 .Ldu_fail:
+    mov x0, x14              // discriminator name ptr
+    mov x1, x13              // len
+    bl _az_path_push_key
     mov x0, #3
     mov x1, #0
     mov x2, #0
     bl _az_issue_begin
     cbnz x0, .Lv_ret
     bl _az_issue_commit
+    bl _az_path_pop
     b .Lv_invalid
 
 // ---------- 0x0F REFINE ----------
@@ -962,21 +978,164 @@ _az_emit_i64:
 // az_strtod(x0=ptr,x1=len) -> d0 (NaN on invalid)
     .globl _az_strtod
 _az_strtod:
-    // parse [+-] int[.frac][eE[+-]exp] — must consume all
+    // JS Number(str): trim ws, ""->0, 0x->hex, Infinity, NaN, decimal
     mov x9, #0                 // i
     mov x10, #1                // sign
+    mov x14, #1                // esign
+    mov x15, #0                // edigits
+    mov x16, #0                // eval
     fmov d0, xzr
-    cbz x1, .Lsd_nan
-    ldrb w11, [x0]
+    // trim leading ws
+.Lsd_twl:
+    cmp x9, x1
+    b.hs .Lsd_zero2            // all ws / empty -> 0
+    ldrb w11, [x0, x9]
+    cmp w11, #' '
+    b.eq .Lsd_tw1
+    cmp w11, #9
+    b.lo .Lsd_twr              // < tab: not ws
+    cmp w11, #13
+    b.ls .Lsd_tw1              // 9..13 ws
+    b .Lsd_twr
+.Lsd_tw1:
+    add x9, x9, #1
+    b .Lsd_twl
+.Lsd_twr:
+    // trailing ws -> shrink len
+.Lsd_tel:
+    cbz x1, .Lsd_zero2
+    sub x11, x1, #1
+    ldrb w12, [x0, x11]
+    cmp w12, #' '
+    b.eq .Lsd_te1
+    cmp w12, #9
+    b.lo .Lsd_body
+    cmp w12, #13
+    b.ls .Lsd_te1
+    b .Lsd_body
+.Lsd_te1:
+    sub x1, x1, #1
+    b .Lsd_tel
+.Lsd_body:
+    cmp x9, x1
+    b.hs .Lsd_zero2            // empty after trim -> 0
+    ldrb w11, [x0, x9]
     cmp w11, #'-'
     b.ne .Lsd_p1
     mov x10, #-1
     add x9, x9, #1
-    b .Lsd_int
+    b .Lsd_p2
 .Lsd_p1:
     cmp w11, #'+'
-    b.ne .Lsd_int
+    b.ne .Lsd_p2
     add x9, x9, #1
+.Lsd_p2:
+    // "0x" hex?
+    add x11, x9, #2
+    cmp x11, x1
+    b.gt .Lsd_lit
+    ldrb w11, [x0, x9]
+    cmp w11, #'0'
+    b.ne .Lsd_lit
+    add x2, x0, x9
+    ldrb w11, [x2, #1]
+    orr w11, w11, #0x20        // lowercase
+    cmp w11, #'x'
+    b.ne .Lsd_lit
+    add x9, x9, #2
+    mov x13, #0                // value
+    mov x12, #0                // ndigits
+.Lsd_hex:
+    cmp x9, x1
+    b.hs .Lsd_hexd
+    ldrb w11, [x0, x9]
+    sub w11, w11, #'0'
+    cmp w11, #9
+    b.ls .Lsd_hn
+    ldrb w11, [x0, x9]
+    orr w11, w11, #0x20
+    sub w11, w11, #'a'
+    cmp w11, #5
+    b.hi .Lsd_nan
+    add w11, w11, #10
+.Lsd_hn:
+    lsl x13, x13, #4
+    add x13, x13, x11
+    add x9, x9, #1
+    add x12, x12, #1
+    cmp x12, #16               // cap hex digits
+    b.hi .Lsd_nan
+    b .Lsd_hex
+.Lsd_hexd:
+    cbz x12, .Lsd_nan
+    ucvtf d0, x13
+    b .Lsd_sign
+.Lsd_lit:
+    // "Infinity" / "NaN"?
+    sub x11, x1, x9
+    cmp x11, #3
+    b.lo .Lsd_int
+    add x2, x0, x9             // cur = s+i
+    ldrb w11, [x2]
+    orr w11, w11, #0x20
+    cmp w11, #'n'
+    b.ne .Lsd_inftry
+    // NaN
+    cmp x11, #3
+    b.ne .Lsd_nan
+    ldrb w11, [x2, #1]
+    orr w11, w11, #0x20
+    cmp w11, #'a'
+    b.ne .Lsd_nan
+    ldrb w11, [x2, #2]
+    orr w11, w11, #0x20
+    cmp w11, #'n'
+    b.ne .Lsd_nan
+    b .Lsd_nan
+.Lsd_inftry:
+    cmp x11, #8
+    b.ne .Lsd_int
+    ldrb w11, [x2]
+    orr w11, w11, #0x20
+    cmp w11, #'i'
+    b.ne .Lsd_int
+    ldrb w11, [x2, #1]
+    orr w11, w11, #0x20
+    cmp w11, #'n'
+    b.ne .Lsd_nan
+    ldrb w11, [x2, #2]
+    orr w11, w11, #0x20
+    cmp w11, #'f'
+    b.ne .Lsd_nan
+    // "Infinity" = i n f i n i t y — check remaining 5
+    ldrb w11, [x2, #3]
+    orr w11, w11, #0x20
+    cmp w11, #'i'
+    b.ne .Lsd_nan
+    ldrb w11, [x2, #4]
+    orr w11, w11, #0x20
+    cmp w11, #'n'
+    b.ne .Lsd_nan
+    ldrb w11, [x2, #5]
+    orr w11, w11, #0x20
+    cmp w11, #'i'
+    b.ne .Lsd_nan
+    ldrb w11, [x2, #6]
+    orr w11, w11, #0x20
+    cmp w11, #'t'
+    b.ne .Lsd_nan
+    ldrb w11, [x2, #7]
+    orr w11, w11, #0x20
+    cmp w11, #'y'
+    b.ne .Lsd_nan
+    b .Lsd_inf2
+.Lsd_inf2:
+    mov x13, #0x7FF0000000000000
+    fmov d0, x13
+    b .Lsd_sign
+.Lsd_zero2:
+    fmov d0, xzr
+    ret
 .Lsd_int:
     mov x12, #0                // digits
     mov x13, #10
@@ -1227,10 +1386,7 @@ _az_strtoi:
     ldrb w9, [x28]
     cmp w9, #7
     b.eq .Lar_tok
-    adrp x0, .Lex_array@PAGE
-    add x0, x0, .Lex_array@PAGEOFF
-    mov x1, #5
-    b _az_vtype
+    b .Lar_tfail
 .Lar_tok:
     ldr x9, [x28, #1]          // n elems
     str x9, [sp, #40]
@@ -1434,7 +1590,20 @@ _az_strtoi:
     lsl x12, x10, #3
     add x11, x11, x12
     str x11, [sp, #56]         // rest field addr
-    // length checks
+    // eff_n = rest ? nin : min(nin, nitems)
+    ldr x11, [x11]
+    cbnz x11, .Ltu_effall
+    ldr x9, [sp, #40]
+    cmp x9, x10
+    b.ls .Ltu_eff
+    mov x9, x10
+    b .Ltu_eff
+.Ltu_effall:
+    ldr x9, [sp, #40]
+.Ltu_eff:
+    str x9, [sp, #160]         // eff_n
+    str xzr, [sp, #168]        // lenfail
+    // length checks: emit issue + flag, still validate present elems
     ldr x9, [sp, #40]
     cmp x9, x10
     b.hs .Ltu_over
@@ -1461,7 +1630,9 @@ _az_strtoi:
     mov w5, #1
     bl _az_issue_size
     cbnz x0, .Lv_ret
-    b .Ltu_fail
+    mov x9, #1
+    str x9, [sp, #168]
+    b .Ltu_lenok
 .Ltu_over:
     ldr x11, [sp, #56]
     ldr x11, [x11]
@@ -1493,7 +1664,9 @@ _az_strtoi:
     mov w5, #1
     bl _az_issue_size
     cbnz x0, .Lv_ret
-    b .Ltu_fail
+    mov x9, #1
+    str x9, [sp, #168]
+    b .Ltu_lenok
 .Ltu_lenok:
     str x20, [sp, #32]
     str xzr, [sp, #64]         // i
@@ -1502,7 +1675,7 @@ _az_strtoi:
     str xzr, [sp, #80]         // failed
 .Ltu_loop:
     ldr x9, [sp, #64]
-    ldr x10, [sp, #40]
+    ldr x10, [sp, #160]        // eff_n
     cmp x9, x10
     b.hs .Ltu_emit
     // schema for i: i<n -> offs[i] else rest
@@ -1566,17 +1739,19 @@ _az_strtoi:
 .Ltu_emit:
     ldr x9, [sp, #80]
     cbnz x9, .Ltu_fail_pop
+    ldr x9, [sp, #168]
+    cbnz x9, .Ltu_fail_pop      // length mismatch also fails
     str x19, [sp, #120]        // emit start S
     mov w0, #7
     bl _az_vw1
     cbnz x0, .Lv_ret
-    ldr x0, [sp, #40]
+    ldr x0, [sp, #160]
     bl _az_vw8
     cbnz x0, .Lv_ret
     str xzr, [sp, #64]
 .Ltu_eloop:
     ldr x9, [sp, #64]
-    ldr x10, [sp, #40]
+    ldr x10, [sp, #160]
     cmp x9, x10
     b.hs .Ltu_edone
     sub x11, x10, x9
@@ -1596,13 +1771,13 @@ _az_strtoi:
     sub x2, x19, x9
     mov x1, x9
     mov x0, #0
-    ldr x9, [sp, #40]
+    ldr x9, [sp, #160]
     mov x10, #40
     mul x9, x9, x10
     add x20, x20, x9
     b .Lv_ret
 .Ltu_fail_pop:
-    ldr x9, [sp, #40]
+    ldr x9, [sp, #160]
     mov x10, #40
     mul x9, x9, x10
     add x20, x20, x9
@@ -1687,9 +1862,15 @@ _az_strtoi:
     str x9, [sp, #72]
     b .Lrc_next
 .Lrc_vval:
+    ldr x0, [sp, #104]         // kptr
+    ldr x1, [sp, #96]          // klen
+    bl _az_path_push_key
     ldr x0, [sp, #88]          // val node
     ldr x1, [sp, #112]
     bl _az_validate
+    str x0, [sp, #128]
+    bl _az_path_pop
+    ldr x0, [sp, #128]
     cbnz x0, .Lrc_bad
     // push (kptr,klen,outptr,outlen) — validate out in x1,x2
     mov x3, x2                 // vlen
@@ -1796,10 +1977,37 @@ _az_strtoi:
     ldrb w9, [x28]
     cmp w9, #6
     b.eq .Lob_tok
+    cmp w9, #8
+    b.ne .Lob_tfail
+    // hostref: zod treats Date/Map/Set/class instances as {} —
+    // but functions and symbols are not objects
+    ldr x9, [x24, #24]
+    mov x0, #6                 // host type name idx
+    ldr x1, [x28, #1]
+    mov x2, #0
+    mov x3, #0
+    blr x9
+    cbz x0, .Lob_tfail         // symbol
+    cmp x0, #4
+    b.eq .Lob_tfail            // function
+    // materialize empty object in arena, validate normally
+    mov x0, #9
+    bl _az_val_reserve
+    cmp x0, #-1
+    b.eq .Lob_oom
+    mov w9, #6
+    strb w9, [x0]
+    str xzr, [x0, #1]
+    mov x28, x0
+    b .Lob_tok
+.Lob_tfail:
     adrp x0, .Lex_object@PAGE
     add x0, x0, .Lex_object@PAGEOFF
     mov x1, #6
     b _az_vtype
+.Lob_oom:
+    mov x0, #-3
+    b .Lv_ret
 .Lob_tok:
     ldr x9, [x27, #10]
     str x9, [sp, #40]
@@ -1985,14 +2193,18 @@ _az_strtoi:
     ldr x9, [sp, #80]
     cbz x9, .Lob_upush          // passthrough: collect verbatim
     // catchall: validate value against catchall node
+    ldr x0, [sp, #176]         // kptr
+    ldr x1, [sp, #168]         // klen
+    bl _az_path_push_key
     ldr x0, [sp, #80]
     ldr x1, [sp, #184]
     bl _az_validate
+    stp x1, x2, [sp, #144]     // outptr@144 outlen@152
+    str x0, [sp, #160]         // status
+    bl _az_path_pop
+    ldr x0, [sp, #160]
     cbnz x0, .Lob_ubad
-    mov x2, x1
-    mov x3, x2
-    mov x2, x1
-    mov x3, x2                 // out ptr,len -> x2,x3
+    ldp x2, x3, [sp, #144]     // out ptr,len -> x2,x3
     b .Lob_up2
 .Lob_ubad:
     cmp x0, #-2
@@ -2281,76 +2493,61 @@ _az_strtoi:
     str x19, [sp, #80]         // S
     // count = Lf + Rf - dups; dups counted by scanning
     ldr x15, [x11, #1]         // Lf
-    ldr x16, [x12, #1]         // Rf
     mov x17, #0                // dups
-    add x0, x11, #9            // L field cur
-    str x15, [sp, #88]
+    str x15, [sp, #88]         // L remaining
+    add x13, x11, #9
+    str x13, [sp, #96]         // L cur
 .Lin_dl:
     ldr x15, [sp, #88]
     cbz x15, .Lin_dd
     sub x15, x15, #1
     str x15, [sp, #88]
-    ldr x9, [x0]               // Lklen
-    add x10, x0, #8            // Lkptr
-    // scan R for key
-    ldr x13, [x12, #1]
-    add x14, x12, #9
+    ldr x13, [sp, #96]
+    ldr x9, [x13]              // Lklen
+    add x10, x13, #8           // Lkptr
+    add x11, x10, x9           // Lvptr
+    stp x9, x10, [sp, #104]    // 104=Lklen 112=Lkptr
+    str x11, [sp, #120]        // 120=Lvptr
+    ldr x12, [sp, #64]         // R base (reload each iter)
+    ldr x14, [x12, #1]
+    str x14, [sp, #128]        // R remaining
+    add x16, x12, #9
+    str x16, [sp, #136]        // R cur
 .Lin_dscan:
-    cbz x13, .Lin_dnext
-    ldr x16, [x14]
-    cmp x16, x9
-    b.ne .Lin_dn
-    stp x0, x9, [sp, #96]
-    stp x10, x13, [sp, #112]
+    ldr x14, [sp, #128]
+    cbz x14, .Lin_dnext
+    sub x14, x14, #1
     str x14, [sp, #128]
-    add x1, x14, #8
-    mov x0, x10
-    mov x2, x9
+    ldr x16, [sp, #136]
+    ldr x9, [x16]              // Rklen
+    add x10, x16, #8           // Rkptr
+    add x11, x10, x9           // Rvptr
+    stp x10, x11, [sp, #144]   // 144=Rkptr 152=Rvptr
+    ldr x0, [sp, #104]         // Lklen
+    cmp x9, x0
+    b.ne .Lin_dadv
+    ldr x0, [sp, #112]         // Lkptr
+    mov x1, x10                // Rkptr
+    mov x2, x9                 // len
     bl _az_memeq
-    cbnz w0, .Lin_dup
-    ldp x0, x9, [sp, #96]
-    ldp x10, x13, [sp, #112]
-    ldr x14, [sp, #128]
-    ldr x16, [x14]
-    cmp x16, x9
-    b.eq .Lin_dn               // lengths equal but content differs
-    b .Lin_dn
-.Lin_dn:
-    ldr x16, [x14]
-    add x14, x14, x16
-    add x14, x14, #8           // at R value
-    stp x0, x9, [sp, #96]
-    stp x10, x13, [sp, #112]
-    str x17, [sp, #128]
-    mov x0, x14
-    bl _az_vsize
-    ldr x14, [sp, #128]        // careful: x17 saved not x14!
-    // -- recompute: x14 (R cur) was saved at #128? we stored x17 there. fix:
-    //    R cur was in x14 before stp — restored below
-    mov x14, x0                // wrong — see patch notes
-    b .Lin_bad
-.Lin_dup:
-    ldp x0, x9, [sp, #96]
-    ldp x10, x13, [sp, #112]
-    ldr x14, [sp, #128]
-    add x17, x17, #1           // dup found — skip this L field later? count--
-    // fallthrough to advancing R cur? dup found: stop R scan
+    cbz w0, .Lin_dadv
+    add x17, x17, #1           // dup found
     b .Lin_dnext
-.Lin_dnext:
-    // advance L cur past its value; x0 = L field cur still
-    ldr x9, [x0]
-    add x0, x0, x9
-    add x0, x0, #8
-    stp x17, x12, [sp, #128]
-    mov x13, x0
-    mov x0, x13
+.Lin_dadv:
+    ldr x0, [sp, #152]         // Rvptr
     bl _az_vsize
-    ldp x17, x12, [sp, #128]
-    add x0, x13, x0
+    ldr x16, [sp, #152]
+    add x16, x16, x0
+    str x16, [sp, #136]
+    b .Lin_dscan
+.Lin_dnext:
+    // advance L cur past its value
+    ldr x0, [sp, #120]
+    bl _az_vsize
+    ldr x13, [sp, #120]
+    add x13, x13, x0
+    str x13, [sp, #96]
     b .Lin_dl
-.Lin_bad:
-    mov x0, #-1
-    b .Lv_ret
 .Lin_dd:
     // emitcount = Lf + Rf - dups
     ldr x11, [sp, #40]
@@ -2917,4 +3114,146 @@ _az_strtoi:
 .Lk_keys:   .ascii "keys"
 .Lm_unk:    .ascii "Unrecognized key(s) in object: "
 .Lty_date:  .ascii "date"
+    .text
+
+// ---------- uniform ".length" semantics (zod4) ----------
+// non-string input to string schema: emit invalid_type, then still run
+// size checks (codes 1-3) against .length; format checks are skipped.
+.Lvs_tfail:
+    adrp x0, .Lex_string@PAGE
+    add x0, x0, .Lex_string@PAGEOFF
+    mov x1, #6
+    ldrb w2, [x28]
+    mov x3, x28
+    bl _az_issue_type
+    cbnz x0, .Lv_ret
+    mov x0, x28
+    bl _az_input_len
+    cmp x0, #-1
+    b.eq .Lv_invalid
+    mov x13, x0                // units
+    ldrb w9, [x27, #1]         // nchecks
+    cbz w9, .Lv_invalid
+    add x14, x27, #2           // chkptr
+    mov x15, x9
+.Lvs_alchk:
+    cbz x15, .Lv_invalid
+    ldrb w9, [x14]
+    ldr x10, [x14, #1]         // msglen
+    add x11, x14, #9
+    add x11, x11, x10          // params
+    cmp w9, #1
+    b.eq .Lvs_amin
+    cmp w9, #2
+    b.eq .Lvs_amax
+    cmp w9, #3
+    b.eq .Lvs_alen
+    // non-size check: stride past param (skip in non-string mode)
+    cmp w9, #7
+    b.ls .Lvs_avar             // 7..9 varlen
+    cmp w9, #10
+    b.eq .Lvs_a8
+    mov x12, #0                // most formats: no params
+    cmp w9, #5
+    b.ne .Lvs_anext
+    mov x12, #1                // uuid: u8 version
+    b .Lvs_anext
+.Lvs_avar:
+    ldr x12, [x11]
+    add x12, x12, #8
+    b .Lvs_anext
+.Lvs_a8:
+    mov x12, #8
+.Lvs_anext:
+    add x14, x11, x12
+    sub x15, x15, #1
+    b .Lvs_alchk
+.Lvs_amin:
+    ldr x12, [x11]
+    mov w5, #0
+    cmp x13, x12
+    b.hs .Lvs_an8
+    mov x0, #8                 // too_small
+    b .Lvs_asize
+.Lvs_amax:
+    ldr x12, [x11]
+    mov w5, #0
+    cmp x13, x12
+    b.ls .Lvs_an8
+    mov x0, #9                 // too_big
+    b .Lvs_asize
+.Lvs_alen:
+    ldr x12, [x11]
+    mov w5, #1                 // exact
+    cmp x13, x12
+    b.eq .Lvs_an8
+    mov x0, #8
+    b.lo .Lvs_asize
+    mov x0, #9
+.Lvs_asize:
+    // (x0=code, x12=n, w5=exact) origin "string"
+    str x12, [sp, #480]
+    ucvtf d0, x12
+    fmov x3, d0
+    adrp x1, .Lty_as_str@PAGE
+    add x1, x1, .Lty_as_str@PAGEOFF
+    mov x2, #6
+    mov w4, #1
+    mov x6, #0
+    mov x7, #0
+    bl _az_issue_size
+    cbnz x0, .Lv_ret
+    ldr x12, [sp, #480]
+.Lvs_an8:
+    add x14, x11, #8
+    sub x15, x15, #1
+    b .Lvs_alchk
+
+// non-array input to array schema: invalid_type + size vs min/max
+.Lar_tfail:
+    adrp x0, .Lex_array@PAGE
+    add x0, x0, .Lex_array@PAGEOFF
+    mov x1, #5
+    ldrb w2, [x28]
+    mov x3, x28
+    bl _az_issue_type
+    cbnz x0, .Lv_ret
+    mov x0, x28
+    bl _az_input_len
+    cmp x0, #-1
+    b.eq .Lv_invalid
+    mov x13, x0
+    mov x10, #-1
+    ldr x12, [x27, #9]         // min
+    cmp x12, x10
+    b.eq .Lar_amaxc
+    cmp x13, x12
+    b.hs .Lar_amaxc
+    mov x0, #8
+    mov w5, #0
+    b .Lar_asize
+.Lar_amaxc:
+    ldr x12, [x27, #17]        // max
+    cmp x12, x10
+    b.eq .Lv_invalid
+    cmp x13, x12
+    b.ls .Lv_invalid
+    mov x0, #9
+    mov w5, #0
+.Lar_asize:
+    ucvtf d0, x12
+    fmov x3, d0
+    adrp x1, .Lty_as_arr@PAGE
+    add x1, x1, .Lty_as_arr@PAGEOFF
+    mov x2, #5
+    mov w4, #1
+    mov x6, #0
+    mov x7, #0
+    bl _az_issue_size
+    cbnz x0, .Lv_ret
+    b .Lv_invalid
+
+    .section __TEXT,__const
+.Lty_as_str: .ascii "string"
+.Lty_as_arr: .ascii "array"
     .text

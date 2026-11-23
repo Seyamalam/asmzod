@@ -140,6 +140,12 @@ const cbHost = new JSCallback(
         case 6: { // hostref type name index: a=hostidx
           return BigInt(hostTypeIndex(curHosts[Number(a)]));
         }
+        case 7: { // .length of host value: a=hostidx -> len or -1
+          const v = curHosts[Number(a)] as any;
+          const l = v?.length;
+          return typeof l === "number" && l >= 0 && Number.isInteger(l)
+            ? BigInt(l) : -1n;
+        }
       }
       return 0n;
     } catch (e) {
@@ -182,8 +188,9 @@ export function engineParse(blob: Uint8Array, input: Uint8Array, hosts: HostTabl
       ptr(cbTable),
     ) as bigint;
 
+    if (process.env.AZ_DEBUG) console.error("az status", status, "outCap", outCap, "errCap", errCap);
     if (status === -3n) { outCap *= 4; outv = new ArrayBuffer(outCap); continue; }
-    if (status === -4n) { errCap *= 4; oute = new ArrayBuffer(errCap); continue; }
+    if (status === -4n) { if (process.env.AZ_DEBUG) throw new Error("ENOSPC"); errCap *= 4; oute = new ArrayBuffer(errCap); continue; }
     if (pendingThrow !== null) { const e = pendingThrow; pendingThrow = null; throw e; }
 
     if (status === 0n) {
@@ -198,13 +205,50 @@ export function engineParse(blob: Uint8Array, input: Uint8Array, hosts: HostTabl
       let cur = base + ERR_ISSUES_OFF;
       for (let i = 0; i < cnt; i++) {
         const [v, np] = decodeAt(cur, hosts);
-        issues.push(v);
+        issues.push(normalizeIssue(v));
         cur = np;
       }
       return { ok: false, issues };
     }
     throw new Error(`asmzod: engine error ${status}`);
   }
+}
+
+// ---- zod4 issue normalization ----
+// the engine emits structured low-level issues; translate to zod@4 shapes
+const FORMAT_NAMES: Record<string, string> = {
+  email: "email", uuid: "uuid", url: "url", regex: "regex",
+  startsWith: "starts_with", endsWith: "ends_with", includes: "includes",
+  lowercase: "lowercase", uppercase: "uppercase",
+  ipv4: "ipv4", ipv6: "ipv6", ulid: "ulid", nanoid: "nanoid",
+  cuid2: "cuid2", base64: "base64", hex: "hex",
+  datetime: "datetime", date: "date", time: "time",
+};
+
+function normalizeIssue(i: any): any {
+  if (i == null || typeof i !== "object") return i;
+  const out: any = { ...i };
+  switch (i.code) {
+    case "invalid_literal":
+    case "invalid_enum_value":
+      out.code = "invalid_value";
+      break;
+    case "invalid_string":
+      out.code = "invalid_format";
+      if (i.validation !== undefined) {
+        out.format = FORMAT_NAMES[i.validation] ?? i.validation;
+        delete out.validation;
+      }
+      break;
+    case "not_finite":
+      out.code = "invalid_type";
+      break;
+    case "too_small":
+    case "too_big":
+      if (i.type !== undefined) { out.origin = i.type; delete out.type; }
+      break;
+  }
+  return out;
 }
 
 export const engineVersion = lib.symbols.az_version();
