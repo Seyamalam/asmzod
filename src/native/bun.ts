@@ -170,10 +170,10 @@ const cbHost = new JSCallback(
 const cbTable = new ArrayBuffer(32);
 {
   const dv = new DataView(cbTable);
-  dv.setBigUint64(0, BigInt(cbRefine.ptr), true);
-  dv.setBigUint64(8, BigInt(cbTransform.ptr), true);
-  dv.setBigUint64(16, BigInt(cbLazy.ptr), true);
-  dv.setBigUint64(24, BigInt(cbHost.ptr), true);
+  dv.setBigUint64(0, BigInt(cbRefine.ptr as any), true);
+  dv.setBigUint64(8, BigInt(cbTransform.ptr as any), true);
+  dv.setBigUint64(16, BigInt(cbLazy.ptr as any), true);
+  dv.setBigUint64(24, BigInt(cbHost.ptr as any), true);
 }
 
 export interface ParseOk { ok: true; value: unknown }

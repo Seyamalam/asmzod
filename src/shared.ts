@@ -24,7 +24,7 @@ export function parsedTypeName(v: unknown): string {
   if (t !== "object") return t;
   if (Array.isArray(v)) return "array";
   if (Object.getPrototypeOf(v) !== Object.prototype &&
-      "constructor" in v && (v as any).constructor?.name)
+      "constructor" in (v as object) && (v as any).constructor?.name)
     return (v as any).constructor.name;
   return "object";
 }

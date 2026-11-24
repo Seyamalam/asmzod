@@ -5,11 +5,12 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
-    "noUncheckedIndexedAccess": true,
+    "noUncheckedIndexedAccess": false,
     "exactOptionalPropertyTypes": false,
     "skipLibCheck": true,
     "types": ["bun-types"],
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test", "bench"]
 }

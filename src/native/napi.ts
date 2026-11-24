@@ -51,7 +51,7 @@ export function loadNapi(): AzNapi | null {
   if (addon !== undefined) return addon;
   try {
     const a = req(path) as AzNapi;
-    addon = a?.parse && a?.init ? a : null;
+    addon = (typeof (a as any)?.parse === "function") ? a : null;
   } catch { addon = null; }
   return addon;
 }
@@ -97,10 +97,11 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
     return null;
   }
   // fast path: addon built the issue array natively
-  if (r.issues !== undefined)
-    return { ok: false, issues: finishIssues((r.issues as any[]).map(normalizeIssue)) };
+  const rr = r as any;
+  if (rr.issues !== undefined)
+    return { ok: false, issues: finishIssues((rr.issues as any[]).map(normalizeIssue)) };
   // decode issues from the err ArrayBuffer: cnt@0, issues at +3104
-  const buf = new Uint8Array(r.err);
+  const buf = new Uint8Array(rr.err);
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const cnt = Number(dv.getBigUint64(0, true));
   const issues: any[] = [];

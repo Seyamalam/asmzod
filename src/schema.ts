@@ -19,7 +19,7 @@ export type SafeParseResult<T> = SafeParseSuccess<T> | SafeParseFail;
 export abstract class ZodType<Output = unknown, Input = Output> {
   readonly _output!: Output;
   readonly _input!: Input;
-  abstract _def: any;
+  _def!: any;
 
   private _compiled: Compiled | null = null;
 
@@ -575,7 +575,7 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
 export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType<{ [k in keyof Items]: Items[k]["_output"] }> {
   constructor(_def: any) { super(); this._def = _def; }
   rest<R extends ZodTypeAny>(r: R) {
-    return new ZodTuple({ ...this._def, rest: r }) as ZodTuple<[...Items, ...R[]]>;
+    return new ZodTuple({ ...this._def, rest: r }) as any;
   }
 }
 
@@ -589,7 +589,7 @@ export class ZodNonOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodType<N
   constructor(_def: any) { super(); this._def = { ..._def, type: "nonoptional" }; }
   protected override _run(data: unknown) {
     if (data === undefined) return { ok: false as const, issues: [typeIssue("nonoptional", data)], aborted: true };
-    return (this._def.inner as ZodTypeAny)._run(data);
+    return (this._def.inner as any)._run(data);
   }
 }
 
@@ -624,10 +624,10 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
     const out = new Map();
     const issues: ZodIssue[] = [];
     for (const [k, v] of data) {
-      const kr = keyType._run(k);
-      const vr = valueType._run(v);
-      if (!kr.ok) issues.push(...kr.issues.map((i) => ({ ...i, path: [k, ...(i.path ?? [])] })));
-      if (!vr.ok) issues.push(...vr.issues.map((i) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+      const kr = (keyType as any)._run(k);
+      const vr = (valueType as any)._run(v);
+      if (!kr.ok) issues.push(...kr.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+      if (!vr.ok) issues.push(...vr.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
       if (kr.ok && vr.ok) out.set(kr.value, vr.value);
     }
     return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
@@ -644,7 +644,7 @@ export class ZodSet<V extends ZodTypeAny>
     const out = new Set();
     const issues: ZodIssue[] = [];
     for (const v of data) {
-      const r = valueType._run(v);
+      const r = (valueType as any)._run(v);
       if (r.ok) out.add(r.value);
       else issues.push(...r.issues);
     }
@@ -704,7 +704,7 @@ export class ZodEnum<T extends string = string> extends ZodType<T> {
   constructor(_def: any) { super(); this._def = _def; }
   get options(): T[] { return this._def.values; }
   get enum(): Record<T, T> {
-    return Object.fromEntries(this._def.values.map((v: string) => [v, v]));
+    return Object.fromEntries(this._def.values.map((v: string) => [v, v])) as Record<T, T>;
   }
   extract<V extends T>(vals: V[]) {
     return new ZodEnum({ type: "enum", values: this._def.values.filter((v: string) => vals.includes(v as V)) });

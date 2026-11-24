@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# AsmZod pre-commit: asm rebuild + typecheck + fast suite.
+# Enable with: git config core.hooksPath .githooks
+set -e
+cd "$(git rev-parse --show-toplevel)"
+make -C asm >/dev/null
+npx tsc --noEmit
+bun test 2>&1 | tail -3

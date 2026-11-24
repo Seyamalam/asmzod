@@ -378,7 +378,7 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
     }
 
     case "coerce_str": case "coerce_num": case "coerce_bool": case "coerce_bigint": {
-      const op = { coerce_str: 0x1c, coerce_num: 0x1d, coerce_bool: 0x1e, coerce_bigint: 0x1f }[d.type]!;
+      const op = ({ coerce_str: 0x1c, coerce_num: 0x1d, coerce_bool: 0x1e, coerce_bigint: 0x1f } as Record<string, number>)[d.type]!;
       w.u8(op);
       const f = w.field();
       const at = w.pos;

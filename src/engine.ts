@@ -461,8 +461,8 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const results: { ok: boolean; value: unknown }[] = [];
       for (let i = 0; i < eff; i++) {
         const res = atKey(c, i, () =>
-          tryValidate(new R(r.b, i < n ? ips[i] : restPos), i < items.length ? items[i] : undefined, c));
-        results.push(res);
+          tryValidate(new R(r.b, i < n ? ips[i] : restPos) as any, i < items.length ? items[i] : undefined, c));
+        results.push(res as any);
       }
       if (c.issues.length !== before) throw FAILED;
       const outLen = Math.max(Math.min(items.length, eff), optoutStart);

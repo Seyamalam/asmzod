@@ -119,7 +119,7 @@ C("intersect", () => z.intersection(z.object({ a: z.string() }), z.object({ b: z
   () => Z.intersection(Z.object({ a: Z.string() }), Z.object({ b: Z.number() })),
   [{ a: "x", b: 1 }, { a: "x" }, { a: "x", b: "y" }, "s"]);
 
-C("record", () => z.record(z.number()), () => Z.record(Z.number()),
+C("record", () => z.record(z.number()), () => Z.record(Z.string(), Z.number()),
   [{ a: 1, b: 2 }, { a: "x" }, "s", []]);
 
 C("nested", () => z.object({
@@ -266,7 +266,7 @@ C("arr-of-obj", () => z.array(z.object({ n: z.number() })),
 
 // map / set
 C("map", () => z.map(z.string(), z.number()), () => Z.map(Z.string(), Z.number()),
-  [new Map([["a", 1]]), new Map([["a", 1], ["b", "x"], [5, 9]]), "x",
+  [new Map<string, number>([["a", 1]]), new Map<string | number, string | number>([["a", 1], ["b", "x"], [5, 9]] as any), "x",
    new Map(), new Set(), new Map([[3, "s"]])]);
 C("map-nested", () => z.map(z.string(), z.object({ v: z.number() })),
   () => Z.map(Z.string(), Z.object({ v: Z.number() })),
@@ -278,7 +278,7 @@ C("set-nested", () => z.set(z.object({ v: z.number() })),
   [new Set([{ v: 1 }]), new Set([{ v: "x" }, { v: 2 }])]);
 
 // null-prototype + exotic inputs
-C("record-nullproto", () => z.record(z.number()), () => Z.record(Z.number()),
+C("record-nullproto", () => z.record(z.number()), () => Z.record(Z.string(), Z.number()),
   [Object.create(null), Object.assign(Object.create(null), { a: 1 }), { a: 1 }]);
 C("str-on-nullproto", () => z.string(), () => Z.string(), [Object.create(null)]);
 C("boxed-inputs", () => z.string(), () => Z.string(),
