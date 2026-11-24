@@ -25,7 +25,7 @@ bench:
 ci: build typecheck test test-portable
 	@command -v node >/dev/null 2>&1 && $(MAKE) test-node || echo "ci: node not found, skipping"
 	@command -v deno >/dev/null 2>&1 && $(MAKE) test-deno || echo "ci: deno not found, skipping"
-	@./scripts/workerd.sh || true
+	@./scripts/workerd.sh
 	@echo "ci: ok"
 
 # optional heavier checks

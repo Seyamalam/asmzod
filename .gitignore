@@ -11,3 +11,4 @@ test/drv[0-9]
 *.so
 core
 asm/asmzod.node
+.wrangler/
