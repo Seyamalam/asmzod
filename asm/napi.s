@@ -126,7 +126,7 @@ _aznapi_init:
 // ================= parse(blobTA, value) =================
 // -> value | {ok:false,err} | undefined(fallback)
 _aznapi_parse:
-    stp x29, x30, [sp, #-160]!
+    stp x29, x30, [sp, #-256]!
     mov x29, sp
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
@@ -201,7 +201,7 @@ _aznapi_parse:
     ldr x0, [sp, #144]
     b .Lnparse_ret
 .Lnparse_fail:
-    // {ok:false, err:ArrayBuffer(issues)}
+    // {ok:false, issues:[...]} — build natively when all fields convert
     mov x0, x26
     add x1, sp, #144
     bl _napi_create_object
@@ -214,6 +214,47 @@ _aznapi_parse:
     ldr x3, [sp, #152]
     mov x0, x26
     bl _napi_set_named_property
+    ldr x9, [x22]              // issue count
+    str x9, [sp, #160]
+    add x9, x22, #3104
+    str x9, [sp, #168]         // arena cursor
+    mov x0, x26
+    add x1, sp, #136          // &arr
+    bl _napi_create_array
+    str xzr, [sp, #176]        // i
+.Lnpf_loop:
+    ldr x9, [sp, #176]
+    ldr x10, [sp, #160]
+    cmp x9, x10
+    b.hs .Lnpf_done
+    ldr x0, [sp, #168]
+    add x1, sp, #184          // &issue napi_value
+    bl _azn_blob_to_napi
+    cbnz x0, .Lnparse_failbuf  // unsupported tag -> buffer fallback
+    mov x0, x26
+    ldr x1, [sp, #136]
+    ldr w2, [sp, #176]         // u32 index
+    ldr x3, [sp, #184]
+    bl _napi_set_element
+    ldr x0, [sp, #168]
+    bl _az_vsize
+    ldr x9, [sp, #168]
+    add x9, x9, x0
+    str x9, [sp, #168]
+    ldr x9, [sp, #176]
+    add x9, x9, #1
+    str x9, [sp, #176]
+    b .Lnpf_loop
+.Lnpf_done:
+    ldr x1, [sp, #144]
+    AZ_ADR x2, .Lnm_issues
+    ldr x3, [sp, #136]
+    mov x0, x26
+    bl _napi_set_named_property
+    ldr x0, [sp, #144]
+    b .Lnparse_ret
+.Lnparse_failbuf:
+    // {ok:false, err:ArrayBuffer(issues)}
     // copy whole err region [x22, x21) into a new ArrayBuffer —
     // same layout the JS decoder expects (cnt@0, issues at +3104)
     sub x12, x21, x22         // bytes
@@ -264,11 +305,12 @@ _aznapi_parse:
     ldp x23, x24, [sp, #48]
     ldp x25, x26, [sp, #64]
     ldp x27, x28, [sp, #80]
-    ldp x29, x30, [sp], #160
+    ldp x29, x30, [sp], #256
     ret
 .Lnm_ok:    .ascii "ok\0"
 .Lnm_value: .ascii "value\0"
 .Lnm_err:   .ascii "err\0"
+.Lnm_issues: .ascii "issues\0"
 .Lnm_code:  .ascii "code\0"
     .p2align 2
 

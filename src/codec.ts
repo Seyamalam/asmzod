@@ -92,7 +92,13 @@ export function rd64u(p: number): bigint {
 // rather than a pointer into pooled memory.
 export function decodeValueAt(buf: Uint8Array, off: number, hosts: HostTable): [unknown, number] {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const u64 = (o: number) => dv.getBigUint64(o, true);
+  return decAt(buf, dv, off, hosts);
+}
+
+// dv is threaded through — a fresh DataView per recursion level was the cost
+function decAt(buf: Uint8Array, dv: DataView, off: number, hosts: HostTable): [unknown, number] {
+  // u64 reads via two u32s — getBigUint64 allocates a BigInt per call
+  const u64 = (o: number) => dv.getUint32(o, true) + dv.getUint32(o + 4, true) * 4294967296;
   const tag = buf[off];
   switch (tag) {
     case 0: return [undefined, off + 1];
@@ -100,35 +106,35 @@ export function decodeValueAt(buf: Uint8Array, off: number, hosts: HostTable): [
     case 2: return [buf[off + 1] !== 0, off + 2];
     case 3: return [dv.getFloat64(off + 1, true), off + 9];
     case 4: {
-      const n = Number(u64(off + 1));
+      const n = u64(off + 1);
       return [dec.decode(buf.subarray(off + 9, off + 9 + n)), off + 9 + n];
     }
     case 5: return [dv.getBigInt64(off + 1, true), off + 9];
     case 6: {
-      const nf = Number(u64(off + 1));
+      const nf = u64(off + 1);
       let cur = off + 9;
       const obj: Record<string, unknown> = {};
       for (let i = 0; i < nf; i++) {
-        const kl = Number(u64(cur));
+        const kl = u64(cur);
         const k = dec.decode(buf.subarray(cur + 8, cur + 8 + kl));
-        const [v, np] = decodeValueAt(buf, cur + 8 + kl, hosts);
+        const [v, np] = decAt(buf, dv, cur + 8 + kl, hosts);
         obj[k] = v;
         cur = np;
       }
       return [obj, cur];
     }
     case 7: {
-      const n = Number(u64(off + 1));
+      const n = u64(off + 1);
       let cur = off + 9;
       const arr: unknown[] = [];
       for (let i = 0; i < n; i++) {
-        const [v, np] = decodeValueAt(buf, cur, hosts);
+        const [v, np] = decAt(buf, dv, cur, hosts);
         arr.push(v);
         cur = np;
       }
       return [arr, cur];
     }
-    case 8: return [hosts[Number(u64(off + 1))], off + 9];
+    case 8: return [hosts[u64(off + 1)], off + 9];
     default: throw new Error(`asmzod: corrupt value tag ${tag} at buf+${off}`);
   }
 }

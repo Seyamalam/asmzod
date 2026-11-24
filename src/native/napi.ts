@@ -55,6 +55,9 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
   const r = a.parse(blob, value);
   if (r == null || r.ok === null) return null;
   if (r.ok === true) return { ok: true, value: r.value };
+  // fast path: addon built the issue array natively
+  if (r.issues !== undefined)
+    return { ok: false, issues: finishIssues((r.issues as any[]).map(normalizeIssue)) };
   // decode issues from the err ArrayBuffer: cnt@0, issues at +3104
   const buf = new Uint8Array(r.err);
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
