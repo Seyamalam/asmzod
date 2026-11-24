@@ -143,6 +143,11 @@ export function parseMany(blob: Uint8Array, values: unknown[], hosts: HostTable,
     const r = out[i] as any;
     if (r?.[RES] === true) {
       if (r.ok === null && r.code === -11) throw r.exc;
+      // the addon built the issue array natively — no re-parse needed
+      if (r.issues !== undefined) {
+        res.push({ ok: false, issues: finishIssues((r.issues as any[]).map(normalizeIssue)) });
+        continue;
+      }
       const again = parse(blob, values[i], hosts, false);
       if (again === null) return null;
       res.push(again);

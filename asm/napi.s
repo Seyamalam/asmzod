@@ -478,7 +478,7 @@ _aznapi_initcb:
     .globl _aznapi_parsemany
     AZ_HIDDEN _aznapi_parsemany
 _aznapi_parsemany:
-    stp x29, x30, [sp, #-192]!
+    stp x29, x30, [sp, #-256]!
     mov x29, sp
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
@@ -563,6 +563,9 @@ _aznapi_parsemany:
     b .Lpm_next
 .Lpm_mark:
     str x0, [sp, #168]        // run code
+    cmp x0, #-2
+    b.eq .Lpm_failissues
+.Lpm_markmin:
     mov x0, x26
     add x1, sp, #176
     bl AZ_NAPI(napi_create_object)
@@ -598,6 +601,66 @@ _aznapi_parsemany:
     ldr w2, [sp, #140]
     ldr x3, [sp, #176]
     bl AZ_NAPI(napi_set_element)
+    b .Lpm_next
+.Lpm_failissues:
+    // real validation failure: {~azres, ok:false, issues:[...]} — mirror
+    // .Lnparse_fail so TS never re-parses this element
+    mov x0, x26
+    add x1, sp, #176
+    bl AZ_NAPI(napi_create_object)
+    mov x0, x26
+    mov x1, #0
+    add x2, sp, #192
+    bl AZ_NAPI(napi_get_boolean)
+    ldr x1, [sp, #176]
+    AZ_ADR x2, .Lnm_ok
+    ldr x3, [sp, #192]
+    mov x0, x26
+    bl AZ_NAPI(napi_set_named_property)
+    ldr x0, [sp, #176]
+    bl _azn_mark_res
+    ldr x9, [x22]              // issue count
+    str x9, [sp, #200]
+    add x9, x22, #3104
+    str x9, [sp, #208]         // arena cursor
+    mov x0, x26
+    add x1, sp, #216           // &issues array
+    bl AZ_NAPI(napi_create_array)
+    str xzr, [sp, #224]        // i
+.Lpmf_loop:
+    ldr x9, [sp, #224]
+    ldr x10, [sp, #200]
+    cmp x9, x10
+    b.hs .Lpmf_done
+    ldr x0, [sp, #208]
+    add x1, sp, #232
+    bl _azn_blob_to_napi
+    cbnz x0, .Lpm_markmin      // unconvertible field -> minimal marker, TS re-parses
+    mov x0, x26
+    ldr x1, [sp, #216]
+    ldr w2, [sp, #224]
+    ldr x3, [sp, #232]
+    bl AZ_NAPI(napi_set_element)
+    ldr x0, [sp, #208]
+    bl _az_vsize
+    ldr x9, [sp, #208]
+    add x9, x9, x0
+    str x9, [sp, #208]
+    ldr x9, [sp, #224]
+    add x9, x9, #1
+    str x9, [sp, #224]
+    b .Lpmf_loop
+.Lpmf_done:
+    ldr x1, [sp, #176]
+    AZ_ADR x2, .Lnm_issues
+    ldr x3, [sp, #216]
+    mov x0, x26
+    bl AZ_NAPI(napi_set_named_property)
+    mov x0, x26
+    ldr x1, [sp, #144]
+    ldr w2, [sp, #140]
+    ldr x3, [sp, #176]
+    bl AZ_NAPI(napi_set_element)
 .Lpm_next:
     ldr w9, [sp, #140]
     add w9, w9, #1
@@ -617,7 +680,7 @@ _aznapi_parsemany:
     ldp x23, x24, [sp, #48]
     ldp x25, x26, [sp, #64]
     ldp x27, x28, [sp, #80]
-    ldp x29, x30, [sp], #192
+    ldp x29, x30, [sp], #256
     ret
 
 _aznapi_parse:
@@ -1429,8 +1492,9 @@ _azn_issue_type:
 // _azn_blob_to_napi(x0=taggedptr, x1=outslotptr) -> x0=0 | -10 unsupported tag
 // tags: 0 undef,1 null,2 bool,3 f64,4 str,5 i64,6 obj,7 arr,8 hostref(-10)
 _azn_blob_to_napi:
-    stp x29, x30, [sp, #-160]!
+    stp x29, x30, [sp, #-96]!
     mov x29, sp
+    sub sp, sp, #1440
     stp x0, x1, [sp, #16]       // ptr, outslot
     ldrb w9, [x0]
     cmp w9, #0
@@ -1495,9 +1559,93 @@ _azn_blob_to_napi:
     b .Lb2n_ok
 .Lb2n_obj:
     // tag6: u64 nfields | [u64 klen, key, value]*
+    // fast path: build napi_property_descriptors on the stack and define
+    // all fields with ONE napi_define_properties call. utf8name needs a
+    // NUL-terminated C string — copy keys into the names area.
+    // desc[i] = 64B at sp+96+i*64: {utf8name,0,0,0,0,value,attrs(0),data(0)}
+    // names  = 48B per field at sp+864+i*48 (max 40-byte key + NUL)
     mov x0, x26
     add x1, sp, #32
     bl AZ_NAPI(napi_create_object)
+    ldr x9, [sp, #16]
+    ldr x10, [x9, #1]           // n
+    cmp x10, #12
+    b.hi .Lb2n_obj_slow
+    str x10, [sp, #40]
+    add x9, x9, #9
+    str x9, [sp, #48]           // cursor
+    str xzr, [sp, #56]          // i
+.Lb2n_dloop:
+    ldr x13, [sp, #56]
+    ldr x10, [sp, #40]
+    cmp x13, x10
+    b.hs .Lb2n_ddone
+    ldr x9, [sp, #48]
+    ldr x11, [x9]               // klen
+    cmp x11, #40
+    b.hi .Lb2n_obj_slow
+    add x12, x9, #8             // kptr
+    add x9, x12, x11            // value ptr
+    str x9, [sp, #64]           // save value ptr
+    // nameslot = sp + 864 + i*48
+    add x14, x13, x13, lsl #1   // 3i
+    lsl x14, x14, #4            // 48i
+    add x14, sp, x14
+    add x14, x14, #864
+    // copy key + NUL
+    mov x0, x14
+    mov x1, x12
+    mov x2, x11
+    mov x15, x14
+    str x15, [sp, #72]          // nameslot
+    bl _az_memcpy
+    ldr x15, [sp, #72]
+    ldr x9, [sp, #48]
+    ldr x11, [x9]
+    strb wzr, [x15, x11]        // NUL
+    // desc = sp + 96 + i*64
+    ldr x13, [sp, #56]
+    lsl x14, x13, #6
+    add x14, x14, #96
+    add x14, sp, x14
+    str x15, [x14]              // utf8name
+    stp xzr, xzr, [x14, #8]     // name, method
+    stp xzr, xzr, [x14, #24]    // getter, setter
+    stp xzr, xzr, [x14, #40]    // value, attributes slot
+    stp xzr, xzr, [x14, #48]    // attributes(int@+48), data
+    mov w9, #7                  // writable|enumerable|configurable
+    str w9, [x14, #48]
+    str x14, [sp, #80]          // desc slot
+    // recurse value
+    ldr x0, [sp, #64]
+    add x1, sp, #88
+    bl _azn_blob_to_napi
+    cbnz x0, .Lb2n_out
+    ldr x14, [sp, #80]
+    ldr x9, [sp, #88]
+    str x9, [x14, #40]          // desc.value
+    // advance cursor past value
+    ldr x0, [sp, #64]
+    bl _az_vsize
+    ldr x9, [sp, #64]
+    add x9, x9, x0
+    str x9, [sp, #48]
+    ldr x13, [sp, #56]
+    add x13, x13, #1
+    str x13, [sp, #56]
+    b .Lb2n_dloop
+.Lb2n_ddone:
+    mov x0, x26
+    ldr x1, [sp, #32]           // obj
+    ldr x2, [sp, #40]           // count
+    add x3, sp, #96             // descriptors
+    bl AZ_NAPI(napi_define_properties)
+    ldr x9, [sp, #32]
+    ldr x10, [sp, #24]
+    str x9, [x10]
+    b .Lb2n_ok
+.Lb2n_obj_slow:
+    // >12 fields or a >40B key: classic per-field set_property path
     ldr x9, [sp, #16]
     ldr x10, [x9, #1]           // n
     str x10, [sp, #40]
@@ -1585,7 +1733,8 @@ _azn_blob_to_napi:
 .Lb2n_ok:
     mov x0, #0
 .Lb2n_out:
-    ldp x29, x30, [sp], #160
+    add sp, sp, #1440
+    ldp x29, x30, [sp], #96
     ret
 
 // _az_issue_size_n(x0=dir(0min/1max),x1=bound,x2=len,x3=exact,x4=originptr,x5=originlen) -> 0/-4
