@@ -1893,36 +1893,8 @@ _azn_encval:
     bl _napi_is_array
     ldrb w9, [sp, #LN_A]
     cbnz w9, .Ln_obj_fail
-    // proto == Object.prototype | null else -11
-    b .Ln_obj_mode            // BISECT: skip proto check
-    mov x0, x26
-    mov x1, x28
-    add x2, sp, #LN_A
-    bl _napi_get_prototype
-    ldr x10, [sp, #LN_A]
-    cbz x10, .Ln_obj_mode
-    mov x0, x26
-    add x1, sp, #LN_B
-    bl _napi_get_global
-    ldr x1, [sp, #LN_B]
-    mov x0, x26
-    AZ_ADR x2, .Ls_Objstr
-    add x3, sp, #LN_B
-    bl _napi_get_named_property
-    cbnz x0, .Ln_obj_exotic
-    ldr x1, [sp, #LN_B]
-    mov x0, x26
-    AZ_ADR x2, .Ls_protoname
-    add x3, sp, #LN_B
-    bl _napi_get_named_property
-    cbnz x0, .Ln_obj_exotic
-    ldr x1, [sp, #LN_A]       // proto
-    ldr x2, [sp, #LN_B]       // Object.prototype
-    mov x0, x26
-    add x3, sp, #LN_C
-    bl _napi_strict_equals
-    ldrb w9, [sp, #LN_C]
-    cbz w9, .Ln_obj_exotic
+    // zod validates ANY object type — exotic protos just miss schema keys
+    b .Ln_obj_mode
 .Ln_obj_mode:
     mov x0, x26
     add x1, sp, #LN_A
@@ -1945,18 +1917,34 @@ _azn_encval:
     str x14, [sp, #LN_F]      // kptr
     add x15, x14, x13
     str x15, [sp, #LN_C]      // field addr (right after key bytes)
-    // key as napi_value (avoids scratch-race with inner runs)
-    mov x0, x26
-    ldr x1, [sp, #LN_F]
+    // copy key bytes + NUL into the path ring (indexed by path depth — safe
+    // across inner runs) so get/set_named_property can use a C-string
+    ldr x9, [x22, #8]         // path depth
+    mov x10, #4096
+    mul x10, x9, x10
+    AZ_ADR x11, _azn_scratch
+    add x11, x11, #0x380000
+    add x11, x11, x10         // ring slot
     ldr x2, [sp, #LN_E]
-    add x3, sp, #LN_J
-    bl _napi_create_string_utf8
+    mov x12, #4095
+    cmp x2, x12
+    b.ls .Ln_obj_kok
+    mov x2, x12
+.Ln_obj_kok:
+    mov x0, x11
+    ldr x1, [sp, #LN_F]
+    str x11, [sp, #LN_J]      // NUL-terminated key name
+    str x2, [sp, #LN_E]       // clamped klen
+    bl _az_memcpy
+    ldr x11, [sp, #LN_J]
+    ldr x12, [sp, #LN_E]
+    strb wzr, [x11, x12]      // NUL-terminate for named-property APIs
     mov x0, x26
     mov x1, x28
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
-    bl _napi_get_property
-    // path push
+    bl _napi_get_named_property
+    // path push (blob ptr — stable)
     ldr x0, [sp, #LN_F]
     ldr x1, [sp, #LN_E]
     bl _az_path_push_key
@@ -1977,12 +1965,12 @@ _azn_encval:
     b .Ln_obj_adv
 .Ln_obj_st:
     cbnz x0, .Ln_ret
-    // set_property(outobj, key, outval)
+    // set_named_property(outobj, key, outval)
     mov x0, x26
     ldr x1, [sp, #LN_A]
     ldr x2, [sp, #LN_J]
     ldr x3, [sp, #LN_G]
-    bl _napi_set_property
+    bl _napi_set_named_property
 .Ln_obj_adv:
     // advance: record = klen(8) + key + field(8)
     ldr x10, [sp, #LN_B]
