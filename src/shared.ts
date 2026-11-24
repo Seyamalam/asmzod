@@ -179,8 +179,9 @@ let globalErrorMap: ErrorMap | undefined;
 // issues whose message came from defaultMessage (not schema/engine custom)
 // — WeakSet so the marker can't leak into user-visible keys
 export const defaultedIssues = new WeakSet<object>();
-export function setErrorMap(fn?: ErrorMap) { globalErrorMap = fn; }
-export function getErrorMap() { return globalErrorMap; }
+// zod's compat setErrorMap/getErrorMap are config({customError}) round-trips
+export function setErrorMap(fn?: ErrorMap) { globalErrorMap = fn; globalConfig.customError = fn; }
+export function getErrorMap() { return globalConfig.customError ?? globalErrorMap; }
 export function configure(opts: any) {
   if (opts && typeof opts === "object" && "customError" in opts) globalErrorMap = opts.customError;
 }
@@ -659,6 +660,155 @@ export function frLocaleError(): (issue: any) => string {
         return `Valeur invalide dans ${issue.origin}`;
       default:
         return "Entrée invalide";
+    }
+  };
+}
+
+export function roLocaleError(): (issue: any) => string {
+  const Sizable: Record<string, { unit: string; verb: string }> = {
+    string: { unit: "caractere", verb: "să aibă" },
+    file: { unit: "octeți", verb: "să aibă" },
+    array: { unit: "elemente", verb: "să aibă" },
+    set: { unit: "elemente", verb: "să aibă" },
+    map: { unit: "intrări", verb: "să aibă" },
+  };
+  const FormatDictionary: Record<string, string> = {
+    regex: "intrare", email: "adresă de email", url: "URL", emoji: "emoji",
+    uuid: "UUID", uuidv4: "UUIDv4", uuidv6: "UUIDv6", nanoid: "nanoid",
+    guid: "GUID", cuid: "cuid", cuid2: "cuid2", ulid: "ULID", xid: "XID",
+    ksuid: "KSUID", datetime: "dată și oră ISO", date: "dată ISO",
+    time: "oră ISO", duration: "durată ISO", ipv4: "adresă IPv4",
+    ipv6: "adresă IPv6", mac: "adresă MAC", cidrv4: "interval IPv4",
+    cidrv6: "interval IPv6", base64: "șir codat base64",
+    base64url: "șir codat base64url", json_string: "șir JSON",
+    e164: "număr E.164", credit_card: "număr de card de credit",
+    currency_code: "cod valutar", iban: "IBAN", jwt: "JWT",
+    template_literal: "intrare",
+  };
+  const TypeDictionary: Record<string, string> = {
+    nan: "NaN", string: "șir", number: "număr", boolean: "boolean",
+    function: "funcție", array: "matrice", object: "obiect",
+    undefined: "nedefinit", symbol: "simbol", bigint: "număr mare",
+    void: "void", never: "never", map: "hartă", set: "set",
+  };
+  return (issue: any) => {
+    switch (issue.code) {
+      case "invalid_type": {
+        const expected = TypeDictionary[issue.expected] ?? issue.expected;
+        const receivedType = parsedTypeName(issue.input);
+        const received = TypeDictionary[receivedType] ?? receivedType;
+        return `Intrare invalidă: așteptat ${expected}, primit ${received}`;
+      }
+      case "invalid_value":
+        if (issue.values.length === 1) return `Intrare invalidă: așteptat ${_stringifyPrimitive(issue.values[0])}`;
+        return `Opțiune invalidă: așteptat una dintre ${_joinValues(issue.values, "|")}`;
+      case "too_big": {
+        const adj = issue.inclusive ? "<=" : "<";
+        const sizing = Sizable[issue.origin] ?? null;
+        if (sizing)
+          return `Prea mare: așteptat ca ${issue.origin ?? "valoarea"} ${sizing.verb} ${adj}${issue.maximum.toString()} ${sizing.unit ?? "elemente"}`;
+        return `Prea mare: așteptat ca ${issue.origin ?? "valoarea"} să fie ${adj}${issue.maximum.toString()}`;
+      }
+      case "too_small": {
+        const adj = issue.inclusive ? ">=" : ">";
+        const sizing = Sizable[issue.origin] ?? null;
+        if (sizing)
+          return `Prea mic: așteptat ca ${issue.origin} ${sizing.verb} ${adj}${issue.minimum.toString()} ${sizing.unit}`;
+        return `Prea mic: așteptat ca ${issue.origin} să fie ${adj}${issue.minimum.toString()}`;
+      }
+      case "invalid_format": {
+        if (issue.format === "starts_with") return `Șir invalid: trebuie să înceapă cu "${issue.prefix}"`;
+        if (issue.format === "ends_with") return `Șir invalid: trebuie să se termine cu "${issue.suffix}"`;
+        if (issue.format === "includes") return `Șir invalid: trebuie să includă "${issue.includes}"`;
+        if (issue.format === "regex") return `Șir invalid: trebuie să se potrivească cu modelul ${issue.pattern}`;
+        return `Format invalid: ${FormatDictionary[issue.format] ?? issue.format}`;
+      }
+      case "not_multiple_of":
+        return `Număr invalid: trebuie să fie multiplu de ${issue.divisor}`;
+      case "unrecognized_keys":
+        return `Chei nerecunoscute: ${_joinValues(issue.keys, ", ")}`;
+      case "invalid_key":
+        return `Cheie invalidă în ${issue.origin}`;
+      case "invalid_union":
+        return "Intrare invalidă";
+      case "invalid_element":
+        return `Valoare invalidă în ${issue.origin}`;
+      default:
+        return "Intrare invalidă";
+    }
+  };
+}
+
+export function kaLocaleError(): (issue: any) => string {
+  const Sizable: Record<string, { unit: string; verb: string }> = {
+    string: { unit: "სიმბოლო", verb: "უნდა შეიცავდეს" },
+    file: { unit: "ბაიტი", verb: "უნდა შეიცავდეს" },
+    array: { unit: "ელემენტი", verb: "უნდა შეიცავდეს" },
+    set: { unit: "ელემენტი", verb: "უნდა შეიცავდეს" },
+    map: { unit: "ელემენტი", verb: "უნდა შეიცავდეს" },
+  };
+  const FormatDictionary: Record<string, string> = {
+    regex: "შეყვანა", email: "ელ-ფოსტის მისამართი", url: "URL", emoji: "ემოჯი",
+    uuid: "UUID", uuidv4: "UUIDv4", uuidv6: "UUIDv6", nanoid: "nanoid",
+    guid: "GUID", cuid: "cuid", cuid2: "cuid2", ulid: "ULID", xid: "XID",
+    ksuid: "KSUID", datetime: "თარიღი-დრო", date: "თარიღი", time: "დრო",
+    duration: "ხანგრძლივობა", ipv4: "IPv4 მისამართი", ipv6: "IPv6 მისამართი",
+    mac: "MAC მისამართი", cidrv4: "IPv4 დიაპაზონი", cidrv6: "IPv6 დიაპაზონი",
+    base64: "base64-კოდირებული ველი", base64url: "base64url-კოდირებული ველი",
+    json_string: "JSON ველი", e164: "E.164 ნომერი",
+    credit_card: "საკრედიტო ბარათის ნომერი", currency_code: "ვალუტის კოდი",
+    iban: "IBAN", jwt: "JWT", template_literal: "შეყვანა",
+  };
+  const TypeDictionary: Record<string, string> = {
+    nan: "NaN", number: "რიცხვი", string: "ველი", boolean: "ბულეანი",
+    function: "ფუნქცია", array: "მასივი",
+  };
+  return (issue: any) => {
+    switch (issue.code) {
+      case "invalid_type": {
+        const expected = TypeDictionary[issue.expected] ?? issue.expected;
+        const receivedType = parsedTypeName(issue.input);
+        const received = TypeDictionary[receivedType] ?? receivedType;
+        if (/^[A-Z]/.test(issue.expected))
+          return `არასწორი შეყვანა: მოსალოდნელი instanceof ${issue.expected}, მიღებული ${received}`;
+        return `არასწორი შეყვანა: მოსალოდნელი ${expected}, მიღებული ${received}`;
+      }
+      case "invalid_value":
+        if (issue.values.length === 1) return `არასწორი შეყვანა: მოსალოდნელი ${_stringifyPrimitive(issue.values[0])}`;
+        return `არასწორი ვარიანტი: მოსალოდნელია ერთ-ერთი ${_joinValues(issue.values, "|")}-დან`;
+      case "too_big": {
+        const adj = issue.inclusive ? "<=" : "<";
+        const sizing = Sizable[issue.origin] ?? null;
+        if (sizing)
+          return `ზედმეტად დიდი: მოსალოდნელი ${issue.origin ?? "მნიშვნელობა"} ${sizing.verb} ${adj}${issue.maximum.toString()} ${sizing.unit}`;
+        return `ზედმეტად დიდი: მოსალოდნელი ${issue.origin ?? "მნიშვნელობა"} იყოს ${adj}${issue.maximum.toString()}`;
+      }
+      case "too_small": {
+        const adj = issue.inclusive ? ">=" : ">";
+        const sizing = Sizable[issue.origin] ?? null;
+        if (sizing)
+          return `ზედმეტად პატარა: მოსალოდნელი ${issue.origin} ${sizing.verb} ${adj}${issue.minimum.toString()} ${sizing.unit}`;
+        return `ზედმეტად პატარა: მოსალოდნელი ${issue.origin} იყოს ${adj}${issue.minimum.toString()}`;
+      }
+      case "invalid_format": {
+        if (issue.format === "starts_with") return `არასწორი ველი: უნდა იწყებოდეს "${issue.prefix}"-ით`;
+        if (issue.format === "ends_with") return `არასწორი ველი: უნდა მთავრდებოდეს "${issue.suffix}"-ით`;
+        if (issue.format === "includes") return `არასწორი ველი: უნდა შეიცავდეს "${issue.includes}"-ს`;
+        if (issue.format === "regex") return `არასწორი ველი: უნდა შეესაბამებოდეს შაბლონს ${issue.pattern}`;
+        return `არასწორი ${FormatDictionary[issue.format] ?? issue.format}`;
+      }
+      case "not_multiple_of":
+        return `არასწორი რიცხვი: უნდა იყოს ${issue.divisor}-ის ჯერადი`;
+      case "unrecognized_keys":
+        return `უცნობი გასაღებ${issue.keys.length > 1 ? "ები" : "ი"}: ${_joinValues(issue.keys, ", ")}`;
+      case "invalid_key":
+        return `არასწორი გასაღები ${issue.origin}-ში`;
+      case "invalid_union":
+        return "არასწორი შეყვანა";
+      case "invalid_element":
+        return `არასწორი მნიშვნელობა ${issue.origin}-ში`;
+      default:
+        return "არასწორი შეყვანა";
     }
   };
 }

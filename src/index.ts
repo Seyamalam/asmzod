@@ -16,7 +16,7 @@ import {
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
-import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory, failure as _failure, captureStackTrace, NEVER, ZodRegistry, globalRegistry, defaultMessage, frLocaleError } from "./shared.ts";
+import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory, failure as _failure, captureStackTrace, NEVER, ZodRegistry, globalRegistry, defaultMessage, frLocaleError, roLocaleError, kaLocaleError } from "./shared.ts";
 
 export * from "./schema.ts";
 export * from "./error.ts";
@@ -82,9 +82,12 @@ function _definite(s: any, stack = new Set<any>()): boolean {
   if (Array.isArray(d.checks))
     for (const c of d.checks)
       if (c && (c.kind === "checkfn" || c.kind === "tx" || c.kind === "schemacheck" || c.kind === "refine" ||
-              typeof c.fn === "function" || typeof c.when === "function" || c.check === "properties" || c.check === "property")) return false;
+              (typeof c.fn === "function" && !c.builtin) || typeof c.when === "function" || c.check === "properties" || c.check === "property")) return false;
   const rec = (x: any) => x && typeof x === "object" && x._def && !_definite(x, stack);
   for (const k in d) {
+    // error maps and params shape messages, not validation — a fn there
+    // can't throw during a parse
+    if (k === "error" || k === "message" || k === "params") continue;
     const desc = Object.getOwnPropertyDescriptor(d, k);
     if (!desc) continue;
     let v: any;
@@ -519,6 +522,8 @@ export const z = {
   locales: {
     en: () => ({ localeError: defaultMessage }),
     fr: () => ({ localeError: frLocaleError() }),
+    ro: () => ({ localeError: roLocaleError() }),
+    ka: () => ({ localeError: kaLocaleError() }),
   },
 
   // ---------- numeric factories ----------
@@ -736,6 +741,7 @@ const HASH_LENS = {
 (z as any).ZodError = ZodError;
 (z as any).ZodRealError = ZodRealError;
 import { toJSONSchema, JSONSchemaGenerator } from "./jsonschema.ts";
+import * as _regexes from "./regexes.ts";
 (z as any).toJSONSchema = toJSONSchema;
 (ZodType.prototype as any).toJSONSchema = function (this: any, params?: any) {
   return toJSONSchema(this, params);
@@ -747,6 +753,8 @@ export const TimePrecision = { Any: null, Minute: -1, Second: 0, Millisecond: 3,
 export const locales = {
   en: () => ({ localeError: defaultMessage }),
   fr: () => ({ localeError: frLocaleError() }),
+  ro: () => ({ localeError: roLocaleError() }),
+  ka: () => ({ localeError: kaLocaleError() }),
 };
 const _config = _sharedConfig;
 
@@ -820,6 +828,7 @@ export const core = {
   _decode: _parse, _decodeAsync: _parseAsync,
   _safeDecode: _safeParse, _safeDecodeAsync: _safeParseAsync,
   flattenError: _flattenError, formatError: _formatError,
+  regexes: _regexes,
   treeifyError: _treeifyError, prettifyError: _prettifyError,
   toDotPath: _toDotPath,
   isRecursiveSchema: (s: any) => isRecursiveSchema(s),

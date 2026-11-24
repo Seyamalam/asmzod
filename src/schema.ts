@@ -1742,7 +1742,7 @@ export class ZodString extends ZodType<string> {
   constructor(_def: any = { type: "string", checks: [] }) { super(); this._def = _def; }
   private _check(c: any) {
     const mk: any = FMT_FNS[c.kind];
-    const rec = mk ? { ...c, fn: mk(c) } : c;
+    const rec = mk ? { ...c, fn: mk(c), builtin: true } : c;
     // mk may annotate the record (fmt/pat for JSON Schema + issues)
     if (mk) Object.assign(rec, c);
     return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, { ...rec, message: paramMsg(rec.message) }] });
@@ -3839,13 +3839,13 @@ export class ZodFile extends ZodType<File, File> {
     const issues: ZodIssue[] = [];
     for (const c of this._def.checks ?? []) {
       if (c.kind === "min" && data.size < c.value)
-        issues.push({ code: "too_small", origin: "file", minimum: c.value, inclusive: true, path: [], message: c.message ?? `Too small: expected file to have >=${c.value} bytes` } as any);
+        issues.push({ origin: "file", code: "too_small", minimum: c.value, inclusive: true, path: [], message: c.message ?? `Too small: expected file to have >=${c.value} bytes` } as any);
       else if (c.kind === "max" && data.size > c.value)
-        issues.push({ code: "too_big", origin: "file", maximum: c.value, inclusive: true, path: [], message: c.message ?? `Too big: expected file to have <=${c.value} bytes` } as any);
+        issues.push({ origin: "file", code: "too_big", maximum: c.value, inclusive: true, path: [], message: c.message ?? `Too big: expected file to have <=${c.value} bytes` } as any);
       else if (c.kind === "size" && data.size !== c.value)
         issues.push({ code: "invalid_value", values: [c.value], path: [], message: c.message ?? `Invalid input: expected ${c.value}` } as any);
       else if (c.kind === "mime" && !c.value.some((m: string) => data.type === m || data.type.startsWith(m.split("*")[0])))
-        issues.push({ code: "invalid_value", values: c.value, path: [], message: c.message ?? `Invalid input: expected ${c.value.map((m: string) => `"${m}"`).join(" | ")}` } as any);
+        issues.push({ code: "invalid_value", values: c.value, path: [], ...(c.message !== undefined ? { message: c.message } : {}) } as any);
     }
     return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: data };
   }
