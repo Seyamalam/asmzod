@@ -65,14 +65,19 @@ const _azShallowClone = (o: any): any =>
   _azIsPlainObject(o) ? { ...o } : Array.isArray(o) ? [...o]
   : o instanceof Map ? new Map(o) : o instanceof Set ? new Set(o) : o;
 
+// zod's numeric format factories (z.int32() etc.) stamp def.format so
+// isInt/minValue/toJSONSchema can read the declared width
+const _fmtNum = (s: any, format: string) => { s._def.format = format; return s; };
+
 const mk = (Cls: any, type: string, params: any, checks: any[] = []): any => {
   const pc = params && typeof params === "object" && !Array.isArray(params) ? params.checks : undefined;
   const all = [...checks, ...(Array.isArray(pc) ? pc : [])];
-  const fns = all.filter((c: any) => typeof c === "function" || c?.kind === "checkfn")
-    .map((c: any) => (typeof c === "function" ? c : c.fn));
+  const isCb = (c: any) => typeof c === "function" || c?.kind === "checkfn" || c instanceof ZodType || c?._zod;
+  const fns = all.filter(isCb)
+    .map((c: any) => (typeof c === "function" || c instanceof ZodType || c?._zod ? c : c.fn));
   let s: any = new Cls({
     type,
-    checks: all.filter((c: any) => typeof c !== "function" && c?.kind !== "checkfn"),
+    checks: all.filter((c: any) => !isCb(c)),
     error: typeof params === "string" || typeof params === "function" ? params
       : params && typeof params === "object" ? params.error ?? params.message : undefined,
   });
@@ -333,10 +338,6 @@ export const z = {
     if (!t) throw new Error(`Unrecognized hash format: ${fmt}`);
     return (new ZodString() as any)._check({ kind: "hash", body: t[0], alpha: t[1], pad: t[2], format: fmt, message: params });
   },
-  /** Bigint constrained to [0, 2^64-1]. */
-  uint64: (params?: any) =>
-    mk(ZodBigInt, "bigint", params)
-      .min(0n).max(18446744073709551615n),
   e164: (p?: string) => new ZodString().e164(p),
   duration: (p?: string) => new ZodString().duration(p),
   /** Alias of z.string().ipv4(). */
@@ -450,15 +451,17 @@ export const z = {
 
   // ---------- numeric factories ----------
   /** number int bounded to i32 */
-  int32: (params?: any) => mk(ZodNumber, "number", params, [{ kind: "int" }, { kind: "gte", value: -2147483648 }, { kind: "lte", value: 2147483647 }]),
+  int32: (params?: any) => _fmtNum(mk(ZodNumber, "number", params, [{ kind: "int" }, { kind: "gte", value: -2147483648 }, { kind: "lte", value: 2147483647 }]), "int32"),
   /** number int bounded to u32 */
-  uint32: (params?: any) => mk(ZodNumber, "number", params, [{ kind: "int" }, { kind: "gte", value: 0 }, { kind: "lte", value: 4294967295 }]),
+  uint32: (params?: any) => _fmtNum(mk(ZodNumber, "number", params, [{ kind: "int" }, { kind: "gte", value: 0 }, { kind: "lte", value: 4294967295 }]), "uint32"),
   /** number (f64 slot named float64 in zod) */
-  float64: (params?: any) => mk(ZodNumber, "number", params),
+  float64: (params?: any) => _fmtNum(mk(ZodNumber, "number", params), "float64"),
   /** number (f32 semantics deferred — same range as float64 in JS) */
-  float32: (params?: any) => mk(ZodNumber, "number", params),
+  float32: (params?: any) => _fmtNum(mk(ZodNumber, "number", params), "float32"),
   /** bigint bounded to i64 */
-  int64: (params?: any) => mk(ZodBigInt, "bigint", params, [{ kind: "gte", value: BigInt("-9223372036854775808") }, { kind: "lte", value: BigInt("9223372036854775807") }]),
+  int64: (params?: any) => _fmtNum(mk(ZodBigInt, "bigint", params, [{ kind: "gte", value: BigInt("-9223372036854775808") }, { kind: "lte", value: BigInt("9223372036854775807") }]), "int64"),
+  /** bigint bounded to u64 */
+  uint64: (params?: any) => _fmtNum(mk(ZodBigInt, "bigint", params, [{ kind: "gte", value: 0n }, { kind: "lte", value: 18446744073709551615n }]), "uint64"),
 
   // ---------- check factories for .check(...) ----------
   /** number check: value > n */
@@ -472,7 +475,7 @@ export const z = {
   nonnegative: (message?: string) => ({ kind: "gte", value: 0, message }),
   negative: (message?: string) => ({ kind: "lt", value: 0, message }),
   nonpositive: (message?: string) => ({ kind: "lte", value: 0, message }),
-  int: (message?: string) => ({ kind: "int", message }),
+  int: (params?: any) => _fmtNum(mk(ZodNumber, "number", params, [{ kind: "int" }]), "safeint"),
   multipleOf: (v: number | bigint, message?: string) => ({ kind: "multipleOf", value: v, message }),
   minLength: (v: number, message?: string) => ({ kind: "min", value: v, message }),
   maxLength: (v: number, message?: string) => ({ kind: "max", value: v, message }),

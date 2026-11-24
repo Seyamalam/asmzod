@@ -682,6 +682,9 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return r;
   }
   protected _runImpl(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
+    const _checks = (this._def as any).checks as any[] | undefined;
+    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn")))
+      return this._runChecksTS(data, _checks);
     const c = this._compile();
     // direct N-API validation walks the JS value natively (no encode/decode);
     // null -> schema needs the encoded engine path (callbacks, unions, ...)
@@ -760,6 +763,50 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     }
     pendingRefineIssues.length = 0;
     return r;
+  }
+
+  // def.checks containing JS-effect records (overwrite `tx`, `checkfn` payload
+  // fns) can't compile — zod runs checks positionally on the payload, so the
+  // TS path walks them in order: compilable records through a single-check
+  // sibling, tx rewriting the value in place, fns pushing issues
+  private _runChecksTS(data: unknown, checks: any[]): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
+    const Base = this.constructor as any;
+    const base = new Base({ ...this._def, checks: [] });
+    const r = base._run(data);
+    if (!r.ok) return r;
+    let v = r.value;
+    const issues: ZodIssue[] = [];
+    for (let i = 0; i < checks.length; i++) {
+      const c = checks[i];
+      if (typeof c === "function" || c.kind === "checkfn") {
+        const fn = typeof c === "function" ? c : c.fn;
+        const payload = { value: v, issues: [] as any[] };
+        const pr = fn(payload);
+        if (isThenable(pr)) {
+          if (!asyncMode) throw new AsyncCheckError();
+          pendingAsync.push({ type: "checkchain", checks: checks.slice(i + 1), ctor: Base, def: this._def, tx: pr, pre: issues.splice(0), inst: this } as any);
+          return { ok: true as const, value: v };
+        }
+        issues.push(...payload.issues);
+        continue;
+      }
+      if (c.kind === "tx") {
+        const nv = c.tx(v);
+        if (isThenable(nv)) {
+          if (!asyncMode) throw new AsyncCheckError();
+          pendingAsync.push({ type: "checkchain", checks: checks.slice(i + 1), ctor: Base, def: this._def, tx: nv, pre: issues.splice(0), inst: this } as any);
+          return { ok: true as const, value: v };
+        }
+        v = nv;
+        continue;
+      }
+      const rr = new Base({ ...this._def, checks: [c] })._run(v);
+      if (!rr.ok) issues.push(...rr.issues);
+      else v = rr.value;
+    }
+    return issues.length
+      ? { ok: false as const, issues, value: v, aborted: isAborted(issues) } as any
+      : { ok: true as const, value: v };
   }
 
   parse(data: unknown, params?: any): Output {
@@ -1007,6 +1054,25 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           : gval;
         return { value: setPath(root, p, fin), issues: [] };
       }
+      if (st.type === "checkchain") {
+        // a thenable `tx`/payload fn suspended mid-check-chain — resolve it,
+        // then finish the remaining checks positionally
+        let cv = await st.tx;
+        const cIssues: any[] = [...(st.pre ?? [])];
+        for (const c of st.checks ?? []) {
+          if (typeof c === "function" || c?.kind === "checkfn") {
+            const fn = typeof c === "function" ? c : c.fn;
+            const payload = { value: cv, issues: [] as any[] };
+            await fn(payload);
+            cIssues.push(...payload.issues);
+            continue;
+          }
+          if (c?.kind === "tx") { cv = await c.tx(cv); continue; }
+          const rr = new st.ctor({ ...st.def, checks: [c] })._run(cv);
+          if (!rr.ok) cIssues.push(...rr.issues); else cv = rr.value;
+        }
+        return { value: setPath(root, p, cv), issues: cIssues };
+      }
       if (st.type === "transform")
         return { value: setPath(root, p, await st.fn(cur)), issues: [] };
       if (st.type === "superrefine") {
@@ -1205,21 +1271,44 @@ export class ZodNumber extends ZodType<number> {
   nonnegative(message?: string) { return this.gte(0, message); }
   negative(message?: string) { return this.lt(0, message); }
   nonpositive(message?: string) { return this.lte(0, message); }
+  // zod's derived getters fold every bound check (and the format bag) into an
+  // aggregate: minValue = max of lowers, maxValue = min of uppers
+  private _agg() {
+    let minimum: number | undefined, exclusiveMinimum: number | undefined;
+    let maximum: number | undefined, exclusiveMaximum: number | undefined;
+    let isInt = !!(this._def.format as string | undefined)?.includes("int");
+    const divs: number[] = [];
+    for (const c of this._def.checks ?? []) {
+      const k = c.kind, v = c.value;
+      if (k === "gt") exclusiveMinimum = exclusiveMinimum === undefined ? v : Math.max(exclusiveMinimum, v);
+      else if (k === "gte" || k === "min") minimum = minimum === undefined ? v : Math.max(minimum, v);
+      else if (k === "lt") exclusiveMaximum = exclusiveMaximum === undefined ? v : Math.min(exclusiveMaximum, v);
+      else if (k === "lte" || k === "max") maximum = maximum === undefined ? v : Math.min(maximum, v);
+      else if (k === "safeInt") {
+        minimum = minimum === undefined ? Number.MIN_SAFE_INTEGER : Math.max(minimum, Number.MIN_SAFE_INTEGER);
+        maximum = maximum === undefined ? Number.MAX_SAFE_INTEGER : Math.min(maximum, Number.MAX_SAFE_INTEGER);
+        isInt = true;
+      } else if (k === "int") isInt = true;
+      else if (k === "multipleOf") divs.push(v);
+      else if (typeof c.format === "string" && c.format.includes("int")) isInt = true;
+    }
+    return { minimum, exclusiveMinimum, maximum, exclusiveMaximum, isInt, divs };
+  }
   get minValue(): number | null {
-    for (const c of this._def.checks ?? [])
-      if (c.kind === "gte" || c.kind === "gt") return c.value;
-    return null;
+    const { minimum, exclusiveMinimum } = this._agg();
+    return Math.max(minimum ?? Number.NEGATIVE_INFINITY, exclusiveMinimum ?? Number.NEGATIVE_INFINITY);
   }
   get maxValue(): number | null {
-    for (const c of this._def.checks ?? [])
-      if (c.kind === "lte" || c.kind === "lt") return c.value;
-    return null;
+    const { maximum, exclusiveMaximum } = this._agg();
+    return Math.min(maximum ?? Number.POSITIVE_INFINITY, exclusiveMaximum ?? Number.POSITIVE_INFINITY);
   }
   get isInt(): boolean {
-    return (this._def.checks ?? []).some((c: any) => c.kind === "int" || c.kind === "safeInt");
+    const { isInt, divs } = this._agg();
+    return isInt || divs.some(Number.isSafeInteger);
   }
   get isFinite(): boolean { return true; }
   get format(): string | null {
+    if (this._def.format) return this._def.format;
     return this.isInt ? "safeint" : null;
   }
 }

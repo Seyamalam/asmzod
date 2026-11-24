@@ -323,7 +323,7 @@ export function normalizeIssue(i: any): any {
 const NONOPT_ORDER = ["code", "expected", "input", "path", "message"];
 // field order of zod issue objects (their finalizeIssue copies creation order)
 const ISSUE_ORDER: Record<string, string[]> = {
-  invalid_type: ["expected", "format", "code", "input", "path", "message", "received"],
+  invalid_type: ["expected", "format", "code", "received", "input", "path", "message"],
   invalid_value: ["code", "values", "path", "message", "input"],
   invalid_key: ["code", "origin", "issues", "input", "path", "message"],
   unrecognized_keys: ["code", "keys", "path", "message"],

@@ -173,6 +173,7 @@ function toSchema(d: any): JSONSchema {
       return { default: dv, ...js };
     }
     case "catch": case "refine": case "brand": case "readonly":
+    case "coerce_str": case "coerce_num": case "coerce_bool": case "coerce_bigint":
       return toSchema(inner(d)._def);
     case "transform":
       return toSchema(inner(d)._def);

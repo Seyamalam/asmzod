@@ -922,12 +922,20 @@ _az_run_numchecks:
     b .Lnc_next0
 .Lnc_mult:
     ldr d1, [x12]                // m
-    fdiv d2, d0, d1
-    frintz d2, d2                // trunc(d0/m)
-    fmul d2, d2, d1
-    fsub d2, d0, d2              // remainder
-    fcmp d2, #0.0
-    b.eq .Lnc_next8
+    // zod floatSafeRemainder: |ratio - round(ratio)| < 4*eps*max(|ratio|,1)
+    fdiv d2, d0, d1              // ratio
+    fabs d3, d2                  // |ratio|
+    fmov d4, #1.0
+    fmax d4, d3, d4              // max(|ratio|, 1)
+    mov x10, #0x3CD0
+    lsl x10, x10, #48            // 4*eps = 2^-50
+    fmov d5, x10
+    fmul d5, d5, d4              // tolerance
+    frinta d6, d2                // round(ratio)
+    fsub d7, d2, d6
+    fabs d7, d7                  // |ratio - round(ratio)|
+    fcmp d7, d5
+    b.lo .Lnc_next8
     // not_multiple_of {multipleOf: m} msg "Number must be a multiple of m"
     fmov x9, d1
     str x9, [sp, #88]
