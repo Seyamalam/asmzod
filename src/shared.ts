@@ -324,6 +324,7 @@ const ISSUE_ORDER: Record<string, string[]> = {
   too_big: ["origin", "code", "maximum", "inclusive", "path", "message", "exact"],
   invalid_format: ["origin", "code", "format", "pattern", "path", "message", "note"],
   not_multiple_of: ["code", "divisor", "path", "message"],
+  invalid_union: ["code", "errors", "inclusive", "matches", "path", "message"],
 };
 
 // engines emit record-key failures as a flat stream: inner key-schema issues

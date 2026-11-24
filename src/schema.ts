@@ -16,7 +16,7 @@ const pendingRefineIssues: any[] = [];
 // stages queue here and safeParseAsync replays them sequentially —
 // transforms rewrite a moving value, refines gate on it.
 let asyncMode = false;
-const pendingAsync: { type: string; fn: (v: unknown, ctx?: any) => unknown; msg?: string; cbid?: number }[] = [];
+const pendingAsync: { type: string; fn: (v: unknown, ctx?: any) => unknown; msg?: string; cbid?: number; ipath?: any[] }[] = [];
 const isThenable = (v: unknown): v is Promise<unknown> =>
   !!v && typeof (v as any).then === "function";
 class AsyncCheckError extends Error {
@@ -203,13 +203,19 @@ export abstract class ZodType<Output = unknown, Input = Output> {
                 out.push({ ...iss, path: [...(i.path ?? []), ...(iss.path ?? [])] });
               continue;
             }
-            (i as any).errors = runs.map((x) => (x.ok ? [] : x.issues));
+            // zod field order: errors directly after code
+            const { code: _c, ...rest } = i as any;
+            const rebuilt: any = { code: _c, errors: runs.map((x) => (x.ok ? [] : x.issues)) };
+            for (const k of Object.keys(rest)) rebuilt[k] = rest[k];
+            out.push(rebuilt);
+            continue;
           }
         }
         if ((i as any)._u !== undefined) delete (i as any)._u;
         out.push(i);
       }
-      if (spliced) { r.issues = out; aborted = isAborted(r.issues); }
+      r.issues = out;
+      if (spliced) aborted = isAborted(r.issues);
       (r as any).aborted = aborted;
     }
     // superRefine issues pushed by refine callbacks during this run replace the
@@ -287,6 +293,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       type: "refine", inner: this,
       cbid: regId(reg.refine, guardAsync(fn as (v: unknown) => unknown)),
       fn, kind: "refine", message: paramMsg(message),
+      path: message && typeof message === "object" && Array.isArray(message.path) ? message.path : undefined,
     });
   }
   refinement(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
@@ -432,7 +439,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       } else {
         const res = await st.fn(cur);
         if (!res)
-          allIssues.push({ code: "custom", path: pp ?? [], message: st.msg ?? "Invalid input" } as ZodIssue);
+          allIssues.push({ code: "custom", path: [...(pp ?? []), ...((st as any).ipath ?? [])], message: st.msg ?? "Invalid input" } as ZodIssue);
       }
     }
     if (allIssues.length) {
@@ -781,29 +788,51 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
     if (kind !== "transform" && kind !== "superrefine" && kind !== "refine")
       return super._run(data);
     const ir = (this._def.inner as any)._run(data);
-    if (!ir.ok) return ir;
+    if (ir.ok === false && ((ir as any).aborted ?? isAborted(ir.issues))) return ir;
+    // inner failed non-aborted: zod keeps running the check chain on the
+    // parsed-so-far payload — re-run inner minus its unrecognized keys to get
+    // it (no user callbacks re-fire), falling back to the raw input
+    let base: any = ir.ok ? ir.value : data;
+    if (!ir.ok && data !== null && typeof data === "object" && !Array.isArray(data)) {
+      const drop = new Set<PropertyKey>();
+      for (const iss of ir.issues)
+        if (iss.code === "unrecognized_keys" && !iss.path?.length)
+          for (const k of (iss as any).keys) drop.add(k);
+      if (drop.size) {
+        const trimmed: any = { ...(data as object) };
+        for (const k of drop) delete trimmed[k];
+        const rr = (this._def.inner as any)._run(trimmed);
+        if (rr.ok) base = rr.value;
+      }
+    }
     const fn = this._def.fn as (v: unknown, ctx?: any) => unknown;
     const queue = () => {
       if (!asyncMode) throw new AsyncCheckError();
-      pendingAsync.push({ type: kind, fn, msg: this._def.message });
+      pendingAsync.push({ type: kind, fn, msg: this._def.message, ipath: this._def.path });
       return ir;
     };
     if (kind === "transform") {
-      const r = fn(ir.value);
+      const r = fn(base);
       if (isThenable(r)) return queue();
+      if (!ir.ok) return { ok: false as const, issues: ir.issues, aborted: false, value: r } as any;
       return { ok: true as const, value: r };
     }
     if (kind === "superrefine") {
       const pushed: any[] = [];
-      const r = fn(ir.value, { addIssue: (i: any) => pushed.push(i) });
+      const r = fn(base, { addIssue: (i: any) => pushed.push(i) });
       if (isThenable(r)) return queue();
-      if (pushed.length)
-        return { ok: false as const, issues: pushed.map(({ path, ...rest }: any) => ({ ...rest, path: path ?? [] })) };
-      return ir;
+      const mine = pushed.map(({ path, ...rest }: any) => ({ ...rest, path: path ?? [] }));
+      if (ir.ok) return mine.length ? { ok: false as const, issues: mine } : ir;
+      return { ok: false as const, issues: [...ir.issues, ...mine], value: base } as any;
     }
-    const r = fn(ir.value);
+    const r = fn(base);
     if (isThenable(r)) return queue();
-    if (!r) return { ok: false as const, issues: [{ code: "custom", path: [], message: this._def.message ?? "Invalid input" }] as any };
+    if (!r) {
+      const mine = [{ code: "custom", path: this._def.path ?? [], message: this._def.message ?? "Invalid input" }] as any;
+      return ir.ok
+        ? { ok: false as const, issues: mine }
+        : { ok: false as const, issues: [...ir.issues, ...mine], value: base } as any;
+    }
     return ir;
   }
 }
@@ -1316,11 +1345,30 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
     const both = [...unrecKeys].filter(([, f]) => f.l && f.r).map(([k]) => k);
     if (both.length) {
       const aggregated = unrecIssue ? both.filter((k) => (unrecIssue.keys as string[]).includes(k)) : [];
-      if (aggregated.length) issues.push({ ...unrecIssue, keys: aggregated });
+      // zod finalizes the aggregated issue's message from the reduced key set
+      if (aggregated.length)
+        issues.push({
+          ...unrecIssue, keys: aggregated,
+          message: unrecIssue.message === _unrecMsg(unrecIssue.keys) ? _unrecMsg(aggregated) : unrecIssue.message,
+        });
       for (const k of both) if (!aggregated.includes(k) && keyIssues.has(k)) issues.push(keyIssues.get(k));
     }
     if (issues.length) return { ok: false as const, issues, aborted: isAborted(issues) };
-    const merged = _mergeValues((l as any).value, (r as any).value);
+    // a side that failed only via reconciled key issues still contributes its
+    // parsed-so-far value; effects results carry it, plain objects recover it
+    // by re-running on the input minus that side's rejected keys
+    const valueFor = (side: any, res: any, side_: "l" | "r") => {
+      if (res.ok) return res.value;
+      if ((res as any).value !== undefined) return (res as any).value;
+      if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+      const dropped = [...unrecKeys].filter(([, f]) => f[side_]).map(([k]) => k);
+      if (!dropped.length) return undefined;
+      const trimmed: any = { ...(data as object) };
+      for (const k of dropped) delete trimmed[k];
+      const rr = side._run(trimmed);
+      return rr.ok ? rr.value : undefined;
+    };
+    const merged = _mergeValues(valueFor(this._def.left, l, "l"), valueFor(this._def.right, r, "r"));
     if (!merged.valid)
       throw new Error(`Unmergable intersection. Error path: ${JSON.stringify(merged.mergeErrorPath)}`);
     return { ok: true as const, value: merged.data };
@@ -1477,12 +1525,17 @@ export class ZodXor<T extends ZodTypeAny[]> extends ZodUnion<T> {
     const runs = opts.map((o) => (o as any)._run(data));
     const wins = runs.filter((r: any) => r.ok);
     if (wins.length === 1) return wins[0];
+    // TS-level issues bypass the compiled 0x2A msgwrap — resolve def.error
+    // here; `\0mN` placeholders resolve through msgFns directly
+    const raw = paramMsg(this._def.error);
+    const m = raw !== undefined && raw.charCodeAt(0) === 0
+      ? msgFns[+raw.slice(2)]?.({ code: "invalid_union", path: [] }) : raw;
     if (wins.length === 0) {
       return {
         ok: false as const, aborted: true,
         issues: [{
           code: "invalid_union", errors: runs.map((r: any) => r.issues ?? []),
-          path: [], message: "Invalid input",
+          path: [], message: m ?? "Invalid input",
         }] as any[],
       };
     }
@@ -1491,7 +1544,7 @@ export class ZodXor<T extends ZodTypeAny[]> extends ZodUnion<T> {
       issues: [{
         code: "invalid_union", errors: [], inclusive: false,
         matches: runs.map((r: any, i: number) => (r.ok ? i : -1)).filter((i: number) => i >= 0),
-        path: [], message: "Invalid input: more than one option matched",
+        path: [], message: m ?? "Invalid input: more than one option matched",
       }] as any[],
     };
   }
