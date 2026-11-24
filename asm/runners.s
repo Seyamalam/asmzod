@@ -734,6 +734,9 @@ _az_run_numchecks:
     b .Lnc_safelimit
 .Lnc_int_fail:
     // invalid_type expected "int" (+format:"safeint" via normalizer)
+    ldp x9, x10, [sp, #56]       // check custom msg -> pending cell
+    AZ_ADR x11, _az_pending_msg
+    stp x9, x10, [x11]
     AZ_ADR x0, .Lty_integer
     mov x1, #3
     mov w2, #3                   // tag f64
@@ -756,6 +759,9 @@ _az_run_numchecks:
     fcmp d2, d1
     b.lo .Lnc_next0
 .Lnc_finite_fail:
+    ldp x9, x10, [sp, #56]
+    AZ_ADR x11, _az_pending_msg
+    stp x9, x10, [x11]
     mov x0, #12                  // not_finite
     mov x1, #0
     mov x2, #0

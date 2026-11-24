@@ -113,6 +113,25 @@ function repr(v: unknown): string {
   return String(v);
 }
 
+// error-param function registry — `check(msg, {error: fn})` compiles the
+// sentinel "\0mN" into the check record; normalizeIssue resolves it by
+// calling the function with the (still messageless) issue
+export const msgFns: ((i: any) => string)[] = [];
+
+// zod4 params: a message string or {message?, error?: string | fn}
+export function paramMsg(p: any): string | undefined {
+  if (p === undefined || p === null) return undefined;
+  if (typeof p === "string") return p;
+  const e = p.error ?? p.message;
+  if (e === undefined) return undefined;
+  if (typeof e === "string") return e;
+  if (typeof e === "function") {
+    msgFns.push(e);
+    return `\0m${msgFns.length - 1}`;
+  }
+  return undefined;
+}
+
 export function defaultMessage(i: any): string {
   switch (i.code) {
     case "invalid_type": {
@@ -224,7 +243,13 @@ export function normalizeIssue(i: any): any {
       break;
   }
   if (out.code === "invalid_type" && out.expected === "int") out.format = "safeint";
-  if (out.message === undefined) out.message = defaultMessage(out);
+  if (out.message === undefined) {
+    out.message = defaultMessage(out);
+  } else if (typeof out.message === "string" && out.message.charCodeAt(0) === 0) {
+    const fn = msgFns[+out.message.slice(2)];
+    const { message: _m, ...rest } = out;
+    out.message = fn ? fn(rest) : _m;
+  }
   // zod folds `received` into the message but exposes it as a field only from
   // guards that produce a value-qualified name: number-family NaN/Infinity and
   // date's Invalid Date

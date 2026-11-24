@@ -5,6 +5,7 @@ import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, type ZodIssue } from "./error.ts";
+import { msgFns, paramMsg } from "./shared.ts";
 
 // issues added via ctx.addIssue inside superRefine callbacks during the
 // in-flight engine run; _run splices them over the engine's `custom` slots
@@ -257,7 +258,7 @@ export type ZodTypeAny = ZodType<any, any>;
 // ---------- primitives ----------
 export class ZodString extends ZodType<string> {
   constructor(_def: any = { type: "string", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodString({ ...this._def, checks: [...this._def.checks, c] }); }
+  private _check(c: any) { return new ZodString({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   min(n: number, message?: string) { return this._check({ kind: "min", value: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "max", value: n, message }); }
   length(n: number, message?: string) { return this._check({ kind: "length", value: n, message }); }
@@ -377,7 +378,7 @@ export class ZodString extends ZodType<string> {
 
 export class ZodNumber extends ZodType<number> {
   constructor(_def: any = { type: "number", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodNumber({ ...this._def, checks: [...this._def.checks, c] }); }
+  private _check(c: any) { return new ZodNumber({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   gt(n: number, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
   min(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -414,7 +415,7 @@ export class ZodNumber extends ZodType<number> {
 
 export class ZodBigInt extends ZodType<bigint> {
   constructor(_def: any = { type: "bigint", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodBigInt({ ...this._def, checks: [...this._def.checks, c] }); }
+  private _check(c: any) { return new ZodBigInt({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   gt(n: bigint, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
   min(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -469,7 +470,7 @@ export class ZodSymbol extends ZodType<symbol> {
 
 export class ZodDate extends ZodType<Date> {
   constructor(_def: any = { type: "date", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodDate({ ...this._def, checks: [...this._def.checks, c] }); }
+  private _check(c: any) { return new ZodDate({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   min(d: Date, message?: string) { return this._check({ kind: "min", value: d.getTime(), message }); }
   max(d: Date, message?: string) { return this._check({ kind: "max", value: d.getTime(), message }); }
   get minDate(): Date | null {

@@ -15,26 +15,26 @@ export * from "./error.ts";
 export { engineVersion, engineBackend } from "./ffi.ts";
 
 export const z = {
-  string: () => new ZodString(),
-  number: () => new ZodNumber(),
-  bigint: () => new ZodBigInt(),
-  boolean: () => new ZodBoolean(),
-  date: () => new ZodDate(),
-  symbol: () => new ZodSymbol(),
-  any: () => new ZodAny(),
-  unknown: () => new ZodUnknown(),
-  never: () => new ZodNever(),
-  null: () => new ZodNull(),
-  undefined: () => new ZodUndefined(),
-  void: () => new ZodVoid(),
-  nan: () => new ZodNaN(),
+  string: (params?: any) => new ZodString({ type: "string", checks: [], error: params }),
+  number: (params?: any) => new ZodNumber({ type: "number", checks: [], error: params }),
+  bigint: (params?: any) => new ZodBigInt({ type: "bigint", checks: [], error: params }),
+  boolean: (params?: any) => new ZodBoolean({ type: "boolean", checks: [], error: params }),
+  date: (params?: any) => new ZodDate({ type: "date", checks: [], error: params }),
+  symbol: (params?: any) => new ZodSymbol({ type: "symbol", checks: [], error: params }),
+  any: (params?: any) => new ZodAny({ type: "any", checks: [], error: params }),
+  unknown: (params?: any) => new ZodUnknown({ type: "unknown", checks: [], error: params }),
+  never: (params?: any) => new ZodNever({ type: "never", checks: [], error: params }),
+  null: (params?: any) => new ZodNull({ type: "null", checks: [], error: params }),
+  undefined: (params?: any) => new ZodUndefined({ type: "undefined", checks: [], error: params }),
+  void: (params?: any) => new ZodVoid({ type: "void", checks: [], error: params }),
+  nan: (params?: any) => new ZodNaN({ type: "nan", checks: [], error: params }),
 
-  object: <T extends ZodRawShape>(shape: T) =>
-    new ZodObject<T>({ type: "object", shape, mode: "strip", catchall: null }),
-  strictObject: <T extends ZodRawShape>(shape: T) =>
-    new ZodObject<T>({ type: "object", shape, mode: "strict", catchall: null }),
-  looseObject: <T extends ZodRawShape>(shape: T) =>
-    new ZodObject<T>({ type: "object", shape, mode: "passthrough", catchall: null }),
+  object: <T extends ZodRawShape>(shape: T, params?: any) =>
+    new ZodObject<T>({ type: "object", shape, mode: "strip", catchall: null, error: params }),
+  strictObject: <T extends ZodRawShape>(shape: T, params?: any) =>
+    new ZodObject<T>({ type: "object", shape, mode: "strict", catchall: null, error: params }),
+  looseObject: <T extends ZodRawShape>(shape: T, params?: any) =>
+    new ZodObject<T>({ type: "object", shape, mode: "passthrough", catchall: null, error: params }),
   promise: <T extends ZodTypeAny>(inner: T) =>
     new ZodPromise<T>({ type: "instof", ctor: Promise, name: "promise", inner }),
   function: (opts?: { input?: ZodTypeAny[]; output?: ZodTypeAny }) =>
@@ -49,10 +49,10 @@ export const z = {
       out: schema,
     }),
 
-  array: <T extends ZodTypeAny>(element: T) =>
-    new ZodArray<T>({ type: "array", element }),
-  tuple: <T extends ZodTypeAny[]>(items: [...T]) =>
-    new ZodTuple<T>({ type: "tuple", items, rest: null }),
+  array: <T extends ZodTypeAny>(element: T, params?: any) =>
+    new ZodArray<T>({ type: "array", element, error: params }),
+  tuple: <T extends ZodTypeAny[]>(items: [...T], params?: any) =>
+    new ZodTuple<T>({ type: "tuple", items, rest: null, error: params }),
   record: ((keyOrVal: ZodTypeAny, val?: ZodTypeAny) =>
     val === undefined
       ? new ZodRecord({ type: "record", keyType: null, valueType: keyOrVal })
@@ -65,8 +65,8 @@ export const z = {
   set: <V extends ZodTypeAny>(value: V) =>
     new ZodSet<V>({ type: "set", valueType: value }),
 
-  union: <T extends ZodTypeAny[]>(options: [...T]) =>
-    new ZodUnion<T>({ type: "union", options }),
+  union: <T extends ZodTypeAny[]>(options: [...T], params?: any) =>
+    new ZodUnion<T>({ type: "union", options, error: params }),
   discriminatedUnion: <T extends ZodTypeAny[]>(disc: string, options: [...T]) => {
     const optionsMap = new Map<string, ZodTypeAny>();
     for (const o of options) {
@@ -80,10 +80,10 @@ export const z = {
   intersection: <A extends ZodTypeAny, B extends ZodTypeAny>(l: A, r: B) =>
     new ZodIntersection<A, B>({ type: "intersect", left: l, right: r }),
 
-  literal: <T extends string | number | boolean | bigint | null | undefined>(v: T) =>
-    new ZodLiteral<T>({ type: "literal", value: v }),
-  enum: <T extends string>(values: [T, ...T[]]) =>
-    new ZodEnum<T>({ type: "enum", values }),
+  literal: <T extends string | number | boolean | bigint | null | undefined>(v: T, params?: any) =>
+    new ZodLiteral<T>({ type: "literal", value: v, error: params }),
+  enum: <T extends string>(values: [T, ...T[]], params?: any) =>
+    new ZodEnum<T>({ type: "enum", values, error: params }),
   nativeEnum: (e: object) => {
     const vals = Object.values(e).filter((v) => typeof v === "string");
     return new ZodEnum({ type: "enum", values: vals });

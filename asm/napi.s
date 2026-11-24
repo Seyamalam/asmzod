@@ -786,9 +786,47 @@ _aznapi_run:
     b.eq .Ln_sym
     cmp w9, #0x23
     b.eq .Ln_nonopt
+    cmp w9, #0x2A
+    b.eq .Ln_msg
     mov x0, #-1000
     sub x0, x0, x9            // -1000-op reveals the unknown opcode
     b .Ln_ret
+// 0x2A msgwrap: push (depth,msg) onto _az_msgstack, run inner, pop
+.Ln_msg:
+    ldr x10, [x27, #1]         // msglen
+    add x11, x27, #9           // msgptr
+    add x12, x11, x10          // -> rel field
+    AZ_ADR x9, _az_msgstack
+    ldr x13, [x9]
+    cmp x13, #64
+    b.hs .Ln_msg_skip
+    lsl x14, x13, #1
+    add x14, x14, x13
+    lsl x14, x14, #3
+    add x15, x9, #8
+    add x15, x15, x14
+    ldr x16, [x22, #8]
+    stp x16, x11, [x15]
+    str x10, [x15, #16]
+    add x13, x13, #1
+    str x13, [x9]
+    ldr x10, [x12]
+    add x0, x12, x10
+    mov x1, x28
+    mov x2, x19
+    bl _aznapi_run
+    AZ_ADR x9, _az_msgstack
+    ldr x13, [x9]
+    subs x13, x13, #1
+    b.mi .Ln_ret
+    str x13, [x9]
+    b .Ln_ret
+.Ln_msg_skip:
+    ldr x10, [x12]
+    add x0, x12, x10
+    mov x1, x28
+    mov x2, x19
+    b _aznapi_run              // tail — stack full, run unwrapped
 .Ln_ret:
     ldp x27, x28, [sp, #16]
     ldp x19, x20, [sp, #32]

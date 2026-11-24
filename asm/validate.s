@@ -21,12 +21,49 @@ _az_validate:
     stp x27, x28, [sp, #16]
     mov x27, x0
     mov x28, x1
+.Lv_dispatch:
     ldrb w9, [x27]
+    cmp w9, #0x2A
+    b.eq .Lv_msgnode
     cmp w9, #0x23
     b.hi .Lv_badop
     AZ_ADR x10, .Lv_jt
     ldr x11, [x10, x9, lsl #3]
     br x11
+
+// 0x2A msgwrap: [op][u64 msglen][msg][i64 rel -> inner node]
+.Lv_msgnode:
+    ldr x10, [x27, #1]         // msglen
+    add x11, x27, #9           // msgptr
+    add x12, x11, x10          // -> rel field
+    AZ_ADR x9, _az_msgstack
+    ldr x13, [x9]
+    cmp x13, #64
+    b.hs .Lv_msg_skip
+    lsl x14, x13, #1
+    add x14, x14, x13
+    lsl x14, x14, #3
+    add x15, x9, #8
+    add x15, x15, x14
+    ldr x16, [x22, #8]         // path depth
+    stp x16, x11, [x15]
+    str x10, [x15, #16]
+    add x13, x13, #1
+    str x13, [x9]
+    ldr x10, [x12]
+    add x0, x12, x10
+    mov x1, x28
+    bl _az_validate
+    AZ_ADR x9, _az_msgstack
+    ldr x13, [x9]
+    subs x13, x13, #1
+    b.mi .Lv_ret
+    str x13, [x9]
+    b .Lv_ret
+.Lv_msg_skip:
+    ldr x10, [x12]
+    add x27, x12, x10
+    b .Lv_dispatch
 
 // ---------- shared exits ----------
 .Lv_ret:
@@ -59,6 +96,8 @@ _az_validate:
     ldr x10, [x9]
     add x27, x9, x10
     ldrb w9, [x27]
+    cmp w9, #0x2A
+    b.eq .Lv_msgnode
     cmp w9, #0x23
     b.hi .Lv_badop
     AZ_ADR x10, .Lv_jt

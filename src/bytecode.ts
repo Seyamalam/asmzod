@@ -1,6 +1,7 @@
 // bytecode.ts — schema -> engine blob compiler (see FORMAT.md)
 import { BW, u64, str, encodeValue, type HostTable } from "./codec.ts";
 import { reg, regId } from "./ffi.ts";
+import { paramMsg } from "./shared.ts";
 
 export interface Compiled {
   cbUnsafe: boolean;
@@ -105,6 +106,23 @@ function emitNumChecks(w: BW, checks: any[], isBig: boolean) {
 }
 
 function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): void {
+  const d = s._def;
+  // schema-level {error}/message param -> 0x2A msgwrap node: the engine
+  // scopes the message to issues raised at this node's path depth
+  const m = paramMsg(d.error ?? d.message);
+  if (m !== undefined && m !== "") {
+    w.u8(0x2A);
+    checkMsg(w, m);
+    const f = w.field();
+    const at = w.pos;
+    emitNode(w, s, hosts, unions);
+    w.patchField(f, at);
+    return;
+  }
+  emitNode(w, s, hosts, unions);
+}
+
+function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): void {
   const d = s._def;
   switch (d.type) {
     case "string": w.u8(0x01); emitStrChecks(w, d.checks); return;

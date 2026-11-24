@@ -303,6 +303,32 @@ _az_issue_f_strarr:
 _az_issue_begin:
     stp x29, x30, [sp, #-96]!
     mov x29, sp
+    // pending-msg cell: fail paths whose issue helpers take no msg arg
+    // stash the check's custom message here; consumed (and cleared) on read
+    AZ_ADR x9, _az_pending_msg
+    ldp x10, x11, [x9]
+    stp xzr, xzr, [x9]
+    cbnz x2, .Lib_havemsg        // explicit msg (len>0) wins
+    mov x1, x10
+    mov x2, x11
+    cbnz x2, .Lib_havemsg        // pending msg (len>0)
+    // msg-stack top: when the top entry's recorded path depth equals the
+    // current depth, this issue was raised by the wrapped node itself
+    AZ_ADR x9, _az_msgstack
+    ldr x13, [x9]
+    cbz x13, .Lib_havemsg
+    sub x13, x13, #1
+    lsl x14, x13, #1
+    add x14, x14, x13
+    lsl x14, x14, #3            // slot = 24B
+    add x15, x9, #8
+    add x15, x15, x14
+    ldr x16, [x22, #8]          // path depth
+    ldr x17, [x15]
+    cmp x16, x17
+    b.ne .Lib_havemsg
+    ldp x1, x2, [x15, #8]
+.Lib_havemsg:
     stp x0, x1, [sp, #16]      // code, msgptr
     str x2, [sp, #32]          // msglen
     str x27, [sp, #48]
@@ -815,3 +841,18 @@ _az_issue_f_strarr2:
     ldr x27, [sp, #56]
     ldp x29, x30, [sp], #80
     ret
+
+// ---------- pending check-message cell ----------
+    .data
+    .p2align 3
+    .globl _az_pending_msg
+    AZ_HIDDEN _az_pending_msg
+_az_pending_msg:      .quad 0
+_az_pending_msglen:   .quad 0
+
+// scoped schema-message stack: [count][slots x64 {depth,msgptr,msglen}]
+    .p2align 3
+    .globl _az_msgstack
+    AZ_HIDDEN _az_msgstack
+_az_msgstack:         .quad 0
+                      .zero 64*24
