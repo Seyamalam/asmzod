@@ -1422,6 +1422,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   safeParse(data: unknown, params?: any): SafeParseResult<Output> {
+    const c = this._compiled;
+    if (c?.napi === 1 && params === undefined) {
+      const r = napiBackend.fastParse(c.blob, data);
+      if (r !== napiBackend.NAPI_MISS) return { success: true, data: r } as SafeParseResult<Output>;
+    }
     return _SP(this, data, params);
   }
 
