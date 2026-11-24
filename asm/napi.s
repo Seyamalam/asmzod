@@ -1078,6 +1078,8 @@ _aznapi_parse:
 .equ LN_P, 184
 .equ LN_Q, 240            // obj: children-changed flag
 .equ LN_R, 248            // obj: missing-declared-key flag
+.equ LN_S, 192            // obj: issue-cursor snapshot for absent-optin swallow
+.equ LN_T, 200            // obj: issue-count snapshot for absent-optin swallow
 _aznapi_run:
     stp x29, x30, [sp, #-256]!
     mov x29, sp
@@ -3090,6 +3092,11 @@ _azn_encval:
     ldr x0, [sp, #LN_F]
     ldr x1, [sp, #LN_E]
     bl _az_path_push_key
+    // snapshot the issue region — an absent omittable field's failure gets
+    // swallowed whole (issues rolled back, value dropped), like zod
+    str x21, [sp, #LN_S]
+    ldr x9, [x22]
+    str x9, [sp, #LN_T]
     // recurse on prop
     ldr x12, [sp, #LN_C]
     ldr x0, [x12]
@@ -3122,6 +3129,16 @@ _azn_encval:
     ldr x0, [sp, #LN_H]
     cmp x0, #-2
     b.ne .Ln_obj_st           // 0 ok / hard error
+    // absent + optin flag -> best-effort run: swallow issues + drop the field
+    ldrb w9, [sp, #LN_O]
+    cbnz w9, .Ln_obj_fmark
+    ldr x9, [sp, #LN_M]
+    cbz x9, .Ln_obj_fmark
+    ldr x21, [sp, #LN_S]      // restore issue cursor
+    ldr x9, [sp, #LN_T]
+    str x9, [x22]             // restore issue count
+    b .Ln_obj_adv
+.Ln_obj_fmark:
     mov x9, #1
     str x9, [sp, #LN_I]
     b .Ln_obj_adv

@@ -49,8 +49,9 @@ function _zodOptin(s: any): any {
     case "default": case "prefault": return "defaulted";
     case "transform": return s._def.node ? "optional" : inner?._zod?.optin;
     case "refine": case "superrefine": case "custom": return inner?._zod?.optin;
-    case "pipe": return s._def.in?._zod?.optin;
-    case "union": case "discriminatedUnion": {
+    case "pipe": return s._def.prefault ? "defaulted" : s._def.in?._zod?.optin;
+    case "codec": return s._def.in?._zod?.optin;
+    case "union": case "discunion": case "discriminatedUnion": {
       const os: any[] = s._def.options ?? [];
       return os.some((o) => o._zod.optin === "defaulted") ? "defaulted"
         : os.some((o) => o._zod.optin === "optional") ? "optional" : undefined;
@@ -74,7 +75,8 @@ function _zodOptout(s: any): any {
     case "transform": return undefined;
     case "refine": case "superrefine": case "custom": return inner?._zod?.optout;
     case "pipe": return s._def.out?._zod?.optout;
-    case "union": case "discriminatedUnion": {
+    case "codec": return s._def.out?._zod?.optout;
+    case "union": case "discunion": case "discriminatedUnion": {
       const os: any[] = s._def.options ?? [];
       return os.some((o) => o._zod.optout === "optional") ? "optional" : undefined;
     }
@@ -92,15 +94,35 @@ function _zodValues(s: any): any {
   const inner = _inner(s);
   switch (t) {
     case "enum": case "nativeEnum": return new Set(s._def.values);
-    case "literal": return new Set(s._def.values ?? [s._def.value]);
-    case "optional": case "nullable": case "default": case "prefault":
-    case "catch": case "readonly": case "brand": case "lazy":
+    case "literal":
+      return new Set(s._def.values ?? (Array.isArray(s._def.value) ? s._def.value : [s._def.value]));
+    case "undefined": return new Set([undefined]);
+    case "null": return new Set([null]);
+    case "optional": {
+      const v = inner?._zod?.values;
+      return v ? new Set([...v, undefined]) : undefined;
+    }
+    case "nullable": {
+      const v = inner?._zod?.values;
+      return v ? new Set([...v, null]) : undefined;
+    }
+    case "exactOptional": case "default": case "prefault":
+    case "catch": case "readonly": case "brand":
       return inner?._zod?.values;
+    case "transform": case "refine": case "superrefine":
+      return inner?._zod?.values;
+    case "pipe": return (s._def.prefault ? s._def.out : s._def.in)?._zod?.values;
+    case "codec": return s._def.in?._zod?.values;
+    case "lazy": {
+      if (_valResolving.has(s)) return undefined;
+      _valResolving.add(s);
+      try { return inner?._zod?.values; } finally { _valResolving.delete(s); }
+    }
     case "nonoptional": {
       const v = inner?._zod?.values;
       return v ? new Set([...v].filter((x) => x !== undefined)) : undefined;
     }
-    case "union": case "discriminatedUnion": {
+    case "union": case "discunion": case "discriminatedUnion": {
       const os: any[] = s._def.options ?? [];
       const vs = os.map((o) => o._zod.values);
       if (vs.some((v) => v === undefined)) return undefined;
@@ -108,6 +130,63 @@ function _zodValues(s: any): any {
     }
     default: return undefined;
   }
+}
+const _valResolving = new WeakSet<object>();
+const _pvResolving = new WeakSet<object>();
+// per-key discriminator candidate sets — only shape-bearing schemas have
+// propValues; wrappers defer inward the same way zod's _zod.def chain does
+function _zodPropValues(s: any): any {
+  if (_pvResolving.has(s)) return undefined;
+  _pvResolving.add(s);
+  try { return _propValuesInner(s, new Set<object>()); } finally { _pvResolving.delete(s); }
+}
+function _propValuesInner(s: any, seen: Set<object>): any {
+  let cur: any = s;
+  while (cur) {
+    const d = cur._def;
+    if (!d) return undefined;
+    if (d.shape !== undefined) {
+      const pv: Record<string, Set<any>> = Object.create(null);
+      for (const key of Object.keys(d.shape)) {
+        const f = d.shape[key];
+        const vals = f?._zod?.values;
+        if (vals) {
+          const set = (pv[key] ??= new Set<any>());
+          for (const v of vals) set.add(v);
+          // an omittable slot reads back as undefined at discriminator lookup
+          if (f._zod?.optin !== undefined) set.add(undefined);
+        }
+      }
+      return pv;
+    }
+    if (d.type === "discunion" || d.type === "discriminatedUnion") {
+      const pv: Record<string, Set<any>> = Object.create(null);
+      let undefinedCount = 0;
+      const opts: any[] = d.options ?? [];
+      for (let i = 0; i < opts.length; i++) {
+        const opv = _zodPropValues(opts[i]);
+        if (!opv || Object.keys(opv).length === 0)
+          throw new Error(`Invalid discriminated union option at index "${i}"`);
+        if (Object.prototype.hasOwnProperty.call(opv, d.discriminator) && opv[d.discriminator].has(undefined)) undefinedCount++;
+        for (const [k, vs] of Object.entries(opv)) {
+          const set = (pv[k] ??= new Set<any>());
+          for (const v of vs as Set<any>) set.add(v);
+        }
+      }
+      if (!d.unionFallback && undefinedCount > 1 && Object.prototype.hasOwnProperty.call(pv, d.discriminator)) pv[d.discriminator].delete(undefined);
+      return pv;
+    }
+    const inner = d.inner ?? (d.prefault ? d.out : d.in);
+    if (inner) { cur = inner; continue; }
+    if (d.getter) {
+      if (seen.has(cur)) return undefined;
+      seen.add(cur);
+      cur = cur.schema;
+      continue;
+    }
+    return undefined;
+  }
+  return undefined;
 }
 const _escapeRe = (v: any) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function _zodPattern(s: any): any {
@@ -136,18 +215,29 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       traits: new Set([(this as any).constructor]),
       parent: this._def.parent,
       innerType: inner,
-      bag: this._def.bag ?? {},
-      optin: _zodOptin(this),
-      optout: _zodOptout(this),
-      values: _zodValues(this),
-      pattern: _zodPattern(this),
-      propValues: this._def.propValues,
+      bag: { ...(this._def.bag ?? {}) },
       deferred: this._def.deferred,
       run: (v: any) => this._run(v),
       parse: (v: any) => this._run(v),
       toJSONSchema: () => (this as any).toJSONSchema?.(),
       check: (...args: any[]) => (this as any).check(...args),
     };
+    // lazy like zod's defineLazyInternal — recursive schemas resolve these on
+    // demand, not while the internals object is being constructed
+    const lazyProps: Record<string, () => any> = {
+      optin: () => _zodOptin(this),
+      optout: () => _zodOptout(this),
+      values: () => _zodValues(this),
+      pattern: () => _zodPattern(this),
+      propValues: () => _zodPropValues(this),
+    };
+    for (const [k, fn] of Object.entries(lazyProps)) {
+      let cached = false, val: any;
+      Object.defineProperty(z, k, {
+        enumerable: true, configurable: true,
+        get: () => { if (!cached) { val = fn(); cached = true; } return val; },
+      });
+    }
     this.__zod = z;
     return z;
   }
@@ -257,6 +347,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (!r.success) throw new ZodError(r.error.issues);
     return r.data;
   }
+
+  decode(data: unknown, params?: any): any { return this.parse(data, params); }
+  encode(data: unknown): any { return _encode(this, data); }
+  async decodeAsync(data: unknown): Promise<any> { return this.parseAsync(data); }
+  async encodeAsync(data: unknown): Promise<any> { return this.encode(data); }
+  /** zod's wrapper unwrap — the single inner schema, undefined elsewhere */
+  unwrap(): any { return (this._def as any).inner ?? (this._def as any).innerType; }
 
   optional(): ZodOptional<this> {
     return new ZodOptional({ type: "optional", inner: this });
@@ -379,6 +476,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     const v = typeof value === "function" ? (value as () => V)() : value;
     return new ZodPipe({
       type: "pipe",
+      prefault: true,
       in: new ZodEffects<ZodAny>({
         type: "transform", inner: new ZodAny(),
         cbid: regId(reg.transform, (x: unknown) => x === undefined ? v : x),
@@ -868,13 +966,24 @@ const _isPlainObject = (v: any) =>
 export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T>, objectInputType<T>> {
   constructor(_def: any) {
     super();
-    // shape resolves by object spread — non-enumerable entries drop here and
-    // can never be promoted into a derived shape
-    const shape = _def.shape;
-    if (shape && _shapeKeys(shape).length !== Reflect.ownKeys(shape).length) {
-      const next: any = {};
-      for (const k of _shapeKeys(shape)) _putProp(next, k, shape[k]);
-      _def = { ..._def, shape: next };
+    // shape resolves by object spread — on first read, like zod: until then it
+    // tracks the caller's raw object, and the snapshot keeps getter entries
+    // intact (discriminatedUnion's construction check enumerates keys without
+    // invoking recursive getters)
+    const rawShape = _def.shape;
+    if (rawShape) {
+      let resolved: any;
+      Object.defineProperty(_def, "shape", {
+        enumerable: true, configurable: true,
+        get() {
+          if (resolved === undefined) {
+            resolved = {};
+            for (const k of _shapeKeys(rawShape))
+              Object.defineProperty(resolved, k, Object.getOwnPropertyDescriptor(rawShape, k)!);
+          }
+          return resolved;
+        },
+      });
     }
     this._def = _def;
   }
@@ -904,31 +1013,96 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
       }
     }
     const syms = Reflect.ownKeys(shape).filter((k): k is symbol => typeof k === "symbol");
-    if (!syms.length) return super._run(input);
-    const r = super._run(input);
-    const out: any = r.ok ? { ...(r.value as object) } : {};
-    const symIssues: any[] = [];
-    if (input !== null && typeof input === "object") {
-      for (const k of syms) {
-        const fd: any = shape[k];
-        if (!(fd instanceof ZodType))
-          throw new Error(`Invalid element at key "${String(k)}"`);
-        const present = k in (input as any);
-        if (!present && fd._def?.type === "exactOptional") continue;
-        const res = (fd as any)._run((input as any)[k]);
-        if (!present && fd._zod.optin === undefined && res.ok) {
-          symIssues.push({ expected: "nonoptional", code: "invalid_type",
-            path: [k], message: "Invalid input: expected nonoptional, received undefined" });
-        } else if (res.ok) {
-          if (present || res.value !== undefined) out[k] = res.value;
-        } else {
-          for (const i of res.issues) symIssues.push({ ...i, path: [k, ...(i.path ?? [])] });
+    try {
+      const r = super._run(input);
+      if (!syms.length) return r;
+      const out: any = r.ok ? { ...(r.value as object) } : {};
+      const symIssues: any[] = [];
+      if (input !== null && typeof input === "object") {
+        for (const k of syms) {
+          const fd: any = shape[k];
+          if (!(fd instanceof ZodType))
+            throw new Error(`Invalid element at key "${String(k)}"`);
+          const present = k in (input as any);
+          if (!present && fd._def?.type === "exactOptional") continue;
+          const res = (fd as any)._run((input as any)[k]);
+          if (!present && fd._zod.optin === undefined && res.ok) {
+            symIssues.push({ expected: "nonoptional", code: "invalid_type",
+              path: [k], message: "Invalid input: expected nonoptional, received undefined" });
+          } else if (res.ok) {
+            if (present || res.value !== undefined) out[k] = res.value;
+          } else {
+            for (const i of res.issues) symIssues.push({ ...i, path: [k, ...(i.path ?? [])] });
+          }
         }
       }
+      const issues = [...(r.ok ? [] : r.issues), ...symIssues];
+      if (issues.length) return { ok: false as const, issues };
+      return { ok: true as const, value: out };
+    } catch (e: any) {
+      // fields the engine can't host — codec/promise schemas don't compile,
+      // and async effects can't suspend mid-run — so those objects validate
+      // per-field at TS level where pendingAsync write-back works
+      if ((asyncMode && e instanceof AsyncCheckError) || /cannot compile/.test(e?.message ?? ""))
+        return this._runTSObj(input);
+      throw e;
     }
-    const issues = [...(r.ok ? [] : r.issues), ...symIssues];
-    if (issues.length) return { ok: false as const, issues };
-    return { ok: true as const, value: out };
+  }
+
+  // engine semantics replayed per-field in TS — runs every field through
+  // _run so effects/codec subgraphs work and queued async stages get the
+  // field-key path prefix the replay needs
+  private _runTSObj(view: any): any {
+    const d = this._def;
+    const shape = d.shape;
+    if (view === null || typeof view !== "object" || Array.isArray(view))
+      return { ok: false as const, issues: [typeIssue("object", view)], aborted: true };
+    const issues: any[] = [];
+    const out: any = {};
+    const consumed = new Set<PropertyKey>();
+    for (const k of _shapeKeys(shape)) {
+      consumed.add(k);
+      if (k === "__proto__") continue;
+      const f = shape[k];
+      if (!(f instanceof ZodType)) throw new Error(`Invalid element at key "${String(k)}"`);
+      const present = k in view;
+      if (!present && f._def?.type === "exactOptional") continue;
+      const mark = pendingAsync.length;
+      const res = (f as any)._run(view[k]);
+      for (let i = mark; i < pendingAsync.length; i++)
+        (pendingAsync[i] as any).path = [k, ...((pendingAsync[i] as any).path ?? [])];
+      if (!present && res.ok && f._zod.optin === undefined) {
+        issues.push({ expected: "nonoptional", code: "invalid_type",
+          path: [k], message: "Invalid input: expected nonoptional, received undefined" });
+        continue;
+      }
+      // absent + omittable -> best-effort run; zod swallows its failure
+      if (!present && !res.ok && f._zod.optin !== undefined) { pendingAsync.length = mark; continue; }
+      if (res.ok) {
+        if (present || res.value !== undefined) out[k] = res.value;
+      } else {
+        for (const i of res.issues) issues.push({ ...i, path: [k, ...(i.path ?? [])] });
+      }
+    }
+    const extra = Object.keys(view).filter((k) => !consumed.has(k));
+    if (d.mode === "strict" && extra.length) {
+      issues.push({ code: "unrecognized_keys", keys: extra, path: [] } as any);
+    } else if (d.mode === "passthrough") {
+      for (const k of extra) if (k !== "__proto__") out[k] = view[k];
+    } else if (d.catchall) {
+      for (const k of extra) {
+        if (k === "__proto__") continue;
+        const mark = pendingAsync.length;
+        const res = (d.catchall as any)._run(view[k]);
+        for (let i = mark; i < pendingAsync.length; i++)
+          (pendingAsync[i] as any).path = [k, ...((pendingAsync[i] as any).path ?? [])];
+        if (res.ok) out[k] = res.value;
+        else for (const i of res.issues) issues.push({ ...i, path: [k, ...(i.path ?? [])] });
+      }
+    }
+    return issues.length
+      ? { ok: false as const, issues, aborted: isAborted(issues) }
+      : { ok: true as const, value: out };
   }
   strict() { return new ZodObject({ ...this._def, mode: "strict", catchall: new ZodNever({ type: "never" }) }); }
   strip() { return new ZodObject({ ...this._def, mode: "strip", catchall: undefined }); }
@@ -1186,6 +1360,51 @@ const CONTINUING_CODES = new Set([
   "too_small", "too_big", "invalid_format", "not_multiple_of",
   "unrecognized_keys", "custom",
 ]);
+// backward-direction traversal — zod's direction:"backward": codecs reverse,
+// unions try each option in order, objects encode each declared field, wrappers
+// defer inward, and plain schemas validate forward
+export function _encode(s: any, v: any): any {
+  const d = s?._def;
+  if (!d) throw new Error("asmzod: encode() requires a schema");
+  switch (d.type) {
+    case "codec": return s.encode(v);
+    case "pipe": return _encode(d.in, _encode(d.out, v));
+    case "transform": case "refine": case "superrefine": return s.parse(v);
+    case "lazy": return _encode(s.schema, v);
+    case "union": case "discunion": case "discriminatedUnion": case "xor": {
+      // map construction surfaces schema errors (duplicate tags) even in the
+      // backward direction, matching zod
+      s.discMap?.();
+      for (const o of d.options ?? []) {
+        try { return _encode(o, v); } catch { /* next */ }
+      }
+      throw new ZodError([{ code: "invalid_union", errors: [], path: [], message: "Invalid input" } as any]);
+    }
+    case "intersect": {
+      const m = _mergeValues(_encode(d.left, v), _encode(d.right, v));
+      if (!m.valid) throw new Error(`Unmergable intersection result at "${m.mergeErrorPath.join(".")}"`);
+      return m.data;
+    }
+    case "object": {
+      const out: any = {};
+      for (const k of _shapeKeys(d.shape)) {
+        const ev = _encode(d.shape[k], (v as any)?.[k]);
+        if (ev !== undefined || (v != null && typeof v === "object" && k in v)) out[k] = ev;
+      }
+      if (d.mode === "passthrough" && v != null && typeof v === "object")
+        for (const k of Object.keys(v)) if (!Object.prototype.hasOwnProperty.call(d.shape, k)) out[k] = v[k];
+      return out;
+    }
+    default: {
+      const inner = d.inner ?? d.innerType;
+      if (inner) return _encode(inner, v);
+      const r = s.safeParse(v);
+      if (!r.success) throw r.error;
+      return r.data;
+    }
+  }
+}
+
 function isAborted(issues: any[]): boolean {
   return issues.some((i) => i._nc || !CONTINUING_CODES.has(i.code));
 }
@@ -1250,33 +1469,60 @@ export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output
 
 export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
-  get options(): T { return [...this._def.optionsMap.values()] as T; }
+  get options(): T { return this._def.options as T; }
+  get def(): any { return this._def; }
+  // discriminator value -> option map, built lazily on first use — recursive
+  // options resolve their getters only once the union exists
+  discMap(): Map<any, any> {
+    const bag = this._zod.bag;
+    return (bag.optionsMap ??= _discMap(this._def));
+  }
+  get _values(): Set<any> {
+    const map = this.discMap();
+    return new Set([...map.keys()].filter((k) => map.get(k) !== null));
+  }
 
-  override parse(data: unknown, params?: any): T[number]["_output"] {
-    const r = this._run(data);
-    if (!r.ok) { this._attachFields(r.issues); applyErrorMaps(r.issues, params?.error ?? params); throw new ZodError(r.issues); }
-    return r.value as T[number]["_output"];
-  }
-  override safeParse(data: unknown, params?: any): SafeParseResult<T[number]["_output"]> {
-    const r = this._run(data);
-    if (r.ok) return { success: true, data: r.value as T[number]["_output"] };
-    applyErrorMaps(r.issues, params?.error ?? params);
-    this._attachFields(r.issues);
-    return { success: false, error: new ZodError(r.issues) };
-  }
-  private _attachFields(issues: ZodIssue[]): void {
-    for (const i of issues) {
-      if (i.code === "invalid_union" && (i as any).errors === undefined) {
-        (i as any).errors = [];
-        (i as any).note = "No matching discriminator";
-        (i as any).discriminator = this._def.disc;
-        const opts = [...this._def.optionsMap.keys()];
-        (i as any).options = opts;
-        if (i.message === "Invalid input")
-          i.message = `Invalid discriminator value. Expected ${opts.map((o) => `'${o}'`).join(" | ")}`;
-      }
+  protected override _run(data: unknown) {
+    if (data === null || typeof data !== "object" || Array.isArray(data))
+      return { ok: false as const, issues: [typeIssue("object", data)], aborted: true };
+    const disc = this._def.discriminator;
+    const map = this.discMap();
+    const opt = map.get((data as any)[disc]);
+    if (opt) return opt._run(data);
+    // explicit opt-in union matching; also the encode direction in zod
+    if (this._def.unionFallback) {
+      const u = (this._def._uf ??= new ZodUnion({ type: "union", options: this._def.options }));
+      return (u as any)._run(data);
     }
+    const opts = [...map.keys()].filter((k) => map.get(k) !== null);
+    return {
+      ok: false as const,
+      issues: [{
+        code: "invalid_union", errors: [], note: "No matching discriminator",
+        discriminator: disc, options: opts, path: [disc],
+        message: `Invalid discriminator value. Expected ${opts.map((o) => `'${o}'`).join(" | ")}`,
+      }] as any[],
+    };
   }
+}
+
+// propValues-based lookup map — duplicate non-undefined tags are a hard error;
+// colliding undefined tags poison the slot so no member can reclaim it
+function _discMap(def: any): Map<any, any> {
+  const map = new Map<any, any>();
+  const disc = def.discriminator;
+  (def.options as any[]).forEach((option, i) => {
+    const values = _zodPropValues(option)?.[disc];
+    if (!values || values.size === 0)
+      throw new Error(`Invalid discriminated union option at index "${i}"`);
+    for (const v of values) {
+      if (map.has(v)) {
+        if (v !== undefined) throw new Error(`Duplicate discriminator value "${String(v)}"`);
+        map.set(v, null);
+      } else map.set(v, option);
+    }
+  });
+  return map;
 }
 
 // zod's mergeValues: shared object keys merge recursively, arrays zip,

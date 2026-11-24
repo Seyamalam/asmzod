@@ -7,7 +7,7 @@ import {
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec,
-  ZodAlgoFormat, luhnCheck, ibanCheck,
+  ZodAlgoFormat, luhnCheck, ibanCheck, _encode,
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
@@ -136,15 +136,18 @@ export const z = {
   union: <T extends ZodTypeAny[]>(options: [...T], params?: any) =>
     new ZodUnion<T>({ type: "union", options, error: params }),
   /** Union of objects routed by a shared discriminator key. */
-  discriminatedUnion: <T extends ZodTypeAny[]>(disc: string, options: [...T]) => {
-    const optionsMap = new Map<string, ZodTypeAny>();
-    for (const o of options) {
-      const lit = o._def?.shape?.[disc]?._def?.value;
-      if (lit === undefined)
-        throw new Error(`asmzod: discriminatedUnion option missing literal "${disc}"`);
-      optionsMap.set(String(lit), o);
+  discriminatedUnion: <T extends ZodTypeAny[]>(disc: string, options: [...T], params?: any) => {
+    // eager rawShape check: options whose shape enumerates without invoking
+    // getters must own the discriminator — pipes/lazies defer to the map build
+    for (let i = 0; i < options.length; i++) {
+      const shape = (options[i] as any)._def?.shape;
+      if (shape !== undefined && !Object.prototype.hasOwnProperty.call(shape, disc))
+        throw new Error(`Invalid discriminated union option at index "${i}"`);
     }
-    return new ZodDiscriminatedUnion<T>({ type: "discunion", disc, optionsMap });
+    return new ZodDiscriminatedUnion<T>({
+      type: "discunion", discriminator: disc, options,
+      unionFallback: params?.unionFallback === true, error: params,
+    });
   },
   /** Value must satisfy both schemas. */
   intersection: <A extends ZodTypeAny, B extends ZodTypeAny>(l: A, r: B) =>
@@ -349,15 +352,9 @@ export const z = {
   decodeAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parseAsync(data),
   safeDecode: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
   safeDecodeAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
-  /** codec encode — runs the codec's reverseTransform */
-  encode: <T extends ZodTypeAny>(s: T, data: unknown): unknown => {
-    if (typeof (s as any).encode === "function") return (s as any).encode(data);
-    throw new Error("asmzod: encode() requires a codec schema");
-  },
-  encodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown): Promise<unknown> => {
-    if (typeof (s as any).encode === "function") return (s as any).encode(data);
-    throw new Error("asmzod: encodeAsync() requires a codec schema");
-  },
+  /** codec encode — backward-direction traversal over the schema graph */
+  encode: <T extends ZodTypeAny>(s: T, data: unknown): unknown => _encode(s, data),
+  encodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown): Promise<unknown> => _encode(s, data),
   safeEncode: <T extends ZodTypeAny>(s: T, data: unknown) => {
     try {
       if (typeof (s as any).encode === "function") return { success: true, data: (s as any).encode(data) };
@@ -588,11 +585,13 @@ export const z = {
     return new ZodCodec({ ...d, in: d.out, out: d.in, transform: d.reverseTransform, reverseTransform: d.transform });
   },
   /** find the discriminated-union option matching a discriminator value */
-  getDiscriminatedOption: (options: ZodTypeAny[], disc: string, value: unknown): ZodTypeAny | undefined =>
-    options.find((o) => {
-      const lit = (o as any)._def?.shape?.[disc]?._def?.value;
-      return lit === value;
-    }),
+  getDiscriminatedOption: (schema: any, value: unknown): ZodTypeAny | undefined => {
+    const map = schema?.discMap?.() ?? schema?._def?.optionsMap;
+    if (!map) throw new Error("asmzod: getDiscriminatedOption requires a discriminated union");
+    const o = map.get(value);
+    if (o === null) throw new Error(`Ambiguous discriminator value "${String(value as any)}"`);
+    return o ?? undefined;
+  },
   /** wrap an arbitrary parse fn as a schema */
   withParser: <T>(fn: (data: unknown) => T): ZodType<T, unknown> => {
     const inner = z.custom<T>((v) => (fn(v), true));

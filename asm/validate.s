@@ -2435,6 +2435,11 @@ _az_strtoi:
     ldr x0, [sp, #96]           // keyptr
     ldr x1, [sp, #88]           // keylen
     bl _az_path_push_key
+    // snapshot the issue region — an absent omittable field's failure gets
+    // swallowed whole (issues rolled back, value dropped), like zod
+    str x21, [sp, #208]
+    ldr x9, [x22]
+    str x9, [sp, #216]
     ldr x0, [sp, #112]
     ldr x1, [sp, #144]
     bl _az_validate
@@ -2477,6 +2482,16 @@ _az_strtoi:
 .Lob_fbad:
     cmp x0, #-2
     b.ne .Lv_ret
+    // absent + optin flag -> best-effort run: swallow issues + drop the field
+    ldr x9, [sp, #120]
+    cbnz x9, .Lob_fmark
+    ldr x9, [sp, #176]
+    cbz x9, .Lob_fmark
+    ldr x21, [sp, #208]        // restore issue cursor
+    ldr x9, [sp, #216]
+    str x9, [x22]              // restore issue count
+    b .Lob_fnext
+.Lob_fmark:
     mov x9, #1
     str x9, [sp, #56]
     ldp x2, x3, [sp, #152]

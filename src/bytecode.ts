@@ -149,6 +149,21 @@ function emitNumChecks(w: BW, checks: any[], isBig: boolean, hosts: HostTable) {
   }
 }
 
+// schemas currently on the emit stack — re-entering one means the graph is
+// recursive (getter options, direct self-reference without z.lazy); defer it
+// through the lazy-ref op so runtime resolves the schema's own compiled blob
+const emitStack = new Set<SchemaLike>();
+const refThunks = new Map<SchemaLike, () => Uint8Array>();
+function refThunk(s: SchemaLike): () => Uint8Array {
+  let th = refThunks.get(s);
+  if (!th) {
+    let blob: Uint8Array | null = null;
+    th = () => (blob ??= compile(s).blob);
+    refThunks.set(s, th);
+  }
+  return th;
+}
+
 function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): void {
   const d = s._def;
   // schema-level {error}/message param -> 0x2A msgwrap node: the engine
@@ -163,7 +178,17 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): voi
     w.patchField(f, at);
     return;
   }
-  emitNode(w, s, hosts, unions);
+  if (emitStack.has(s)) {
+    w.u8(0x1a);
+    w.u64(regId(reg.lazy, refThunk(s)));
+    return;
+  }
+  emitStack.add(s);
+  try {
+    emitNode(w, s, hosts, unions);
+  } finally {
+    emitStack.delete(s);
+  }
 }
 
 function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): void {
@@ -235,9 +260,13 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
 
     case "discunion": {
       w.u8(0x08);
-      const db = enc.encode(d.disc);
+      const disc = d.discriminator ?? d.disc;
+      const db = enc.encode(disc);
       w.u64(db.length); w.raw(db);
-      const entries = [...d.optionsMap.entries()];
+      const map: Map<any, any> = (s as any).discMap?.() ?? d.optionsMap;
+      // ambiguous slots hold null — no option can claim that value, so the
+      // compiled table just omits them and lookup falls to the no-match path
+      const entries = [...map.entries()].filter(([, o]) => o != null);
       w.u64(entries.length);
       const fps: number[] = [];
       for (const [k] of entries) {
@@ -270,6 +299,10 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       return;
 
     case "enum":
+      // string members only — mixed-type enums (native numeric enums) throw so
+      // containers fall back to ZodEnum's TS-level _run with correct semantics
+      if (d.values.some((v: any) => typeof v !== "string"))
+        throw new Error(`asmzod: cannot compile schema type ${d.type}`);
       w.u8(0x0a);
       w.u64(d.values.length);
       for (const v of d.values) {

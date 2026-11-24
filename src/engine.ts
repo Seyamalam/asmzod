@@ -319,13 +319,17 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
         // absent: exactOptional skips the field entirely
         if (!present && f.opt === 2) continue;
         const raw = obj[f.name];
+        const mark = c.issues.length;
         const res = atKey(c, f.name, () => tryValidate(new R(r.b, f.pos), raw, c));
+        // absent + optin -> the inner run is best-effort: zod swallows its
+        // failure (issues and value alike) and drops the key
+        if (!present && f.opt === 1 && !res.ok) { c.issues.length = mark; continue; }
         // absent + required but inner accepted undefined -> nonoptional issue
         if (!present && f.opt === 0 && res.ok) {
           atKey(c, f.name, () => pushIssue(c, "invalid_type", { expected: "nonoptional", received: "undefined" }));
           continue;
         }
-        if (res.ok) out[f.name] = res.value;
+        if (res.ok && (present || res.value !== undefined)) out[f.name] = res.value;
       }
       const extra = Object.keys(obj).filter((k) => !consumed.has(k));
       if (mode === 1 && extra.length) {
