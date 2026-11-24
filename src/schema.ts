@@ -28,11 +28,12 @@ export abstract class ZodType<Output = unknown, Input = Output> {
 
   protected _run(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const c = this._compile();
-    const hosts: HostTable = [...c.hosts];
     // direct N-API validation walks the JS value natively (no encode/decode);
     // null -> schema needs the encoded engine path (callbacks, unions, ...)
-    const nr = napiBackend.parse(c.blob, data, hosts, c.cbUnsafe);
-    const r = nr ?? engineParse(c.blob, encodeValue(data, hosts), hosts);
+    const nr = napiBackend.parse(c.blob, data, c.hosts, c.cbUnsafe);
+    // the encoded engine needs its own hosts array — encodeValue appends
+    const hosts: HostTable | undefined = nr === null ? [...c.hosts] : undefined;
+    const r = nr ?? engineParse(c.blob, encodeValue(data, hosts!), hosts!);
     // `_u`-tagged invalid_union issues (union nodes reached inside containers)
     // get their per-option errors by re-running the registered options on the
     // value at the issue's path

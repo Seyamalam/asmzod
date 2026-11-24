@@ -180,25 +180,8 @@ _aznapi_parse:
     b.eq .Lnparse_fail
     b .Lnparse_undef          // -10 fallback / -4 enospc
 .Lnparse_ok:
-    // {ok:true, value:out}
-    mov x0, x26
-    add x1, sp, #144          // &obj
-    bl _napi_create_object
-    mov x0, x26
-    mov x1, #1
-    add x2, sp, #152          // &true
-    bl _napi_get_boolean
-    ldr x1, [sp, #144]
-    AZ_ADR x2, .Lnm_ok
-    ldr x3, [sp, #152]
-    mov x0, x26
-    bl _napi_set_named_property
-    ldr x1, [sp, #144]
-    AZ_ADR x2, .Lnm_value
-    ldr x3, [sp, #136]
-    mov x0, x26
-    bl _napi_set_named_property
-    ldr x0, [sp, #144]
+    // success returns the output value bare — no {ok,value} wrapper
+    ldr x0, [sp, #136]
     b .Lnparse_ret
 .Lnparse_fail:
     // {ok:false, issues:[...]} — build natively when all fields convert
@@ -214,6 +197,8 @@ _aznapi_parse:
     ldr x3, [sp, #152]
     mov x0, x26
     bl _napi_set_named_property
+    ldr x0, [sp, #144]
+    bl _azn_mark_res
     ldr x9, [x22]              // issue count
     str x9, [sp, #160]
     add x9, x22, #3104
@@ -288,6 +273,8 @@ _aznapi_parse:
     ldr x3, [sp, #152]
     mov x0, x26
     bl _napi_set_named_property
+    ldr x0, [sp, #144]
+    bl _azn_mark_res
     ldr x0, [sp, #104]
     scvtf d0, x0
     mov x0, x26
@@ -312,6 +299,7 @@ _aznapi_parse:
 .Lnm_err:   .ascii "err\0"
 .Lnm_issues: .ascii "issues\0"
 .Lnm_code:  .ascii "code\0"
+.Lnm_azres: .ascii "~azres\0"
     .p2align 2
 
 // ================= aznapi_run(x0=node, x1=val, x2=outslot) =================
@@ -420,6 +408,25 @@ _azn_typeof:
     bl _napi_typeof
     ldr w0, [sp, #16]
     ldp x29, x30, [sp], #32
+    ret
+
+// _azn_mark_res(x0=obj): obj[Symbol.for("azres")]=true — distinguishes result
+// wrappers from a parsed output that happens to be an object carrying `ok`.
+_azn_mark_res:
+    stp x29, x30, [sp, #-64]!
+    mov x29, sp
+    str x0, [sp, #16]          // obj
+    mov x0, x26
+    mov x1, #1
+    add x2, sp, #24
+    bl _napi_get_boolean
+    mov x0, x26
+    ldr x1, [sp, #16]
+    AZ_ADR x2, .Lnm_azres
+    ldr x3, [sp, #24]
+    bl _napi_set_named_property
+.Lmr_ret:
+    ldp x29, x30, [sp], #64
     ret
 
 // _azn_getstr(x0=val) -> [x20..] utf8 bytes; x0=len or -1 if >cap

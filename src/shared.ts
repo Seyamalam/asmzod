@@ -160,7 +160,8 @@ export function defaultMessage(i: any): string {
 
 export function normalizeIssue(i: any): any {
   if (i == null || typeof i !== "object") return i;
-  const out: any = { ...i };
+  // engine issues are fresh objects — mutate in place (spread was ~40% of cost)
+  const out: any = i;
   switch (i.code) {
     case "invalid_literal":
       out.code = "invalid_value";

@@ -38,6 +38,7 @@ export function initNapi(cbTable: ArrayBuffer): boolean {
 
 // -> ParseResult, or null when the schema needs the FFI path (callbacks,
 // unions, records, transforms, ... anything aznapi_run doesn't cover).
+const RES = "~azres" as const;
 let napiOff: boolean | undefined;
 export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsafe?: boolean): ParseResult | null {
   const a = loadNapi();
@@ -53,8 +54,11 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
     if (!cbInit) return null;
   }
   const r = a.parse(blob, value);
-  if (r == null || r.ok === null) return null;
-  if (r.ok === true) return { ok: true, value: r.value };
+  // success returns the raw output value; failure/fallback objects carry
+  // the ~azres marker so an object result containing `ok` can't collide.
+  const res = (r as any)?.[RES];
+  if (res !== true) return { ok: true, value: r };
+  if ((r as any).ok === null) return null;
   // fast path: addon built the issue array natively
   if (r.issues !== undefined)
     return { ok: false, issues: finishIssues((r.issues as any[]).map(normalizeIssue)) };
