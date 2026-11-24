@@ -66,6 +66,8 @@ _az_run_strchecks:
     b.eq .Lsc_ds
     cmp w9, #0x16
     b.eq .Lsc_ts
+    cmp w9, #0x18
+    b.eq .Lsc_hash
     b .Lsc_next0                 // unknown check: skip, advance 0 params
 
 // ---- size checks (MIN=1 MAX=2 LENGTH=3), param u64 ----
@@ -612,6 +614,28 @@ _az_run_strchecks:
     add x27, x27, #8
     b .Lsc_cont
 
+// ---- hash (param: u64 bodylen + u8 alpha + u8 padlen + u64 fmtlen + fmt) ----
+.Lsc_hash:
+    ldr x12, [sp, #72]
+    ldr x2, [x12]                // bodylen
+    ldrb w3, [x12, #8]           // alpha
+    ldrb w4, [x12, #9]           // padlen
+    ldp x0, x1, [sp, #32]
+    bl _az_is_hash
+    cbnz w0, .Lsc_nexth
+    ldr x12, [sp, #72]
+    ldr x10, [x12, #10]          // fmtlen
+    add x9, x12, #18             // fmtptr -> vname/vlen ("Invalid {fmt}" via FORMAT_MSGS)
+    mov x11, #0
+    mov x12, #0
+    b .Lsc_fmt_fail
+.Lsc_nexth:
+    ldr x12, [sp, #72]
+    ldr x13, [x12, #10]
+    add x27, x12, x13
+    add x27, x27, #18
+    b .Lsc_cont
+
 // advance: x9 = param size (or .Lsc_nextv recomputes for var-len)
 .Lsc_next:
     ldr x12, [sp, #72]
@@ -1044,6 +1068,8 @@ _az_run_bigintchecks:
     b.ls .Lbc_cmp
     cmp w9, #7
     b.eq .Lbc_mult
+    cmp w9, #0x10
+    b.hs .Lbc_bail           // hostref-bound record -> portable engine
     b .Lbc_next0
 .Lbc_cmp:
     cmp w9, #1
@@ -1200,6 +1226,9 @@ _az_run_bigintchecks:
     b .Lbc_retx
 .Lbc_isbad:
     mov x0, #-2
+    b .Lbc_retx
+.Lbc_bail:
+    mov x0, #-10
 .Lbc_retx:
     ldp x27, x28, [sp, #16]
     ldp x29, x30, [sp]

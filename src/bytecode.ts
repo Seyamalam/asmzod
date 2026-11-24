@@ -1,5 +1,5 @@
 // bytecode.ts — schema -> engine blob compiler (see FORMAT.md)
-import { BW, u64, str, encodeValue, type HostTable } from "./codec.ts";
+import { BW, u64, str, encodeValue, hostIndex, type HostTable } from "./codec.ts";
 import { reg, regId } from "./ffi.ts";
 import { paramMsg } from "./shared.ts";
 
@@ -22,6 +22,7 @@ const STR_CHECK: Record<string, number> = {
   ipv4: 0x0d, ipv6: 0x0e, ulid: 0x0f, nanoid: 0x10,
   cuid2: 0x11, base64: 0x12, hex: 0x13,
   datetime: 0x14, datestr: 0x15, timestr: 0x16,
+  hash: 0x18,
 };
 
 const NUM_CHECK: Record<string, number> = {
@@ -85,12 +86,17 @@ function emitStrChecks(w: BW, checks: any[]) {
         const fmt = enc.encode(c.format ?? "");
         w.u64(fmt.length); w.raw(fmt); break;
       }
+      case "hash": {
+        w.u64(BigInt(c.body)); w.u8(c.alpha); w.u8(c.pad);
+        const f = enc.encode(c.format);
+        w.u64(f.length); w.raw(f); break;
+      }
       default: break; // no params
     }
   }
 }
 
-function emitNumChecks(w: BW, checks: any[], isBig: boolean) {
+function emitNumChecks(w: BW, checks: any[], isBig: boolean, hosts: HostTable) {
   // fuse adjacent lower+upper bound pairs into one RANGE record
   // ([9][lo f64][hi f64][flags]) when neither carries a custom message.
   // The engine still checks both sides independently (NaN or an inverted
@@ -121,13 +127,25 @@ function emitNumChecks(w: BW, checks: any[], isBig: boolean) {
     const c = r.c;
     const code = NUM_CHECK[c.kind];
     if (code === undefined) throw new Error(`asmzod: unsupported number check ${c.kind}`);
-    w.u8(code);
-    checkMsg(w, c.message);
     if (c.kind === "gt" || c.kind === "gte" || c.kind === "min" ||
         c.kind === "lt" || c.kind === "lte" || c.kind === "max" ||
         c.kind === "multipleOf") {
-      if (isBig) w.i64(BigInt(c.value)); else w.f64(c.value);
+      const bv = isBig ? BigInt(c.value) : undefined;
+      if (bv !== undefined && BigInt.asIntN(64, bv) !== bv) {
+        // bound doesn't fit i64: code|0x10 + u64 host index to the real
+        // bigint — native engines bail to portable for these records
+        w.u8(code | 0x10);
+        checkMsg(w, c.message);
+        w.u64(hostIndex(hosts, bv));
+        continue;
+      }
+      w.u8(code);
+      checkMsg(w, c.message);
+      if (isBig) w.i64(bv!); else w.f64(c.value);
+      continue;
     }
+    w.u8(code);
+    checkMsg(w, c.message);
   }
 }
 
@@ -152,9 +170,9 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
   const d = s._def;
   switch (d.type) {
     case "string": w.u8(0x01); emitStrChecks(w, d.checks); return;
-    case "number": w.u8(0x02); emitNumChecks(w, d.checks, false); return;
+    case "number": w.u8(0x02); emitNumChecks(w, d.checks, false, hosts); return;
     case "boolean": w.u8(0x03); return;
-    case "bigint": w.u8(0x04); emitNumChecks(w, d.checks, true); return;
+    case "bigint": w.u8(0x04); emitNumChecks(w, d.checks, true, hosts); return;
 
     case "object": {
       w.u8(0x05);

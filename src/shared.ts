@@ -66,6 +66,11 @@ const FORMAT_MSGS: Record<string, string> = {
   datetime: "Invalid ISO datetime", date: "Invalid ISO date", time: "Invalid ISO time",
   duration: "Invalid ISO duration", lowercase: "Invalid lowercase",
   uppercase: "Invalid uppercase", regex: "Invalid string: must match pattern",
+  md5_hex: "Invalid md5_hex", md5_base64: "Invalid md5_base64", md5_base64url: "Invalid md5_base64url",
+  sha1_hex: "Invalid sha1_hex", sha1_base64: "Invalid sha1_base64", sha1_base64url: "Invalid sha1_base64url",
+  sha256_hex: "Invalid sha256_hex", sha256_base64: "Invalid sha256_base64", sha256_base64url: "Invalid sha256_base64url",
+  sha384_hex: "Invalid sha384_hex", sha384_base64: "Invalid sha384_base64", sha384_base64url: "Invalid sha384_base64url",
+  sha512_hex: "Invalid sha512_hex", sha512_base64: "Invalid sha512_base64", sha512_base64url: "Invalid sha512_base64url",
   template_literal: "Invalid input",
 };
 

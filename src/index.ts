@@ -153,6 +153,17 @@ export const z = {
   hex: (p?: string) => new ZodString().hex(p),
   xid: (p?: string) => new ZodString().xid(p),
   ksuid: (p?: string) => new ZodString().ksuid(p),
+  // [bodylen, alpha 0hex/1b64/2b64url, padlen] per zod4 fixedBase64 tables
+  hash: (alg: string, params?: any) => {
+    const enc = (typeof params === "object" && params !== null ? params.enc : undefined) ?? "hex";
+    const fmt = `${alg}_${enc}`;
+    const t = (HASH_LENS as Record<string, [number, number, number]>)[fmt];
+    if (!t) throw new Error(`Unrecognized hash format: ${fmt}`);
+    return (new ZodString() as any)._check({ kind: "hash", body: t[0], alpha: t[1], pad: t[2], format: fmt, message: params });
+  },
+  uint64: (params?: any) =>
+    new ZodBigInt({ type: "bigint", checks: [], error: params })
+      .min(0n).max(18446744073709551615n),
   e164: (p?: string) => new ZodString().e164(p),
   duration: (p?: string) => new ZodString().duration(p),
   ipv4: (p?: string) => new ZodString().ipv4(p),
@@ -210,6 +221,14 @@ export const z = {
 
 // attach the real class
 import { ZodError } from "./error.ts";
+
+const HASH_LENS = {
+  md5_hex: [32, 0, 0], md5_base64: [22, 1, 2], md5_base64url: [22, 2, 0],
+  sha1_hex: [40, 0, 0], sha1_base64: [27, 1, 1], sha1_base64url: [27, 2, 0],
+  sha256_hex: [64, 0, 0], sha256_base64: [43, 1, 1], sha256_base64url: [43, 2, 0],
+  sha384_hex: [96, 0, 0], sha384_base64: [64, 1, 0], sha384_base64url: [64, 2, 0],
+  sha512_hex: [128, 0, 0], sha512_base64: [86, 1, 2], sha512_base64url: [86, 2, 0],
+} as const;
 (z as any).ZodError = ZodError;
 
 export default z;

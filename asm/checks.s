@@ -907,77 +907,257 @@ _az_is_ipv4:
     mov w0, #0
     ret
 
-// ---------- az_is_ipv6: simplified — hex groups + ':' , '::' once ----------
+// ---------- az_is_ipv6: WHATWG-style parser ----------
+// alphabet [0-9a-fA-F:.], at most one "::", pieces 1-4 hex digits,
+// optional trailing IPv4 piece (counts as 2 groups). no "::" -> exactly
+// 8 groups; "::" -> fewer than 8 (it must compress at least one).
     .globl _az_is_ipv6
     AZ_HIDDEN _az_is_ipv6
 _az_is_ipv6:
-    cbz x1, .Lip6_no
+    stp x29, x30, [sp, #-48]!
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    cbz x1, .L6no
     mov x9, #0               // i
-    mov x10, #0              // groups
-    mov x11, #0              // hexdigits in cur group
-    mov x12, #0              // seen '::'
-    mov x13, #0              // prev was ':'
-.Lip6_l:
+    mov x10, #-1             // "::" index
+.L6a:
+    ldrb w11, [x0, x9]
+    cmp w11, #':'
+    b.eq .L6a_col
+    cmp w11, #'.'
+    b.eq .L6a_next
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.ls .L6a_next
+    orr w12, w11, #0x20
+    sub w12, w12, #'a'
+    cmp w12, #5
+    b.hi .L6no
+    b .L6a_next
+.L6a_col:
+    add w12, w9, #1
+    cmp w12, w1
+    b.hs .L6a_next
+    ldrb w13, [x0, x12]
+    cmp w13, #':'
+    b.ne .L6a_next
+    cmn x10, #1
+    b.ne .L6no               // second "::" -> invalid
+    mov x10, x9
+    add x9, x9, #1           // skip the pair's second ':'
+.L6a_next:
+    add x9, x9, #1
     cmp x9, x1
-    b.hs .Lip6_end
-    ldrb w14, [x0, x9]
-    cmp w14, #':'
-    b.eq .Lip6_col
-    // hex digit
-    mov w15, #0
-    cmp w14, #'0'
-    b.lo .Lip6_c
-    cmp w14, #'9'
-    b.ls .Lip6_h
-.Lip6_c:
-    cmp w14, #'A'
-    b.lo .Lip6_c2
-    cmp w14, #'F'
-    b.ls .Lip6_h
-.Lip6_c2:
-    cmp w14, #'a'
-    b.lo .Lip6_no
-    cmp w14, #'f'
-    b.hi .Lip6_no
-.Lip6_h:
-    add x11, x11, #1
-    cmp x11, #4
-    b.hi .Lip6_no
-    mov x13, #0
-    add x9, x9, #1
-    b .Lip6_l
-.Lip6_col:
-    cbz x11, .Lip6_colz      // group empty -> maybe '::'
+    b.lo .L6a
+    cmn x10, #1
+    b.ne .L6split
+    mov x2, #1               // whole string is the last part
+    bl .L6count
+    cmp x0, #8
+    b.eq .L6yes
+    b .L6no
+.L6split:
+    mov x19, x0
+    mov x20, x1
+    mov x21, x10             // dc index
+    mov x1, x10              // left = [0, dc)
+    mov x2, #0               // not the final part
+    bl .L6count
+    cmn x0, #1
+    b.eq .L6no
+    mov x22, x0              // ln
+    add x9, x21, #2
+    add x0, x19, x9          // right ptr
+    sub x1, x20, x9          // right len
+    mov x2, #1
+    bl .L6count
+    cmn x0, #1
+    b.eq .L6no
+    add x0, x0, x22
+    cmp x0, #8
+    b.lo .L6yes
+.L6no:
+    mov w0, #0
+    b .L6out
+.L6yes:
+    mov w0, #1
+.L6out:
+    ldp x19, x20, [sp, #16]
+    ldp x21, x22, [sp, #32]
+    ldp x29, x30, [sp], #48
+    ret
+
+// .L6count(x0=ptr, x1=len, x2=isLast) -> x0 = group count or -1
+// groups are 1-4 hex digits (+1); a piece containing '.' must be the
+// last group of a last part and parse as IPv4 (+2). empty -> 0.
+.L6count:
+    cbz x1, .L6c_ret0
+    mov x9, #0               // group start
+    mov x14, #0              // total
+.L6c_grp:
+    mov x10, x9              // scan cursor
+    mov x16, #-1             // dot position inside piece
+.L6c_scan:
+    cmp x10, x1
+    b.hs .L6c_gend
+    ldrb w11, [x0, x10]
+    cmp w11, #':'
+    b.eq .L6c_gend
+    cmp w11, #'.'
+    b.ne .L6c_sn
+    mov x16, x10
+.L6c_sn:
     add x10, x10, #1
-    mov x11, #0
-    mov x13, #1
+    b .L6c_scan
+.L6c_gend:
+    sub x11, x10, x9         // glen
+    cbz x11, .L6c_fail       // empty group
+    cmn x16, #1
+    b.ne .L6c_v4
+    cmp x11, #4
+    b.hi .L6c_fail           // hex piece > 4 digits
+    mov x12, x9
+.L6c_hx:
+    ldrb w13, [x0, x12]
+    sub w15, w13, #'0'
+    cmp w15, #9
+    b.ls .L6c_hxn
+    orr w15, w13, #0x20
+    sub w15, w15, #'a'
+    cmp w15, #5
+    b.hi .L6c_fail
+.L6c_hxn:
+    add x12, x12, #1
+    cmp x12, x10
+    b.lo .L6c_hx
+    add x14, x14, #1
+    b .L6c_gn
+.L6c_v4:
+    cmp x10, x1
+    b.ne .L6c_fail           // dotted piece must be the last group
+    cbz x2, .L6c_fail        // and only in the final part
+    mov x12, x9              // pos
+    mov x13, #0              // dot count
+    mov w15, #0              // octet value
+    mov x17, #0              // octet digits
+.L6c_v4l:
+    cmp x12, x10
+    b.hs .L6c_v4e
+    ldrb w11, [x0, x12]
+    cmp w11, #'.'
+    b.eq .L6c_v4dot
+    sub w11, w11, #'0'
+    cmp w11, #9
+    b.hi .L6c_fail
+    cbnz x17, .L6c_v4dig
+    cmp w11, #0
+    cset x2, eq              // leading zero flag for this octet
+    b .L6c_v4acc
+.L6c_v4dig:
+    cbnz x2, .L6c_fail       // leading zero + more digits (WHATWG)
+.L6c_v4acc:
+    mov w16, #10
+    mul w15, w15, w16
+    add w15, w15, w11
+    add x17, x17, #1
+    cmp x17, #3
+    b.hi .L6c_fail           // octet > 3 digits
+    add x12, x12, #1
+    b .L6c_v4l
+.L6c_v4dot:
+    cbz x17, .L6c_fail       // empty octet
+    cmp w15, #255
+    b.hi .L6c_fail
+    mov w15, #0
+    mov x17, #0
+    add x13, x13, #1
+    cmp x13, #3
+    b.hi .L6c_fail           // more than 3 dots
+    add x12, x12, #1
+    b .L6c_v4l
+.L6c_v4e:
+    cbz x17, .L6c_fail       // trailing octet empty
+    cmp w15, #255
+    b.hi .L6c_fail
+    cmp x13, #3
+    b.ne .L6c_fail           // need exactly 3 dots
+    add x14, x14, #2         // IPv4 tail counts as two groups
+.L6c_gn:
+    cmp x10, x1
+    b.hs .L6c_done
+    add x9, x10, #1          // skip ':'
+    b .L6c_grp
+.L6c_done:
+    mov x0, x14
+    ret
+.L6c_ret0:
+    mov x0, #0
+    ret
+.L6c_fail:
+    mov x0, #-1
+    ret
+
+// ---------- az_is_hash: fixed-length hash digest ----------
+// (x0=str, x1=len, x2=bodylen, w3=alpha 0hex/1b64/2b64url, x4=padlen) -> w0
+// exact length bodylen+padlen; pad tail is '=' x padlen; body in alphabet
+    .globl _az_is_hash
+    AZ_HIDDEN _az_is_hash
+_az_is_hash:
+    add x9, x2, x4
+    cmp x1, x9
+    b.ne .Lhz_no
+    mov x10, x1
+.Lhz_pad:
+    cbz x4, .Lhz_body
+    sub x4, x4, #1
+    sub x10, x10, #1
+    ldrb w11, [x0, x10]
+    cmp w11, #'='
+    b.ne .Lhz_no
+    b .Lhz_pad
+.Lhz_body:
+    mov x9, #0
+.Lhz_l:
+    cmp x9, x2
+    b.hs .Lhz_yes
+    ldrb w11, [x0, x9]
+    cmp w3, #0
+    b.eq .Lhz_hex
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.ls .Lhz_ok
+    orr w12, w11, #0x20
+    sub w12, w12, #'a'
+    cmp w12, #25
+    b.ls .Lhz_ok
+    cmp w3, #1
+    b.eq .Lhz_b64x
+    cmp w11, #'-'
+    b.eq .Lhz_ok
+    cmp w11, #'_'
+    b.eq .Lhz_ok
+    b .Lhz_no
+.Lhz_b64x:
+    cmp w11, #'+'
+    b.eq .Lhz_ok
+    cmp w11, #'/'
+    b.eq .Lhz_ok
+    b .Lhz_no
+.Lhz_hex:
+    sub w12, w11, #'0'
+    cmp w12, #9
+    b.ls .Lhz_ok
+    orr w12, w11, #0x20
+    sub w12, w12, #'a'
+    cmp w12, #5
+    b.hi .Lhz_no
+.Lhz_ok:
     add x9, x9, #1
-    b .Lip6_l
-.Lip6_colz:
-    // empty group -> must be '::' (prev was ':' or start)
-    cbnz x12, .Lip6_no       // only one '::'
-    mov x12, #1
-    mov x13, #1
-    add x9, x9, #1
-    // skip the second ':' — handled because group count stays
-    b .Lip6_l
-.Lip6_end:
-    cbz x11, .Lip6_e_nogrp
-    add x10, x10, #1          // final pending group counts
-    b .Lip6_e_chk
-.Lip6_e_nogrp:
-    // last char was ':' -> only valid if it was the second of '::'
-    cbz x12, .Lip6_no
-.Lip6_e_chk:
-    cmp x10, #8
-    b.hi .Lip6_no
-    cbnz x12, .Lip6_yes
-    cmp x10, #8               // no '::' -> must have all 8 groups
-    b.ne .Lip6_no
-.Lip6_yes:
+    b .Lhz_l
+.Lhz_yes:
     mov w0, #1
     ret
-.Lip6_no:
+.Lhz_no:
     mov w0, #0
     ret
 

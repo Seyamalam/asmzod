@@ -135,6 +135,16 @@ function runStrChecks(r: R, v: unknown, c: Ctx): boolean {
         case 0x08: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).endsWith(s)) { fmtFail(c, "endsWith", rc.msg, { suffix: s }); fail = true; } break; }
         case 0x09: { const s = r.str(Number(r.u64())); if (isStr && !(v as string).includes(s)) { fmtFail(c, "includes", rc.msg, { includes: s }); fail = true; } break; }
         case 0x0a: { const re = reg.regex[Number(r.u64())]; const src = r.str(Number(r.u64())); if (isStr) { re.lastIndex = 0; if (!re.test(v as string)) { fmtFail(c, "regex", rc.msg, { pattern: src }); fail = true; } } break; }
+        case 0x18: {
+          const body = Number(r.u64()); const alpha = r.u8(); const pad = r.u8();
+          const fmt = r.str(Number(r.u64()));
+          const ALPHAS = ["0-9a-fA-F", "A-Za-z0-9+/", "A-Za-z0-9_-"];
+          if (isStr && !(v.length === body + pad &&
+              new RegExp(`^[${ALPHAS[alpha]}]{${body}}${"=".repeat(pad)}$`).test(v))) {
+            fmtFail(c, fmt, rc.msg); fail = true;
+          }
+          break;
+        }
         default: {
           if (isStr && !STR_FMT[rc.code]?.(v as string)) { fmtFail(c, STR_NAMES[rc.code] ?? "format", rc.msg); fail = true; }
         }
@@ -155,6 +165,7 @@ function checkParamEnd(r: R, code: number, str_: boolean): number {
     else if (code === 0x05) { r.pos += 1; }
     else if (code === 0x07 || code === 0x08 || code === 0x09) { r.pos += 8 + Number(r.u64()); }
     else if (code === 0x0a) { r.pos += 8; r.pos += 8 + Number(r.u64()); }
+    else if (code === 0x18) { r.pos += 10; r.pos += 8 + Number(r.u64()); }
   } else {
     if (code >= 0x01 && code <= 0x04 || code === 0x07) { r.pos += 8; }
   }
@@ -192,12 +203,15 @@ function runNumChecks(r: R, v: number | bigint, isBig: boolean, c: Ctx): boolean
   const n = r.u8();
   let fail = false;
   for (let i = 0; i < n; i++) {
-    const code = r.u8(); const msg = msgOf(r);
+    let code = r.u8(); const msg = msgOf(r);
+    // code|0x10: the i64 slot holds a u64 index into hosts instead — used for
+    // bigint bounds beyond i64; the bound is the real bigint
+    const bound = () => c.hosts[Number(r.u64())] as bigint;
     switch (code) {
-      case 0x01: { const p = isBig ? r.i64() : r.f64(); if (!(v > (p as any))) { sizeFail(c, "too_small", isBig ? "bigint" : "number", BigInt(p as any), false, false, msg); fail = true; } break; }
-      case 0x02: { const p = isBig ? r.i64() : r.f64(); if (!(v >= (p as any))) { sizeFail(c, "too_small", isBig ? "bigint" : "number", BigInt(p as any), true, false, msg); fail = true; } break; }
-      case 0x03: { const p = isBig ? r.i64() : r.f64(); if (!(v < (p as any))) { sizeFail(c, "too_big", isBig ? "bigint" : "number", BigInt(p as any), false, false, msg); fail = true; } break; }
-      case 0x04: { const p = isBig ? r.i64() : r.f64(); if (!(v <= (p as any))) { sizeFail(c, "too_big", isBig ? "bigint" : "number", BigInt(p as any), true, false, msg); fail = true; } break; }
+      case 0x01: case 0x11: { const p = code === 0x11 ? bound() : isBig ? r.i64() : r.f64(); if (!(v > (p as any))) { sizeFail(c, "too_small", isBig ? "bigint" : "number", BigInt(p as any), false, false, msg); fail = true; } break; }
+      case 0x02: case 0x12: { const p = code === 0x12 ? bound() : isBig ? r.i64() : r.f64(); if (!(v >= (p as any))) { sizeFail(c, "too_small", isBig ? "bigint" : "number", BigInt(p as any), true, false, msg); fail = true; } break; }
+      case 0x03: case 0x13: { const p = code === 0x13 ? bound() : isBig ? r.i64() : r.f64(); if (!(v < (p as any))) { sizeFail(c, "too_big", isBig ? "bigint" : "number", BigInt(p as any), false, false, msg); fail = true; } break; }
+      case 0x04: case 0x14: { const p = code === 0x14 ? bound() : isBig ? r.i64() : r.f64(); if (!(v <= (p as any))) { sizeFail(c, "too_big", isBig ? "bigint" : "number", BigInt(p as any), true, false, msg); fail = true; } break; }
       case 0x05: {
         const ok = isBig || Number.isInteger(v as number);
         if (!ok) { pushIssue(c, "invalid_type", { expected: "int", received: typeName(v), ...(msg ? { message: msg } : {}) }); fail = true; }
@@ -207,7 +221,7 @@ function runNumChecks(r: R, v: number | bigint, isBig: boolean, c: Ctx): boolean
         if (!isBig && !Number.isFinite(v as number)) { pushIssue(c, "not_finite", { ...(msg ? { message: msg } : {}) }); fail = true; }
         break;
       }
-      case 0x07: { const p = isBig ? r.i64() : r.f64(); if ((v as any) % (p as any) !== (isBig ? 0n : 0)) { pushIssue(c, "not_multiple_of", { divisor: p, ...(msg ? { message: msg } : {}) }); fail = true; } break; }
+      case 0x07: case 0x17: { const p = code === 0x17 ? bound() : isBig ? r.i64() : r.f64(); if ((v as any) % (p as any) !== (isBig ? 0n : 0)) { pushIssue(c, "not_multiple_of", { divisor: p, ...(msg ? { message: msg } : {}) }); fail = true; } break; }
       case 0x08: {
         const nonInt = !isBig && !Number.isInteger(v as number);
         const ok = nonInt ? false : isBig

@@ -336,7 +336,7 @@ export class ZodString extends ZodType<string> {
   }
   base64url(message?: string) {
     return this._fmtcheck("base64url",
-      /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/, message);
+      /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/, message);
   }
   jwt(message?: string) {
     return this._fmtcheck("jwt",
