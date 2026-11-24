@@ -2353,8 +2353,10 @@ _az_strtoi:
     cmp x9, x10
     b.hs .Lob_fd
     ldr x11, [sp, #64]
-    ldr x12, [x11]              // namelen
-    add x13, x11, #8            // name
+    ldrb w16, [x11]             // optin flag (0=absent->nonoptional issue)
+    str x16, [sp, #176]
+    ldr x12, [x11, #1]          // namelen
+    add x13, x11, #9            // name
     add x14, x13, x12           // off addr
     stp x12, x13, [sp, #88]     // 88=len 96=ptr? store len@88 ptr@96
     add x15, x14, #8
@@ -2406,9 +2408,12 @@ _az_strtoi:
     str x9, [sp, #136]
     b .Lob_scan
 .Lob_sd:
-    // val = fval or undef
+    // val = fval or undef; absent + exactOptional -> skip field
     ldr x1, [sp, #120]
     cbnz x1, .Lob_gv
+    ldr x9, [sp, #176]
+    cmp x9, #2
+    b.eq .Lob_fnext
     AZ_ADR x1, .Lundef_val
 .Lob_gv:
     str x1, [sp, #144]          // val to validate
@@ -2423,6 +2428,26 @@ _az_strtoi:
     bl _az_path_pop
     ldr x0, [sp, #144]
     cbnz x0, .Lob_fbad
+    // absent + required but inner accepted undefined -> nonoptional issue
+    ldr x9, [sp, #120]
+    cbnz x9, .Lob_gpush
+    ldr x9, [sp, #176]
+    cbnz x9, .Lob_gpush
+    ldr x0, [sp, #96]
+    ldr x1, [sp, #88]
+    bl _az_path_push_key
+    AZ_ADR x0, .Lex_nonopt
+    mov x1, #11
+    mov x2, #0                  // undef tag -> received "undefined"
+    AZ_ADR x3, .Lundef_val
+    bl _az_issue_type
+    str x0, [sp, #144]
+    bl _az_path_pop
+    ldr x0, [sp, #144]
+    cbnz x0, .Lv_ret
+    mov x0, #-2
+    b .Lob_fbad
+.Lob_gpush:
     // push pair(name,namelen,out,len,found)
     ldp x2, x3, [sp, #152]
     ldr x0, [sp, #96]
@@ -2477,10 +2502,10 @@ _az_strtoi:
     mov x16, #0                 // known=0
 .Lob_kn:
     cbz x15, .Lob_unk2
-    ldr x9, [x14]               // slen
+    ldr x9, [x14, #1]           // slen (after optin byte)
     cmp x9, x11
     b.ne .Lob_knn
-    add x9, x14, #8             // sname
+    add x9, x14, #9             // sname
     mov x17, #0
 .Lob_kcmp:
     cmp x17, x11
@@ -2492,10 +2517,10 @@ _az_strtoi:
     add x17, x17, #1
     b .Lob_kcmp
 .Lob_knn:
-    // advance: cur = cur+8+slen+8
-    ldr x9, [x14]
+    // advance: cur = cur+1+8+slen+8
+    ldr x9, [x14, #1]
     add x14, x14, x9
-    add x14, x14, #16
+    add x14, x14, #17
     sub x15, x15, #1
     b .Lob_kn
 .Lob_known:

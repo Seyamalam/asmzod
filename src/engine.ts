@@ -296,10 +296,11 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const mode = r.u8();
       const catchallPos = r.pos; const catchallOff = r.i64();
       const nf = Number(r.u64());
-      const fields: { name: string; pos: number }[] = [];
+      const fields: { name: string; pos: number; opt: number }[] = [];
       for (let i = 0; i < nf; i++) {
+        const opt = r.u8();
         const nl = Number(r.u64()); const name = r.str(nl);
-        const fp = r.pos; fields.push({ name, pos: fp + Number(r.i64()) });
+        const fp = r.pos; fields.push({ name, pos: fp + Number(r.i64()), opt });
       }
       // hostrefs that are objects (Date/Map/Set/classes) -> treated as empty
       // objects; functions/symbols/primitives -> invalid_type
@@ -311,8 +312,16 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const consumed = new Set<string>();
       for (const f of fields) {
         consumed.add(f.name);
+        const present = Object.prototype.hasOwnProperty.call(obj, f.name);
+        // absent: exactOptional skips the field entirely
+        if (!present && f.opt === 2) continue;
         const raw = obj[f.name];
         const res = atKey(c, f.name, () => tryValidate(new R(r.b, f.pos), raw, c));
+        // absent + required but inner accepted undefined -> nonoptional issue
+        if (!present && f.opt === 0 && res.ok) {
+          atKey(c, f.name, () => pushIssue(c, "invalid_type", { expected: "nonoptional", received: "undefined" }));
+          continue;
+        }
         if (res.ok) out[f.name] = res.value;
       }
       const extra = Object.keys(obj).filter((k) => !consumed.has(k));

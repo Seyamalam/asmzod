@@ -182,6 +182,10 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       w.u64(keys.length);
       const fps: number[] = [];
       for (const k of keys) {
+        // absent key: 0 -> nonoptional issue; 1 -> run inner on undefined;
+        // 2 (exactOptional) -> skip the field entirely
+        const fd = (d.shape[k] as any)._def;
+        w.u8(fd?.type === "exactOptional" ? 2 : (d.shape[k] as any)._zod?.optin !== undefined ? 1 : 0);
         const kb = enc.encode(k);
         w.u64(kb.length); w.raw(kb);
         fps.push(w.field());
@@ -260,6 +264,12 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       }
       return;
 
+    case "exactOptional":
+      // transparent: parses inner directly; only object fields treat it
+      // specially (absent ok, explicit undefined rejected)
+      emit(w, d.inner, hosts, unions);
+      return;
+
     case "optional": case "nullable": case "nonoptional": {
       w.u8(d.type === "optional" ? 0x0b : d.type === "nullable" ? 0x0c : 0x23);
       const f = w.field();
@@ -333,35 +343,12 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       w.u64(d.items.length);
       const fps = d.items.map(() => w.field());
       const rf = w.field();
-      // optinStart: trailing items that can be absent in input. Omittable =
-      // optional/default/prefault/catch; transparent wrappers propagate;
-      // pipe truncates (its optin is its own).
-      const omittable = (s: SchemaLike): boolean => {
-        const d = (s as any)._def;
-        switch (d?.type) {
-          case "optional": case "default": case "prefault": case "catch": return true;
-          case "nullable": case "readonly": case "refine": case "brand": case "transform":
-            return omittable(d.inner ?? d.innerType ?? d.in);
-          case "union": return (d.options as SchemaLike[]).some(omittable);
-          default: return false;
-        }
-      };
+      // optinStart/optoutStart via the _zod ladder — wrappers propagate
+      const omittable = (s: SchemaLike): boolean => (s as any)._zod?.optin !== undefined;
       let minItems = d.items.length;
       while (minItems > 0 && omittable(d.items[minItems - 1])) minItems--;
       w.u64(BigInt(minItems));
-      // optoutStart: trailing items whose output may be absent — optional and
-      // transparent wrappers; everything else truncates the count there
-      const optoutOptional = (s: SchemaLike): boolean => {
-        const d = (s as any)._def;
-        switch (d?.type) {
-          case "optional": return true;
-          case "nullable": case "readonly": case "refine": case "brand":
-          case "transform": case "catch":
-            return optoutOptional(d.inner ?? d.innerType ?? d.in);
-          case "pipe": return optoutOptional(d.out ?? d.inner ?? d.in);
-          default: return false;
-        }
-      };
+      const optoutOptional = (s: SchemaLike): boolean => (s as any)._zod?.optout === "optional";
       let optoutStart = d.items.length;
       while (optoutStart > 0 && optoutOptional(d.items[optoutStart - 1])) optoutStart--;
       w.u64(BigInt(optoutStart));

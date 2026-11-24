@@ -3016,9 +3016,11 @@ _azn_encval:
     ldr x9, [sp, #LN_D]
     cbz x9, .Ln_obj_done
     ldr x10, [sp, #LN_B]
-    ldr x13, [x10]
+    ldrb w16, [x10]           // optin flag (0=absent->nonoptional)
+    str x16, [sp, #LN_M]
+    ldr x13, [x10, #1]
     str x13, [sp, #LN_E]      // klen
-    add x14, x10, #8
+    add x14, x10, #9
     str x14, [sp, #LN_F]      // kptr
     add x15, x14, x13
     str x15, [sp, #LN_C]      // field addr (right after key bytes)
@@ -3047,8 +3049,27 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_O         // present flag (key-exists, not value==undef)
+    bl AZ_NAPI(napi_has_named_property)
+    ldrb w9, [sp, #LN_O]      // out param is a C bool — 1 byte
+    cbz w9, .Ln_obj_absent
+    mov x0, x26
+    mov x1, x28
+    ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
     bl AZ_NAPI(napi_get_named_property)
+    b .Ln_obj_havekey
+.Ln_obj_absent:
+    // absent: inner still runs on undefined (flag 0/1); flag 2 skips the field
+    mov x9, #1
+    str x9, [sp, #LN_R]       // missing-declared-key -> no return-input
+    ldr x9, [sp, #LN_M]
+    cmp x9, #2
+    b.eq .Ln_obj_adv         // exactOptional absent -> skip (no path push)
+    AZ_ADR x9, _azn_undef
+    ldr x9, [x9]
+    str x9, [sp, #LN_G]
+.Ln_obj_havekey:
     // path push (blob ptr — stable)
     ldr x0, [sp, #LN_F]
     ldr x1, [sp, #LN_E]
@@ -3059,18 +3080,28 @@ _azn_encval:
     add x0, x12, x0           // node = fldaddr + reloff
     ldr x1, [sp, #LN_G]
     str x1, [sp, #LN_K]       // save input handle for identity check
-    // missing-key tracking: an `undefined` handle means the declared key
-    // was absent — return-input is then unsafe (input may have extras)
-    AZ_ADR x9, _azn_undef
-    ldr x10, [x9]
-    cmp x1, x10
-    b.ne .Ln_obj_havekey
-    mov x9, #1
-    str x9, [sp, #LN_R]
-.Ln_obj_havekey:
     add x2, sp, #LN_G
     bl _aznapi_run
     str x0, [sp, #LN_H]
+    // child ok + key absent + required -> nonoptional issue, not the success
+    ldr x0, [sp, #LN_H]
+    cbnz x0, .Ln_obj_pop
+    ldrb w9, [sp, #LN_O]
+    cbnz w9, .Ln_obj_pop
+    ldr x9, [sp, #LN_M]
+    cbnz x9, .Ln_obj_pop
+    str x28, [sp, #LN_P]       // save parent; recvname must read undefined
+    AZ_ADR x9, _azn_undef
+    ldr x28, [x9]
+    AZ_ADR x0, .Lex_nonoptional
+    mov x1, #11
+    bl _azn_issue_type
+    ldr x28, [sp, #LN_P]
+    cbnz x0, .Ln_obj_hsave
+    mov x0, #-2                // issue emitted -> field failed, continue
+.Ln_obj_hsave:
+    str x0, [sp, #LN_H]
+.Ln_obj_pop:
     bl _az_path_pop
     ldr x0, [sp, #LN_H]
     cmp x0, #-2
@@ -3094,11 +3125,11 @@ _azn_encval:
     ldr x3, [sp, #LN_G]
     bl AZ_NAPI(napi_set_named_property)
 .Ln_obj_adv:
-    // advance: record = klen(8) + key + field(8)
+    // advance: record = optin(1) + klen(8) + key + field(8)
     ldr x10, [sp, #LN_B]
-    ldr x9, [x10]
+    ldr x9, [x10, #1]
     add x10, x10, x9
-    add x10, x10, #16
+    add x10, x10, #17
     str x10, [sp, #LN_B]
     ldr x9, [sp, #LN_D]
     sub x9, x9, #1
@@ -4484,21 +4515,21 @@ _azn_haskey:
     add x10, x0, #18          // rec cur
 .Lhk_loop:
     cbz x9, .Lhk_no
-    ldr x11, [x10]            // klen2
+    ldr x11, [x10, #1]        // klen2
     ldr x12, [sp, #24]
     stp x9, x10, [sp, #32]    // rem,cur across possible call
     cmp x11, x12
     b.ne .Lhk_adv
-    add x0, x10, #8
+    add x0, x10, #9
     ldr x1, [sp, #16]
     mov x2, x11
     bl _az_memeq
     cbnz w0, .Lhk_yes
 .Lhk_adv:
     ldp x9, x10, [sp, #32]
-    ldr x11, [x10]
+    ldr x11, [x10, #1]
     add x10, x10, x11
-    add x10, x10, #16
+    add x10, x10, #17
     sub x9, x9, #1
     b .Lhk_loop
 .Lhk_yes:

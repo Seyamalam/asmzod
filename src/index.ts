@@ -223,7 +223,11 @@ export const z = {
   superRefine: (fn: (v: unknown, ctx: any) => void) =>
     new ZodAny().superRefine(fn),
   /** Map the parsed value through a function. */
-  transform: (fn: (v: unknown) => unknown) => new ZodAny().transform(fn),
+  transform: (fn: (v: unknown) => unknown) => {
+    const s = new ZodAny().transform(fn);
+    s._def.node = true; // standalone $ZodTransform node: optin is "optional"
+    return s;
+  },
 
   // string-format factories — equivalent to z.string().<fmt>()
   /** Alias of z.string().email(). */
@@ -536,7 +540,7 @@ export const z = {
   /** schema.prefault(value) as a factory */
   prefault: <T extends ZodTypeAny>(s: T, v: any) => (s as any).prefault(v),
   /** optional wrapper preserving zod's exactOptional field semantics */
-  exactOptional: <T extends ZodTypeAny>(s: T) => s.optional(),
+  exactOptional: <T extends ZodTypeAny>(s: T) => s.exactOptional(),
   /** deepPartial on an object schema */
   deepPartial: <T extends ZodTypeAny>(s: T) => (s as any).deepPartial(),
   /** shape passthrough helper */

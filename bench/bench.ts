@@ -73,7 +73,7 @@ const coerceAZ = z.coerce.number();
 const coerceZZ = Z.coerce.number();
 const coerceIn = Array.from({length:64},(_,i)=>`${i}.5`);
 
-const refAZ = z.string().refine(s => s.length > 2).transform(s => s.toUpperCase());
+const refAZ = z.string().refine((s: string) => s.length > 2).transform((s: string) => s.toUpperCase());
 const refZZ = Z.string().refine((s: string) => s.length > 2).transform((s: string) => s.toUpperCase());
 const refIn = Array.from({length:64},(_,i)=>`val_${i}`);
 

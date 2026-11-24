@@ -104,9 +104,9 @@ test("nested path", () => {
 });
 
 test("transform/refine", () => {
-  expect(z.string().transform((s) => s.length).parse("abc")).toBe(3);
-  expect(z.string().refine((s) => s.length > 2).safeParse("ab").success).toBe(false);
-  expect(z.string().refine((s) => s.length > 2).safeParse("abc").success).toBe(true);
+  expect(z.string().transform((s: string) => s.length).parse("abc")).toBe(3);
+  expect(z.string().refine((s: string) => s.length > 2).safeParse("ab").success).toBe(false);
+  expect(z.string().refine((s: string) => s.length > 2).safeParse("abc").success).toBe(true);
 });
 
 test("coerce", () => {

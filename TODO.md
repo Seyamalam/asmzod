@@ -117,3 +117,128 @@
 - [x] 98. (scripted audit: every bl site sp ≡ 0 mod 16) Stack-alignment audit at every bl
 - [x] 99. Symbolization script: addr → napi.s line
 - [x] 100. (written proof in PERF.md: 44 napi calls/parse = ~2µs floor) strict-obj/fail-issues within 2× of zod — or the written proof
+
+## Compat block 2 — zod v4 classic suite (target: 100% of zod's own tests)
+
+Harness: /private/tmp/zodsuite (vitest, aliases zod/* + relative imports → src/index.ts)
+Verify per item: `cd /private/tmp/zodsuite && npx vitest run <file>`
+
+### Infrastructure (unblocks whole clusters)
+- [ ] 1. `_zod` internals on every schema: def/traits/parent/bag
+- [ ] 2. `_zod.optin`/`optout` ladder: optional→"optional"/"optional", default→"defaulted"/undef, union propagation, nullable/catch/prefault/readonly passthrough
+- [ ] 3. `_zod.values` for enum/literal; `_zod.pattern` for string formats; `_zod.propValues`
+- [ ] 4. `.includes(s,{position})` — bytecode+engines position param
+- [ ] 5. Symbol-keyed object properties
+- [ ] 6. Cyclic input data (seen-set in parsers)
+- [ ] 7. `z.coerce.date()`
+- [ ] 8. Stack-depth guard on huge strings (base64 recursion)
+- [ ] 9. zod-exact message templates per issue code (snapshot wording)
+- [ ] 10. Detached methods: destructured schema methods work standalone
+- [ ] 11. `schema._zod.run`/`.parse`/`.innerType`/`.toJSONSchema` where tests read them
+- [ ] 12. `z.file` with @web-std/file duck typing
+- [ ] 13. `z.templateLiteral` nested-pattern correctness
+- [ ] 14. getter `.minLength`/`.maxLength`/`.minValue`/`maxValue`/`format` on strings/numbers
+- [ ] 15. `schema._zod.bag` merging via `.check({kind:"meta"})` (already partial)
+
+### Per-file grind — string/number family
+- [ ] 16. string.test.ts — all green
+- [ ] 17. number.test.ts — all green
+- [ ] 18. bigint.test.ts
+- [ ] 19. coerce.test.ts
+- [ ] 20. date.test.ts
+- [ ] 21. datetime.test.ts
+- [ ] 22. enum.test.ts
+- [ ] 23. literal.test.ts
+- [ ] 24. template-literal.test.ts
+- [ ] 25. stringbool.test.ts
+- [ ] 26. string-formats.test.ts
+- [ ] 27. credit-card.test.ts
+- [ ] 28. iban.test.ts
+- [ ] 29. url.test.ts
+- [ ] 30. hash.test.ts (already 1/1 — keep green)
+
+### Object family
+- [ ] 31. object.test.ts — all green
+- [ ] 32. pickomit.test.ts
+- [ ] 33. partial.test.ts
+- [ ] 34. deep-partial.test.ts
+- [ ] 35. properties.test.ts
+- [ ] 36. record.test.ts
+- [ ] 37. keyof-adjacent: partialRecord/looseRecord semantics vs tests
+- [ ] 38. cyclic-data.test.ts
+- [ ] 39. strictObject/looseObject/strip exact behavior incl. extra-key issue wording
+- [ ] 40. object catchall + unknownKeys modes
+
+### Wrappers/effects
+- [ ] 41. optional.test.ts
+- [ ] 42. nonoptional.test.ts
+- [ ] 43. optin-ladder.test.ts
+- [ ] 44. default.test.ts
+- [ ] 45. prefault.test.ts
+- [ ] 46. catch.test.ts
+- [ ] 47. readonly.test.ts
+- [ ] 48. pipe.test.ts
+- [ ] 49. preprocess.test.ts
+- [ ] 50. transform.test.ts
+- [ ] 51. refine.test.ts
+- [ ] 52. nested-refine.test.ts
+- [ ] 53. lazy.test.ts
+- [ ] 54. recursive-types.test.ts
+- [ ] 55. brand.test.ts (green — keep)
+
+### Unions/collections
+- [ ] 56. union.test.ts
+- [ ] 57. discriminated-unions.test.ts
+- [ ] 58. intersection.test.ts
+- [ ] 59. array.test.ts
+- [ ] 60. tuple.test.ts
+- [ ] 61. map/set engine-path tests (map.test/set.test collected 0 — verify + add parity tests)
+- [ ] 62. promise.test.ts
+- [ ] 63. function.test.ts
+
+### Async
+- [ ] 64. async-parsing.test.ts — last 2 failures
+- [ ] 65. async checks nested inside compiled schemas (engine suspend or TS-layer route)
+- [ ] 66. transform/refine async inside objects
+
+### Errors
+- [ ] 67. error.test.ts — all green
+- [ ] 68. error-utils.test.ts — flatten/format/prettify/treeify exact shapes
+- [ ] 69. issue-schema.test.ts — issue object shape validation
+- [ ] 70. default-locale.test.ts + locales_ka/ro (skip-if-missing acceptable)
+- [ ] 71. ZodError exact class/message/`.issues`/`.errors` fields
+
+### Meta/registries/api
+- [ ] 72. base.test.ts
+- [ ] 73. firstparty.test.ts
+- [ ] 74. index.test.ts — remaining 20 failures
+- [ ] 75. detached-methods.test.ts
+- [ ] 76. assignability.test.ts
+- [ ] 77. global-config.test.ts
+- [ ] 78. registries.test.ts
+- [ ] 79. standard-schema.test.ts
+- [ ] 80. description.test.ts + describe-meta-checks (green — keep)
+- [ ] 81. apply.test.ts
+- [ ] 82. generics.test.ts (green — keep)
+- [ ] 83. prototypes.test.ts (green — keep)
+
+### Codecs/JSON schema
+- [ ] 84. codec.test.ts
+- [ ] 85. codec-examples.test.ts
+- [ ] 86. in-out.test.ts
+- [ ] 87. to-json-schema-methods.test.ts (88 fails — biggest file)
+- [ ] 88. json.test.ts (green — keep)
+- [ ] 89. from-json-schema.test.ts (111 green — keep)
+- [ ] 90. fix-json-issue.test.ts (green — keep)
+
+### Misc/safety
+- [ ] 91. instanceof.test.ts
+- [ ] 92. continuability.test.ts
+- [ ] 93. primitive.test.ts
+- [ ] 94. nan.test.ts + void.test.ts + coalesce.test.ts + anyunknown + nullable + validations + custom + preprocess-types + async-refinements (green — keep)
+- [ ] 95. instance-footprint.test.ts (0 collected — check vitest compat)
+- [ ] 96. jitless-allows-eval.test.ts + redos.test.ts (0 collected — check)
+- [ ] 97. No-regress: bun test 130+ green after every block
+- [ ] 98. Node N-API green across whole suite (no crashes)
+- [ ] 99. Portable engine parity for every fix (engines gate)
+- [ ] 100. Update COMPAT.md zod-suite numbers per milestone + final full-suite run

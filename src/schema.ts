@@ -37,10 +37,120 @@ export interface SafeParseSuccess<T> { success: true; data: T }
 export interface SafeParseFail { success: false; error: ZodError }
 export type SafeParseResult<T> = SafeParseSuccess<T> | SafeParseFail;
 
+// ---------- _zod internals (zod v4 internals surface) ----------
+const _optResolving = new WeakSet<object>();
+function _inner(s: any): any { return s._def.inner ?? s._def.innerType ?? (s.schema ?? undefined); }
+function _zodOptin(s: any): any {
+  const t = s._def.type;
+  const inner = _inner(s);
+  switch (t) {
+    case "optional": case "exactOptional": case "catch":
+      return inner?._zod?.optin === "defaulted" ? "defaulted" : "optional";
+    case "default": case "prefault": return "defaulted";
+    case "transform": return s._def.node ? "optional" : inner?._zod?.optin;
+    case "refine": case "superrefine": case "custom": return inner?._zod?.optin;
+    case "pipe": return s._def.in?._zod?.optin;
+    case "union": case "discriminatedUnion": {
+      const os: any[] = s._def.options ?? [];
+      return os.some((o) => o._zod.optin === "defaulted") ? "defaulted"
+        : os.some((o) => o._zod.optin === "optional") ? "optional" : undefined;
+    }
+    case "nullable": case "readonly": case "brand": return inner?._zod?.optin;
+    case "lazy": {
+      if (_optResolving.has(s)) return undefined;
+      _optResolving.add(s);
+      try { return inner?._zod?.optin; } finally { _optResolving.delete(s); }
+    }
+    case "nonoptional": return undefined;
+    default: return undefined;
+  }
+}
+function _zodOptout(s: any): any {
+  const t = s._def.type;
+  const inner = _inner(s);
+  switch (t) {
+    case "optional": case "exactOptional": return "optional";
+    case "catch": return inner?._zod?.optout;
+    case "transform": return undefined;
+    case "refine": case "superrefine": case "custom": return inner?._zod?.optout;
+    case "pipe": return s._def.out?._zod?.optout;
+    case "union": case "discriminatedUnion": {
+      const os: any[] = s._def.options ?? [];
+      return os.some((o) => o._zod.optout === "optional") ? "optional" : undefined;
+    }
+    case "nullable": case "readonly": case "brand": return inner?._zod?.optout;
+    case "lazy": {
+      if (_optResolving.has(s)) return undefined;
+      _optResolving.add(s);
+      try { return inner?._zod?.optout; } finally { _optResolving.delete(s); }
+    }
+    default: return undefined;
+  }
+}
+function _zodValues(s: any): any {
+  const t = s._def.type;
+  const inner = _inner(s);
+  switch (t) {
+    case "enum": case "nativeEnum": return new Set(s._def.values);
+    case "literal": return new Set(s._def.values ?? [s._def.value]);
+    case "optional": case "nullable": case "default": case "prefault":
+    case "catch": case "readonly": case "brand": case "lazy":
+      return inner?._zod?.values;
+    case "nonoptional": {
+      const v = inner?._zod?.values;
+      return v ? new Set([...v].filter((x) => x !== undefined)) : undefined;
+    }
+    case "union": case "discriminatedUnion": {
+      const os: any[] = s._def.options ?? [];
+      const vs = os.map((o) => o._zod.values);
+      if (vs.some((v) => v === undefined)) return undefined;
+      return new Set(vs.flatMap((v: any) => [...v]));
+    }
+    default: return undefined;
+  }
+}
+const _escapeRe = (v: any) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function _zodPattern(s: any): any {
+  const t = s._def.type;
+  if (t === "literal") {
+    const vs = s._def.values ?? [s._def.value];
+    if (vs.length === 1) return new RegExp(`^\\(${_escapeRe(vs[0])}\\)$`);
+    return new RegExp(`^\\(${vs.map(_escapeRe).join("|")}\\)$`);
+  }
+  const inner = _inner(s);
+  return inner?._zod?.pattern;
+}
+
 export abstract class ZodType<Output = unknown, Input = Output> {
   readonly _output!: Output;
   readonly _input!: Input;
   _def!: any;
+  __zod: any;
+
+  get _zod(): any {
+    let z = this.__zod;
+    if (z) return z;
+    const inner = _inner(this);
+    z = {
+      def: this._def,
+      traits: new Set([(this as any).constructor]),
+      parent: this._def.parent,
+      innerType: inner,
+      bag: this._def.bag ?? {},
+      optin: _zodOptin(this),
+      optout: _zodOptout(this),
+      values: _zodValues(this),
+      pattern: _zodPattern(this),
+      propValues: this._def.propValues,
+      deferred: this._def.deferred,
+      run: (v: any) => this._run(v),
+      parse: (v: any) => this._run(v),
+      toJSONSchema: () => (this as any).toJSONSchema?.(),
+      check: (...args: any[]) => (this as any).check(...args),
+    };
+    this.__zod = z;
+    return z;
+  }
 
   private _compiled: Compiled | null = null;
 
@@ -144,6 +254,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
 
   optional(): ZodOptional<this> {
     return new ZodOptional({ type: "optional", inner: this });
+  }
+  /** optional in objects but rejects explicit undefined */
+  exactOptional(): ZodOptional<this> {
+    return new ZodOptional({ type: "exactOptional", inner: this });
   }
   nullable(): ZodNullable<this> {
     return new ZodNullable({ type: "nullable", inner: this });
@@ -349,7 +463,7 @@ export type ZodTypeAny = ZodType<any, any>;
 // ---------- primitives ----------
 export class ZodString extends ZodType<string> {
   constructor(_def: any = { type: "string", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodString({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   min(n: number, message?: string) { return this._check({ kind: "min", value: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "max", value: n, message }); }
   length(n: number, message?: string) { return this._check({ kind: "length", value: n, message }); }
@@ -469,7 +583,7 @@ export class ZodString extends ZodType<string> {
 
 export class ZodNumber extends ZodType<number> {
   constructor(_def: any = { type: "number", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodNumber({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodNumber({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   gt(n: number, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
   min(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -506,7 +620,7 @@ export class ZodNumber extends ZodType<number> {
 
 export class ZodBigInt extends ZodType<bigint> {
   constructor(_def: any = { type: "bigint", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodBigInt({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodBigInt({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   gt(n: bigint, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
   min(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -561,7 +675,7 @@ export class ZodSymbol extends ZodType<symbol> {
 
 export class ZodDate extends ZodType<Date> {
   constructor(_def: any = { type: "date", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodDate({ ...this._def, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodDate({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
   min(d: Date, message?: string) { return this._check({ kind: "min", value: d.getTime(), message }); }
   max(d: Date, message?: string) { return this._check({ kind: "max", value: d.getTime(), message }); }
   get minDate(): Date | null {

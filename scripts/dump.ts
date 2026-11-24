@@ -77,7 +77,7 @@ function node(off: number, depth: number) {
     case 0x05: {
       const mode = u8(); const co = rel(); const n = u64();
       info = ` mode=${["strip", "strict", "passthrough"][mode]}`;
-      for (let i = 0; i < n; i++) { const k = str(); const fo = rel(); info += `\n${ind}  .${k} -> @${fo}`; kids.push(fo); }
+      for (let i = 0; i < n; i++) { const o = u8(); const k = str(); const fo = rel(); info += `\n${ind}  .${k}${o ? "?" : ""} -> @${fo}`; kids.push(fo); }
       if (co) { info += ` catchall->@${co}`; kids.push(co); }
       break;
     }
