@@ -15,7 +15,7 @@ import {
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
-import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory, failure as _failure, captureStackTrace, NEVER } from "./shared.ts";
+import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory, failure as _failure, captureStackTrace, NEVER, ZodRegistry, globalRegistry, defaultMessage, frLocaleError } from "./shared.ts";
 
 export * from "./schema.ts";
 export * from "./error.ts";
@@ -257,7 +257,7 @@ export const z = {
 
   /** Schema accepting exactly the given literal(s). */
   literal: <T extends string | number | boolean | bigint | null | undefined>(v: T, params?: any) =>
-    new ZodLiteral<T>({ type: "literal", value: v, error: params }),
+    new ZodLiteral<T>({ type: "literal", value: v, values: Array.isArray(v) ? [...v] : [v], error: params }),
   /** Schema for a fixed set of string values (or a TS enum). */
   enum: ((values: any, params?: any) => {
     if (!Array.isArray(values)) {
@@ -488,23 +488,22 @@ export const z = {
   /** clone a schema instance (shares def internals) */
   clone: <T extends ZodTypeAny>(s: T, def?: any): T =>
     new (s as any).constructor({ ...(s as any)._def, ...(def ?? {}) }),
-  /** set .metadata on a schema def */
-  meta: <T extends ZodTypeAny>(s: T, m: Record<string, unknown>): T => {
-    (s as any)._def.metadata = { ...((s as any)._def.metadata ?? {}), ...m };
+  /** metadata check (check form) or schema metadata setter */
+  meta: ((s: any, m?: any): any => {
+    if (m === undefined && !(s instanceof ZodType) && !(s && typeof s === "object" && typeof s._def === "object"))
+      return { kind: "meta", metadata: s };
+    if (m === undefined) return s;
+    (s as any)._def.metadata = { ...(s._def.metadata ?? {}), ...m };
     return s;
-  },
-  /** registry: id -> schema map */
-  registry: <M = ZodTypeAny>() => {
-    const m = new Map<string, M>();
-    return {
-      add: (id: string, v: M) => (m.set(id, v), undefined),
-      get: (id: string) => m.get(id),
-      has: (id: string) => m.has(id),
-      remove: (id: string) => m.delete(id),
-      clear: () => m.clear(),
-      count: () => m.size,
-      _map: m,
-    };
+  }) as any,
+  /** schema -> metadata registry */
+  registry: <M = ZodTypeAny>() => new ZodRegistry(),
+  /** shared schema metadata registry */
+  globalRegistry,
+  /** locale error-map factories */
+  locales: {
+    en: () => ({ localeError: defaultMessage }),
+    fr: () => ({ localeError: frLocaleError() }),
   },
 
   // ---------- numeric factories ----------
@@ -600,7 +599,15 @@ export const z = {
   /** deepPartial on an object schema */
   deepPartial: <T extends ZodTypeAny>(s: T) => (s as any).deepPartial?.() ?? _deepPartial(s),
   /** shape passthrough helper */
-  properties: <T extends ZodRawShape>(shape: T): T => shape,
+  /** property checks for .check(): each validates value[key] against the schema */
+  properties: <T extends ZodRawShape>(shape: T): any[] =>
+    Object.entries(shape).map(([k, s]) => ({
+      kind: "checkfn",
+      fn: (payload: any) => {
+        const r = (s as any)._run(payload.value?.[k]);
+        if (!r.ok) for (const i of r.issues) payload.issues.push({ ...i, path: [k, ...(i.path ?? [])] });
+      },
+    })),
   /** single-property shape helper */
   property: <T extends ZodTypeAny>(key: string, s: T): Record<string, T> => ({ [key]: s }),
   /** compile a schema eagerly (returns the schema) */
@@ -658,12 +665,18 @@ export const z = {
   stringFormat: (
     format: string,
     check: RegExp | ((v: string) => boolean),
-    opts?: { message?: string },
+    opts?: { message?: string; error?: string | ((i: any) => string); abort?: boolean },
   ) => check instanceof RegExp
-    ? new ZodString({ type: "string", checks: [{ kind: "regex", regex: check, format }], error: opts?.message })
-    : new ZodAlgoFormat({ format, message: opts?.message ?? `Invalid ${format}`, fn: check }),
-  /** schema -> zod-ish source string (subset of defs) */
-  toZod: (s: ZodTypeAny): string => toZod(s),
+    ? new ZodString({ type: "string", pattern: check,
+        checks: [{ kind: "regex", regex: check, format,
+                   error: opts?.error ?? opts?.message, abort: opts?.abort }] })
+    : new ZodAlgoFormat({ format,
+        message: typeof (opts?.error ?? opts?.message) === "string"
+          ? (opts!.error ?? opts!.message) as string
+          : `Invalid ${format}`,
+        fn: check, abort: opts?.abort }),
+  /** curried type-assert: toZod<T>()(schema) returns the schema typed as T */
+  toZod: (<T>() => (s: ZodTypeAny) => s) as any,
 
   // ---------- public schema classes ----------
   ZodType, ZodString, ZodNumber, ZodBigInt, ZodBoolean, ZodAny, ZodUnknown,
@@ -711,7 +724,12 @@ import { toJSONSchema } from "./jsonschema.ts";
 (ZodType.prototype as any).toJSONSchema = function (this: any, params?: any) {
   return toJSONSchema(this, params);
 };
-const globalConfig: any = _globalConfig;
+export const globalConfig: any = _globalConfig;
+export { globalRegistry, ZodRegistry };
+export const locales = {
+  en: () => ({ localeError: defaultMessage }),
+  fr: () => ({ localeError: frLocaleError() }),
+};
 const _config = _sharedConfig;
 
 // $constructor builds user-defined schema classes; $ZodType.init installs
@@ -748,7 +766,9 @@ export const core = {
   toDotPath: _toDotPath,
   isRecursiveSchema: (s: any) => isRecursiveSchema(s),
   config: _config, globalConfig, memoizer: _memoizerFactory,
-  util: { isPlainObject: _azIsPlainObject, shallowClone: _azShallowClone },
+  util: { isPlainObject: _azIsPlainObject, shallowClone: _azShallowClone, toZod: (<T>() => (s: ZodTypeAny) => s) as any },
+  toZod: (<T>() => (s: ZodTypeAny) => s) as any,
+  globalRegistry,
   $constructor,
 };
 (z as any).core = core;
@@ -849,7 +869,7 @@ function fromJSONSchema(js: any): ZodTypeAny {
 
 // toZod: render a schema's def back to zod-ish source — subset matching
 // fromJSONSchema coverage; unknown defs degrade to z.unknown()
-function toZod(s: any, d = 0): string {
+function renderZodSrc(s: any, d = 0): string {
   const ind = "  ".repeat(d);
   const def = s?._def ?? {};
   switch (def.type) {
@@ -886,24 +906,24 @@ function toZod(s: any, d = 0): string {
     case "nan": return "z.nan()";
     case "literal": return `z.literal(${JSON.stringify(def.value)})`;
     case "enum": return `z.enum(${JSON.stringify(def.values)})`;
-    case "array": return `z.array(${toZod(def.element, d + 1)})`;
-    case "tuple": return `z.tuple([${(def.items ?? []).map((i: any) => toZod(i, d + 1)).join(", ")}])`;
+    case "array": return `z.array(${renderZodSrc(def.element, d + 1)})`;
+    case "tuple": return `z.tuple([${(def.items ?? []).map((i: any) => renderZodSrc(i, d + 1)).join(", ")}])`;
     case "record":
       return def.keyType
-        ? `z.record(${toZod(def.keyType, d + 1)}, ${toZod(def.valueType, d + 1)})`
-        : `z.record(z.string(), ${toZod(def.valueType, d + 1)})`;
-    case "union": return `z.union([${def.options.map((o: any) => toZod(o, d + 1)).join(", ")}])`;
-    case "optional": return `${toZod(def.inner, d + 1)}.optional()`;
-    case "nullable": return `${toZod(def.inner, d + 1)}.nullable()`;
-    case "default": return `${toZod(def.inner, d + 1)}.default(${JSON.stringify(def.value)})`;
+        ? `z.record(${renderZodSrc(def.keyType, d + 1)}, ${renderZodSrc(def.valueType, d + 1)})`
+        : `z.record(z.string(), ${renderZodSrc(def.valueType, d + 1)})`;
+    case "union": return `z.union([${def.options.map((o: any) => renderZodSrc(o, d + 1)).join(", ")}])`;
+    case "optional": return `${renderZodSrc(def.inner, d + 1)}.optional()`;
+    case "nullable": return `${renderZodSrc(def.inner, d + 1)}.nullable()`;
+    case "default": return `${renderZodSrc(def.inner, d + 1)}.default(${JSON.stringify(def.value)})`;
     case "object": {
-      const parts = Object.entries(def.shape ?? {}).map(([k, v]) => `${JSON.stringify(k)}: ${toZod(v, d + 1)}`);
+      const parts = Object.entries(def.shape ?? {}).map(([k, v]) => `${JSON.stringify(k)}: ${renderZodSrc(v, d + 1)}`);
       const mk = def.mode === "strict" ? "z.strictObject" : def.mode === "passthrough" ? "z.looseObject" : "z.object";
       return `${mk}({ ${parts.join(", ")} })`;
     }
     case "lazy": return "z.lazy(() => /* recursive */)";
-    case "map": return `z.map(${toZod(def.keyType, d + 1)}, ${toZod(def.valueType, d + 1)})`;
-    case "set": return `z.set(${toZod(def.valueType, d + 1)})`;
+    case "map": return `z.map(${renderZodSrc(def.keyType, d + 1)}, ${renderZodSrc(def.valueType, d + 1)})`;
+    case "set": return `z.set(${renderZodSrc(def.valueType, d + 1)})`;
     default: return "z.unknown()";
   }
 }
@@ -935,7 +955,10 @@ export const {
   invertCodec, getDiscriminatedOption, withParser, stringFormat,
   regexes,
 } = z;
-export { setErrorMap, getErrorMap, fromJSONSchema, toZod };
+export { setErrorMap, getErrorMap, fromJSONSchema };
+export const toZod = z.toZod;
+export const ZodIssueCode = z.ZodIssueCode;
+export { renderZodSrc };
 export { toJSONSchema };
 const _null = z.null;
 const _undefined = z.undefined;

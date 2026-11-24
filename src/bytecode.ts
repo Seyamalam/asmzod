@@ -395,7 +395,7 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       return;
     }
 
-    case "brand":
+    case "brand": case "readonly":
       emit(w, d.inner, hosts, unions);
       return;
 
@@ -539,6 +539,8 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
 
     case "custom": {
       w.u8(0x22);
+      if (d.cbid === undefined && typeof d.fn === "function")
+        d.cbid = regId(reg.custom, d.fn);
       w.u64(d.cbid);
       checkMsg(w, d.message);
       return;

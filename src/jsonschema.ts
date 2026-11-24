@@ -72,6 +72,14 @@ function applyChecks(js: JSONSchema, d: any, isString: boolean, isNum: boolean):
 }
 
 function toSchema(d: any): JSONSchema {
+  const regId = ctx.idMap?.get(d);
+  if (regId !== undefined) {
+    if (!ctx.emitted!.has(regId)) {
+      ctx.emitted!.add(regId);
+      ctx.defs![regId] = toSchema(d);
+    }
+    return { $ref: `#/$defs/${regId}` } as any;
+  }
   const t = d.type;
   if (UNREPRESENTABLE.has(t)) {
     if (ctx.unrepresentable === "any") return {};
@@ -154,9 +162,13 @@ function toSchema(d: any): JSONSchema {
       return { [t === "union" ? "anyOf" : "oneOf"]: opts };
     }
     case "enum": {
-      return { type: "string", enum: d.values };
+      const vals: any[] = d.values ?? Object.values(d.entries ?? {});
+      if (vals.length === 0) return { not: {} };
+      return { type: "string", enum: vals };
     }
     case "literal": {
+      const vals: any[] | undefined = d.values ?? (Array.isArray(d.value) ? d.value : undefined);
+      if (vals && vals.length === 0) return { not: {} };
       const v = d.value;
       const ty = v === null ? "null" : typeof v === "bigint" ? "string" : typeof v;
       return { type: ty, const: typeof v === "bigint" ? v.toString() : v };
@@ -212,10 +224,50 @@ function toSchema(d: any): JSONSchema {
   }
 }
 
-export function toJSONSchema(schema: { _def: any }, params?: { unrepresentable?: string }): JSONSchema {
+export function toJSONSchema(schema: { _def: any }, params?: { unrepresentable?: string; metadata?: any }): JSONSchema {
   const prev = ctx.unrepresentable;
+  const prevIds = ctx.idMap, prevDefs = ctx.defs, prevEmitted = ctx.emitted;
+  if (params?.metadata) {
+    const { byDef } = _collectIds(schema, params.metadata);
+    ctx.idMap = byDef; ctx.defs = {}; ctx.emitted = new Set();
+  }
   ctx.unrepresentable = params?.unrepresentable;
-  try { return { $schema: DRAFT, ...toSchema(schema._def) }; }
-  finally { ctx.unrepresentable = prev; }
+  try {
+    const out = toSchema(schema._def);
+    if (ctx.defs && Object.keys(ctx.defs).length) (out as any).$defs = ctx.defs;
+    return { $schema: DRAFT, ...out };
+  }
+  finally {
+    ctx.unrepresentable = prev;
+    ctx.idMap = prevIds; ctx.defs = prevDefs; ctx.emitted = prevEmitted;
+  }
 }
-const ctx: { unrepresentable?: string; seen?: Set<any> } = {};
+const ctx: { unrepresentable?: string; seen?: Set<any>; idMap?: Map<any, string>; defs?: Record<string, JSONSchema>; emitted?: Set<string> } = {};
+
+function _collectIds(root: any, reg: any): { byDef: Map<any, string> } {
+  const byDef = new Map<any, string>();
+  const byId = new Map<string, any>();
+  const seen = new Set<any>();
+  const visit = (s: any): void => {
+    if (!s || seen.has(s)) return;
+    seen.add(s);
+    const id = reg.get?.(s)?.id;
+    if (id !== undefined) {
+      const prev = byId.get(id);
+      if (prev !== undefined && prev !== s)
+        throw new Error(`Duplicate schema id "${id}" detected during JSON Schema conversion. Two different schemas cannot share the same id when converted together.`);
+      byId.set(id, s);
+      byDef.set(s._def ?? s.def, id);
+    }
+    const def = (s as any)._def ?? (s as any).def;
+    if (!def || typeof def !== "object") return;
+    for (const v of Object.values(def)) {
+      if ((v as any)?._def || (v as any)?.def) { visit(v); continue; }
+      if (Array.isArray(v)) { for (const e of v) if (e?._def || e?.def) visit(e); continue; }
+      if (v && typeof v === "object")
+        for (const e of Object.values(v)) if (e?._def || e?.def) visit(e);
+    }
+  };
+  visit(root);
+  return { byDef };
+}

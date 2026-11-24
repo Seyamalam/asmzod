@@ -3995,6 +3995,27 @@ _azn_truthy:
     b.eq .Ln_coerce_big
     cmp w9, #0x1c
     b.eq .Ln_coerce_str
+    // coerce_num: ToNumber throws on bigint but JS Number() doesn't — zod
+    // semantics follow Number(), so handle napi_bigint explicitly
+    mov x0, x28
+    bl _azn_typeof
+    cmp w0, #9               // napi_bigint
+    b.ne .Ln_coerce_std
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_A
+    add x3, sp, #LN_B
+    bl AZ_NAPI(napi_get_value_bigint_int64)
+    cbnz x0, .Ln_coerce_badval
+    ldrb w9, [sp, #LN_B]
+    cbz w9, .Ln_cb_punt      // out-of-i64 bigint: portable does Number() exactly
+    ldr x9, [sp, #LN_A]
+    scvtf d0, x9
+    mov x0, x26
+    add x1, sp, #LN_G
+    bl AZ_NAPI(napi_create_double)
+    b .Ln_coerce_chk
+.Ln_coerce_std:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_G

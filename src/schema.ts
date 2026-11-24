@@ -2,10 +2,10 @@
 import { compile, type Compiled } from "./bytecode.ts";
 import { engineParse, portableEngineParse, reg, regId } from "./ffi.ts";
 import * as napiBackend from "./native/napi.ts";
-import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, stripInternalFrames, globalConfig, defaultedIssues } from "./shared.ts";
+import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, stripInternalFrames, globalConfig, defaultedIssues, globalRegistry, ZodRegistry } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
-import { ZodError, ZodRealError, type ZodIssue } from "./error.ts";
-import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx, FORMAT_PATTERNS } from "./shared.ts";
+import { ZodError, ZodRealError, ZodEncodeError, type ZodIssue } from "./error.ts";
+import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx, FORMAT_PATTERNS, FORMAT_NOPAT } from "./shared.ts";
 
 // issues added via ctx.addIssue inside superRefine callbacks during the
 // in-flight engine run; _run splices them over the engine's `custom` slots
@@ -550,10 +550,11 @@ export function _zodPattern(s: any): RegExp | undefined {
         ? `^(${vals.map((v: any) => _escapeRe(`${v}`)).join("|")})$`
         : "^[^\\s\\S]$");
     }
-    case "optional": case "exactOptional": {
+    case "optional": {
       const p = _zodPattern(_inner(s));
       return p ? new RegExp(`^(${_cleanRe(p.source)})?$`) : undefined;
     }
+    case "exactOptional": return _zodPattern(_inner(s));
     case "nullable": {
       const p = _zodPattern(_inner(s));
       return p ? new RegExp(`^(${_cleanRe(p.source)}|null)$`) : undefined;
@@ -751,6 +752,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   private _recChecked = false;
   constructor() {
     ensureDefaultMemoizer();
+    // English registers lazily on first schema construction (zod#5953)
+    globalConfig.localeError ??= defaultMessage;
     // zod's $constructor binds every proto method onto each instance —
     // detached `schema.parse`/`schema.optional` keeps `this` (zod#5870)
     const proto = Object.getPrototypeOf(this);
@@ -862,7 +865,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   protected _runImpl(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const _checks = (this._def as any).checks as any[] | undefined;
-    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined))))
+    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined) || (c.kind === "regex" && c.format !== undefined && c.format !== "regex"))))
       return this._runChecksTS(data, _checks);
     const c = this._compile();
     // direct N-API validation walks the JS value natively (no encode/decode);
@@ -1030,10 +1033,31 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           issues.push(...nv);
         }
         else if (nv === false)
-          issues.push({ origin: "string", code: "invalid_format", format: c.fmt ?? c.kind,
+          issues.push({ ...(FORMAT_NOPAT.has(c.fmt ?? c.kind) ? {} : { origin: "string" }),
+                        code: "invalid_format", format: c.fmt ?? c.kind,
                         ...(FORMAT_PATTERNS[c.fmt ?? c.kind] ? { pattern: FORMAT_PATTERNS[c.fmt ?? c.kind] } : {}),
                         input: v, path: [], message: c.message } as any);
         else if (typeof nv === "string") v = nv;
+        continue;
+      }
+      // a named format (z.stringFormat("creditCard", re)) emits
+      // invalid_format under its own name — no pattern, message via error
+      if (c.format !== undefined && c.format !== c.kind && c.regex) {
+        if (typeof v !== "string") continue;
+        c.regex.lastIndex = 0;
+        if (!c.regex.test(v)) {
+          const i: any = c.format === "template_literal"
+            ? { code: "invalid_format", format: c.format, pattern: c.regex.source }
+            : { origin: "string", code: "invalid_format", format: c.format,
+                pattern: `/${c.regex.source}/${c.regex.flags}` };
+          i.input = v;
+          i.path = [];
+          const e = c.error ?? c.message;
+          if (e !== undefined) i.message = typeof e === "function" ? e(i) : e;
+          if (c.abort === true) i.continue = false;
+          issues.push(i);
+          if (c.abort === true) break;
+        }
         continue;
       }
       // a positioned `includes` never compiles — the engines' substring check
@@ -1046,8 +1070,15 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       }
       const rr = new Base({ ...carrierDef, checks: [c] })._run(v);
       // a failed base already emitted invalid_type — the check run repeats it
-      // a failed base already emitted invalid_type — the check run repeats it
-      if (!rr.ok) issues.push(...(r.ok ? rr.issues : rr.issues.filter((i: any) => i.code !== "invalid_type")));
+      if (!rr.ok) {
+        const mine = r.ok ? rr.issues : rr.issues.filter((i: any) => i.code !== "invalid_type");
+        for (const i of mine) {
+          if (c.error !== undefined) (i as any).message = typeof c.error === "function" ? c.error(i) : c.error;
+          if (c.abort === true) (i as any).continue = false;
+        }
+        issues.push(...mine);
+        if (c.abort === true) break;
+      }
       else v = rr.value;
     }
     return issues.length
@@ -1158,18 +1189,19 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   describe(d: string): this {
     const c = this.clone();
-    c._def = { ...c._def, description: d };
+    (c as any)._zod.parent = this;
+    globalRegistry.add(c, { description: d });
     return c;
   }
   meta(m?: any): any {
-    if (m === undefined) return this._def.meta;
+    if (m === undefined) return globalRegistry.get(this);
     const c = this.clone();
-    c._def = { ...c._def, meta: { ...(c._def.meta ?? {}), ...m } };
+    (c as any)._zod.parent = this;
+    globalRegistry.add(c, m);
     return c;
   }
   register(registry: any, m?: any): this {
-    if (m !== undefined) this.meta(m);
-    registry?.add?.(this);
+    registry?.add?.(this, m);
     return this;
   }
   check(...args: any[]): any {
@@ -1191,11 +1223,21 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           continue;
         }
         const c = o._def ?? o;
-        if (c.kind === "meta") { def.description = c.description ?? def.description; def.metadata = { ...(def.metadata ?? {}), ...(c.metadata ?? {}) }; }
+        if (c.kind === "meta") (def._metaCheck ??= []).push(c);
         else if (c.kind === "checkfn") fns.push(c.fn);
         else checks.push(c);
       }
       s = new (this as any).constructor(def);
+      if (def._metaCheck) {
+        (s as any)._zod.parent = this;
+        const meta: any = {};
+        for (const mc of def._metaCheck) {
+          if (mc.description !== undefined) meta.description = mc.description;
+          Object.assign(meta, mc.metadata);
+        }
+        globalRegistry.add(s, meta);
+        delete def._metaCheck;
+      }
     }
     if (fns.length) s = s.superRefine((v: any, ctx: any) => {
       for (const fn of fns) {
@@ -1217,7 +1259,9 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   isNullable(): boolean { return this.safeParse(null).success; }
   get def(): any { return this._def; }
   get type(): string { return this._def.type; }
-  get description(): string | undefined { return this._def.description; }
+  get description(): string | undefined {
+    return globalRegistry.get(this)?.description ?? this._def.description;
+  }
   get "~standard"() {
     const self = this;
     return {
@@ -1260,8 +1304,16 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       MEMO = prevMemo;
       RUN_CTX = prevCtx;
     }
-    if (!r.ok) return r;
     if (!pendingAsync.length) return r;
+    if (!r.ok) {
+      // a failed outer run still owns pending async checks — zod collects
+      // their issues alongside the sync ones
+      return (async () => {
+        const fr = await this._finishAsync("value" in (r as any) ? (r as any).value : data);
+        const stageIssues = fr.ok ? [] : fr.issues;
+        return { ok: false as const, issues: [...(r as any).issues, ...stageIssues], value: (r as any).value };
+      })();
+    }
     return this._finishAsync(r.value);
   }
   private async _finishAsync(value: any): Promise<any> {
@@ -1370,6 +1422,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           })),
         };
       }
+      if (st.type === "freeze") {
+        const v = atPath(root, p);
+        if (v !== null && (typeof v === "object" || typeof v === "function")) Object.freeze(v);
+        return { value: root, issues: [] };
+      }
       const res = await st.fn(cur);
       return res ? { value: root, issues: [] } : {
         value: root,
@@ -1411,10 +1468,25 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       return r.data;
     });
   }
-  spa(data: unknown): Promise<SafeParseResult<Output>> {
-    return this.safeParseAsync(data);
+  readonly(): ZodReadonly<this> {
+    return new ZodReadonly({ type: "readonly", inner: this });
   }
-  readonly(): this { return this; }
+}
+
+// readonly freezes the parsed payload; async children resolve first — the
+// freeze is queued behind their replay so in-place path writes still land
+export class ZodReadonly<T extends ZodTypeAny = ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
+  constructor(_def: any) { super(); this._def = _def; }
+  protected override _runImpl(data: unknown) {
+    const mark = pendingAsync.length;
+    const r = (this._def.inner as any)._run(data);
+    if (!r.ok) return r;
+    if (asyncMode && pendingAsync.length > mark) {
+      pendingAsync.push({ type: "freeze", path: [] } as any);
+      return r;
+    }
+    return { ok: true as const, value: Object.freeze(r.value) };
+  }
 }
 
 class ZodIssueThrow extends Error {
@@ -1679,17 +1751,19 @@ export class ZodSymbol extends ZodType<symbol> {
 export class ZodDate extends ZodType<Date> {
   constructor(_def: any = { type: "date", checks: [] }) { super(); this._def = _def; }
   private _check(c: any) { return new ZodDate({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
-  min(d: Date, message?: string) { return this._check({ kind: "min", value: d.getTime(), message }); }
-  max(d: Date, message?: string) { return this._check({ kind: "max", value: d.getTime(), message }); }
+  min(d: Date | number, message?: string) { return this._check({ kind: "min", value: d instanceof Date ? d.getTime() : +d, message }); }
+  max(d: Date | number, message?: string) { return this._check({ kind: "max", value: d instanceof Date ? d.getTime() : +d, message }); }
   get minDate(): Date | null {
+    let m = -Infinity;
     for (const c of this._def.checks ?? [])
-      if (c.kind === "min") return new Date(c.value);
-    return null;
+      if (c.kind === "min" && c.value > m) m = c.value;
+    return m === -Infinity ? null : new Date(m);
   }
   get maxDate(): Date | null {
+    let m = Infinity;
     for (const c of this._def.checks ?? [])
-      if (c.kind === "max") return new Date(c.value);
-    return null;
+      if (c.kind === "max" && c.value < m) m = c.value;
+    return m === Infinity ? null : new Date(m);
   }
 }
 
@@ -1790,6 +1864,16 @@ export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_in
 }
 export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<N, T["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
+  // zod's checks live on the schema's own def — refinements expose inner
+  // def fields like `pattern` through the wrapper
+  override get def(): any {
+    const d = this._def;
+    if (d.pattern === undefined) {
+      const p = (d.inner ?? d.innerType)?._def?.pattern;
+      if (p !== undefined) return { ...d, pattern: p };
+    }
+    return d;
+  }
   innerType() { return this._def.inner as T; }
   sourceType() { return this._def.inner as T; }
 
@@ -1958,7 +2042,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
       const mine = pushed.map(({ path, ...rest }: any) => ({ inst: this, schema: this._def.inner, ...rest, path: path ?? [] }));
       const abort = mine.length ? isAborted(mine) : undefined;
       if (ir.ok)
-        return mine.length ? { ok: false as const, issues: mine, aborted: abort } as any : ir;
+        return mine.length ? { ok: false as const, issues: mine, value: base, aborted: abort } as any : ir;
       return { ok: false as const, issues: [...ir.issues, ...mine], value: base,
                aborted: abort === true || isAborted(ir.issues) } as any;
     }
@@ -1973,7 +2057,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
       if (this._def.message !== undefined) iss.message = this._def.message;
       const mine = [iss];
       return ir.ok
-        ? { ok: false as const, issues: mine }
+        ? { ok: false as const, issues: mine, value: base }
         : { ok: false as const, issues: [...ir.issues, ...mine], value: base } as any;
     }
     return ir;
@@ -2731,7 +2815,8 @@ export function _encode(s: any, v: any): any {
   switch (d.type) {
     case "codec": return (s as any)._enc(v);
     case "pipe": return _encode(d.in, _encode(d.out, v));
-    case "transform": case "refine": case "superrefine": {
+    case "transform": throw new ZodEncodeError("ZodTransform");
+    case "refine": case "superrefine": {
       v = _encChecks(v, d.checks);
       if (typeof d.fn === "function") {
         const p = { value: v, issues: [] as any[] };
@@ -2929,8 +3014,8 @@ export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output
     const runs = opts.map((o) => o._run(data));
     const win = runs.find((r) => r.ok);
     if (win) return win;
-    const survivor = runs.findIndex((r) => !((r as any).aborted ?? isAborted(r.issues)));
-    if (survivor >= 0) return runs[survivor];
+    const nonaborted = runs.filter((r) => !((r as any).aborted ?? isAborted(r.issues)));
+    if (nonaborted.length === 1) return nonaborted[0];
     return {
       ok: false as const,
       issues: [{ code: "invalid_union", errors: runs.map((r) => (r as any).issues ?? []), path: [], message: "Invalid input" }] as any[],
@@ -3096,11 +3181,17 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
         return v;
       }
       if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
-      if (!dropped.length) return undefined;
       const trimmed: any = { ...(data as object) };
       for (const k of dropped) delete trimmed[k];
-      const rr = side._run(trimmed);
-      return rr.ok ? rr.value : undefined;
+      // engine results carry no best-effort value — re-run via the TS path
+      const prevEA = earlyAbort;
+      earlyAbort = true;
+      try {
+        const rr = side._run(trimmed) as any;
+        return rr.value;
+      } finally {
+        earlyAbort = prevEA;
+      }
     };
     const merged = _mergeValues(valueFor(this._def.left, l, "l"), valueFor(this._def.right, r, "r"));
     if (!merged.valid)
@@ -3112,18 +3203,28 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
 
 export class ZodLiteral<T> extends ZodType<T> {
   constructor(_def: any) { super(); this._def = _def; }
-  get value(): T { return this._def.value; }
+  private _vals(): any[] {
+    return this._def.values ?? (Array.isArray(this._def.value) ? this._def.value : [this._def.value]);
+  }
+  get value(): T {
+    const vs = this._vals();
+    if (vs.length !== 1) throw new Error("Literal schemas with multiple or zero values cannot be represented as a single value");
+    return vs[0];
+  }
+  get values(): Set<T> { return new Set(this._vals()); }
   // multi-value literals are one closed enum-like set — a single invalid_value
   // issue listing every member, not a union of per-literal failures. string
   // members compile to the enum node; anything else stays TS-side.
   protected override _runImpl(data: unknown) {
     const vals: any[] | undefined = this._def.values
       ?? (Array.isArray(this._def.value) ? this._def.value : undefined);
+    if (vals && vals.length === 0)
+      return { ok: false as const, issues: [{ code: "invalid_value", values: vals, path: [],
+          message: "Invalid input" }] as any };
     if (vals && vals.some((v) => typeof v !== "string")) {
       return vals.includes(data)
         ? { ok: true as const, value: data }
-        : { ok: false as const, issues: [{ code: "invalid_value", values: vals, path: [],
-            message: `Invalid option: expected one of ${vals.map((v) => JSON.stringify(v)).join("|")}` }] as any };
+        : { ok: false as const, issues: [{ code: "invalid_value", values: vals, path: [] }] as any };
     }
     return super._runImpl(data);
   }
@@ -3148,11 +3249,11 @@ export class ZodEnum<T extends string = string> extends ZodType<T> {
   get enum(): Record<T, T> {
     return Object.fromEntries(this._def.values.map((v: string) => [v, v])) as Record<T, T>;
   }
-  extract<V extends T>(vals: V[]) {
-    return new ZodEnum({ type: "enum", values: this._def.values.filter((v: string) => vals.includes(v as V)) });
+  extract<V extends T>(vals: V[], params?: any) {
+    return new ZodEnum({ type: "enum", values: this._def.values.filter((v: string) => vals.includes(v as V)), error: params === undefined ? this._def.error : params });
   }
-  exclude(vals: string[]) {
-    return new ZodEnum({ type: "enum", values: this._def.values.filter((v: string) => !vals.includes(v)) });
+  exclude(vals: string[], params?: any) {
+    return new ZodEnum({ type: "enum", values: this._def.values.filter((v: string) => !vals.includes(v)), error: params === undefined ? this._def.error : params });
   }
 }
 
@@ -3192,6 +3293,16 @@ function _norm(s: any): any {
 
 export class ZodInstanceof<T> extends ZodType<T> {
   constructor(_def: any) { super(); this._def = _def; }
+  // zod: .check() clones the schema into a plain custom — the instanceof
+  // predicate degrades from invalid_type to a `custom` code check
+  override check(...args: any[]): any {
+    const cls = this._def.ctor;
+    const base = new ZodCustom<InstanceType<any>>({
+      type: "custom", fn: (v: any) => v instanceof cls,
+      abort: true, name: this._def.name,
+    });
+    return ZodType.prototype.check.call(base, ...args);
+  }
 }
 
 export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output"]>, Promise<T["_input"]>> {
@@ -3216,10 +3327,10 @@ export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = Zod
   implement(fn: (...args: any[]) => any): (...args: any[]) => any {
     const { args, ret } = this._def as { args: A | null; ret: R | null };
     if (!args && !ret) return fn;
+    const argSchema: any = _isSchema(args) ? args : args ? new ZodTuple({ type: "tuple", items: args, rest: null } as any) : null;
     return (...callArgs: any[]) => {
-      if (args) {
-        const t = new ZodTuple({ type: "tuple", items: args, rest: null } as any);
-        const ar = t.safeParse(callArgs);
+      if (argSchema) {
+        const ar = argSchema.safeParse(callArgs);
         if (!ar.success) throw new ZodError(ar.error.issues);
       }
       const out = fn(...callArgs);
@@ -3231,10 +3342,39 @@ export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = Zod
       return out;
     };
   }
+  implementAsync(fn: (...args: any[]) => Promise<any>): (...args: any[]) => Promise<any> {
+    const { args, ret } = this._def as { args: A | null; ret: R | null };
+    const argSchema: any = _isSchema(args) ? args : args ? new ZodTuple({ type: "tuple", items: args, rest: null } as any) : null;
+    return async (...callArgs: any[]) => {
+      if (argSchema) {
+        const ar = argSchema.safeParse(callArgs);
+        if (!ar.success) throw new ZodError(ar.error.issues);
+      }
+      const out = await fn(...callArgs);
+      if (ret) {
+        const rr = await (ret as any).safeParseAsync(out);
+        if (!rr.success) throw new ZodError(rr.error.issues);
+        return (rr as any).data;
+      }
+      return out;
+    };
+  }
 }
 
 export class ZodCustom<T> extends ZodType<T> {
   constructor(_def: any) { super(); this._def = _def; }
+  protected override _runImpl(data: unknown) {
+    const fn = this._def.fn as ((v: unknown) => boolean) | undefined;
+    if (fn !== undefined) {
+      if (fn(data)) return { ok: true as const, value: data };
+      return {
+        ok: false as const, aborted: this._def.abort === true,
+        issues: [{ code: "custom", input: data, path: [],
+          ...(this._def.abort ? { continue: false } : {}) }] as any[],
+      };
+    }
+    return super._runImpl(data);
+  }
 }
 
 // ---------- type machinery ----------
@@ -3423,16 +3563,18 @@ export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
 // ---------- algorithmic string formats (can't be regexes) ----------
 // emitted as invalid_format issues exactly like zod's ZodStringFormat defs
 export class ZodAlgoFormat extends ZodType<string, string> {
-  constructor(_def: { format: string; message: string; fn: (s: string) => boolean }) {
+  constructor(_def: { format: string; message: string; fn: (s: string) => boolean; abort?: boolean }) {
     super(); this._def = { ..._def, type: "algoformat" };
   }
   protected override _runImpl(data: unknown) {
     if (typeof data !== "string")
       return { ok: false as const, issues: [typeIssue("string", data)], aborted: true };
     if (this._def.fn(data)) return { ok: true as const, value: data };
+    const abort = this._def.abort === true;
     return {
-      ok: false as const, aborted: true,
-      issues: [{ code: "invalid_format", format: this._def.format, path: [], message: this._def.message }] as any[],
+      ok: false as const, aborted: abort,
+      issues: [{ code: "invalid_format", format: this._def.format, path: [],
+        ...(abort ? { continue: false } : {}), message: this._def.message }] as any[],
     };
   }
 }
@@ -3594,3 +3736,25 @@ export function deepPartial(schema: any): any {
       : new ZodUnion({ type: "union", options: s._def.options } as any)),
   });
 }
+
+// zod installs the spa alias accessor on every prototype that composes a trait
+const _spaDesc: PropertyDescriptor = {
+  get(this: any) { return this?.safeParseAsync; },
+  set(this: any, v: any) {
+    Object.defineProperty(this, "spa", { value: v, writable: true, enumerable: true, configurable: true });
+  },
+  enumerable: true,
+  configurable: true,
+};
+for (const Cls of [
+  ZodType, ZodString, ZodNumber, ZodBigInt, ZodBoolean, ZodAny, ZodUnknown,
+  ZodNever, ZodNull, ZodUndefined, ZodVoid, ZodNaN, ZodSymbol, ZodDate,
+  ZodObject, ZodArray, ZodTuple, ZodRecord, ZodUnion, ZodDiscriminatedUnion,
+  ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
+  ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodCatch,
+  ZodEffects, ZodPipe, ZodBranded, ZodMap, ZodSet, ZodPromise, ZodFunction,
+  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform,
+  ZodPreprocess, ZodPrefault, ZodNonOptional, ZodReadonly, ZodForeign,
+])
+  if (Cls && !Object.getOwnPropertyDescriptor(Cls.prototype, "spa"))
+    Object.defineProperty(Cls.prototype, "spa", _spaDesc);

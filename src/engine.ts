@@ -205,7 +205,7 @@ const STR_FMT: Record<number, (s: string) => boolean> = {
   0x10: (s) => /^[a-zA-Z0-9_-]{21}$/.test(s),
   0x11: (s) => /^[0-9a-z]+$/.test(s),
   0x12: (s) => /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/.test(s),
-  0x13: (s) => /^(0x)?[0-9a-fA-F]+$/.test(s),
+  0x13: (s) => /^[0-9a-fA-F]*$/.test(s),
   0x14: (s) => Z_DATETIME.test(s),
   0x15: (s) => Z_DATE.test(s),
   0x16: (s) => Z_TIME.test(s),

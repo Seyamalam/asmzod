@@ -118,6 +118,14 @@ export class $ZodError<T = unknown> {
 }
 
 // the real-Error variant — safeParse/parse throw and return this
+export class $ZodEncodeError extends Error {
+  constructor(name: string) {
+    super(`Encountered unidirectional transform during encode: ${name}`);
+    this.name = "ZodEncodeError";
+  }
+}
+export { $ZodEncodeError as ZodEncodeError };
+
 export class ZodRealError<T = unknown> extends Error {
   _zod!: any;
   declare name: string;

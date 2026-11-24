@@ -129,7 +129,7 @@ const FORMAT_ORIGIN = new Set([
 
 // zod hides `pattern`/`origin` on these formats even when a regex carries
 // the actual match pattern — strip the embedded pattern field on normalize
-const FORMAT_NOPAT = new Set(["base64url", "jwt", "cidrv6", "hostname", "httpurl"]);
+export const FORMAT_NOPAT = new Set(["base64url", "jwt", "cidrv6", "hostname", "httpurl"]);
 
 // formats whose issues carry an extra `note` field
 const FORMAT_NOTES: Record<string, string> = {
@@ -313,7 +313,8 @@ export function normalizeIssue(i: any): any {
   } else if (typeof out.message === "string" && out.message.charCodeAt(0) === 0) {
     const fn = msgFns[+out.message.slice(2)];
     const { message: _m, ...rest } = out;
-    out.message = fn ? fn(rest) : _m;
+    const resolved = fn ? fn(rest) : _m;
+    out.message = unwrapMessage(resolved) ?? resolved;
   }
   // zod folds `received` into the message but exposes it as a field only from
   // guards that produce a value-qualified name: number-family NaN/Infinity and
@@ -381,7 +382,46 @@ export function finishIssues(issues: any[]): any[] {
 
 // zod's mutable global config — containers install the default memoizer on
 // construction so `delete z.config().memoizer` restores on next schema init
-export const globalConfig: any = { memoizer: undefined };
+// schema -> metadata store; `get` inherits the _zod.parent chain (minus id)
+export class ZodRegistry {
+  _map = new WeakMap<object, any>();
+  _idmap = new Map<string, any>();
+  add(schema: any, meta?: any) {
+    this._map.set(schema, meta);
+    if (meta && typeof meta === "object" && "id" in meta) this._idmap.set(meta.id, schema);
+    return this;
+  }
+  clear() {
+    this._map = new WeakMap();
+    this._idmap = new Map();
+    return this;
+  }
+  remove(schema: any) {
+    const meta = this._map.get(schema);
+    if (meta && typeof meta === "object" && "id" in meta) this._idmap.delete(meta.id);
+    this._map.delete(schema);
+    return this;
+  }
+  get(schema: any): any {
+    const p = schema?._zod?.parent;
+    if (p) {
+      const pm: any = { ...(this.get(p) ?? {}) };
+      delete pm.id;
+      const f = { ...pm, ...this._map.get(schema) };
+      return Object.keys(f).length ? f : undefined;
+    }
+    return this._map.get(schema);
+  }
+  has(schema: any) { return this._map.has(schema); }
+}
+
+// globalThis singleton: one registry shared across module copies
+export const globalRegistry: ZodRegistry =
+  ((globalThis as any).__zod_globalRegistry ??= new ZodRegistry());
+
+// globalThis singleton: one config shared across CJS/ESM/bundled copies
+export const globalConfig: any =
+  ((globalThis as any).__zod_globalConfig ??= { memoizer: undefined });
 export function config(cfg?: any) {
   if (cfg) { configure(cfg); Object.assign(globalConfig, cfg); }
   return globalConfig;
@@ -503,4 +543,96 @@ export function finalizeIssueTree(iss: any, ctx: any, config: any): any {
   if (Array.isArray(f.errors)) f.errors = f.errors.map((a: any) => Array.isArray(a) ? a.map((i: any) => finalizeIssueTree(i, ctx, config)) : a);
   if (Array.isArray(f.issues)) f.issues = f.issues.map((i: any) => finalizeIssueTree(i, ctx, config));
   return f;
+}
+
+// ---------- locales ----------
+function _joinValues(vals: any[], sep = "|"): string {
+  return vals.map((v) => (typeof v === "string" ? `"${v}"` : `${v}`)).join(sep);
+}
+function _stringifyPrimitive(v: any): string {
+  if (typeof v === "bigint") return `${v}n`;
+  if (typeof v === "symbol") return String(v);
+  if (typeof v === "string") return `"${v}"`;
+  return `${v}`;
+}
+export function frLocaleError(): (issue: any) => string {
+  const Sizable: Record<string, { unit: string; verb: string }> = {
+    string: { unit: "caractères", verb: "avoir" },
+    file: { unit: "octets", verb: "avoir" },
+    array: { unit: "éléments", verb: "avoir" },
+    set: { unit: "éléments", verb: "avoir" },
+  };
+  const FormatDictionary: Record<string, string> = {
+    regex: "expression régulière", email: "adresse e-mail", url: "URL",
+    emoji: "emoji", uuid: "UUID", uuidv4: "UUIDv4", uuidv6: "UUIDv6",
+    nanoid: "nanoid", guid: "GUID", cuid: "cuid", cuid2: "cuid2",
+    ulid: "ULID", xid: "XID", ksuid: "KSUID",
+    datetime: "date et heure ISO", date: "date ISO", time: "heure ISO",
+    duration: "durée ISO", ipv4: "adresse IPv4", ipv6: "adresse IPv6",
+    mac: "adresse MAC", cidrv4: "plage IPv4", cidrv6: "plage IPv6",
+    base64: "chaîne de caractères encodée en base64",
+    base64url: "chaîne de caractères encodée en base64url",
+    json_string: "chaîne de caractères JSON", e164: "numéro au format E.164",
+    credit_card: "numéro de carte de crédit", currency_code: "code de devise",
+    iban: "IBAN", jwt: "JWT", template_literal: "entrée",
+  };
+  const TypeDictionary: Record<string, string> = {
+    string: "chaîne de caractères", number: "nombre", int: "entier",
+    boolean: "booléen", bigint: "grand entier", symbol: "symbole",
+    undefined: "indéfini", null: "null", never: "jamais", void: "vide",
+    date: "date", array: "tableau", object: "objet", tuple: "tuple",
+    record: "record", map: "map", set: "ensemble", file: "fichier",
+    nonoptional: "non optionnel", nan: "NaN", function: "fonction",
+  };
+  return (issue: any) => {
+    switch (issue.code) {
+      case "invalid_type": {
+        const expected = TypeDictionary[issue.expected] ?? issue.expected;
+        const receivedType = parsedTypeName(issue.input);
+        const received = TypeDictionary[receivedType] ?? receivedType;
+        if (/^[A-Z]/.test(issue.expected))
+          return `Entrée invalide : instance de ${issue.expected} attendu, ${received} reçu`;
+        return `Entrée invalide : ${expected} attendu, ${received} reçu`;
+      }
+      case "invalid_value":
+        if (issue.values.length === 1) return `Entrée invalide : ${_stringifyPrimitive(issue.values[0])} attendu`;
+        return `Option invalide : une valeur parmi ${_joinValues(issue.values, "|")} attendue`;
+      case "too_big": {
+        const adj = issue.inclusive ? "<=" : "<";
+        const sizing = Sizable[issue.origin] ?? null;
+        if (sizing)
+          return `Trop grand : ${TypeDictionary[issue.origin] ?? "valeur"} doit ${sizing.verb} ${adj}${issue.maximum.toString()} ${sizing.unit ?? "élément(s)"}`;
+        return `Trop grand : ${TypeDictionary[issue.origin] ?? "valeur"} doit être ${adj}${issue.maximum.toString()}`;
+      }
+      case "too_small": {
+        const adj = issue.inclusive ? ">=" : ">";
+        const sizing = Sizable[issue.origin] ?? null;
+        if (sizing)
+          return `Trop petit : ${TypeDictionary[issue.origin] ?? "valeur"} doit ${sizing.verb} ${adj}${issue.minimum.toString()} ${sizing.unit}`;
+        return `Trop petit : ${TypeDictionary[issue.origin] ?? "valeur"} doit être ${adj}${issue.minimum.toString()}`;
+      }
+      case "invalid_format": {
+        if (issue.format === "starts_with")
+          return `Chaîne de caractères invalide : doit commencer par "${issue.prefix}"`;
+        if (issue.format === "ends_with")
+          return `Chaîne de caractères invalide : doit se terminer par "${issue.suffix}"`;
+        if (issue.format === "includes") return `Chaîne de caractères invalide : doit inclure "${issue.includes}"`;
+        if (issue.format === "regex")
+          return `Chaîne de caractères invalide : doit correspondre au motif ${issue.pattern}`;
+        return `${FormatDictionary[issue.format] ?? issue.format} invalide`;
+      }
+      case "not_multiple_of":
+        return `Nombre invalide : doit être un multiple de ${issue.divisor}`;
+      case "unrecognized_keys":
+        return `Clé${issue.keys.length > 1 ? "s" : ""} non reconnue${issue.keys.length > 1 ? "s" : ""} : ${_joinValues(issue.keys, ", ")}`;
+      case "invalid_key":
+        return `Clé invalide dans ${issue.origin}`;
+      case "invalid_union":
+        return "Entrée invalide";
+      case "invalid_element":
+        return `Valeur invalide dans ${issue.origin}`;
+      default:
+        return "Entrée invalide";
+    }
+  };
 }

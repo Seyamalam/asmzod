@@ -781,7 +781,7 @@ _az_is_base64:
     .globl _az_is_hex
     AZ_HIDDEN _az_is_hex
 _az_is_hex:
-    cbz x1, .Lhx_no
+    cbz x1, .Lhx_yes           // zod: "" is valid hex (*)
     mov x9, #0
     cmp x1, #16
     b.lo .Lhx_l
