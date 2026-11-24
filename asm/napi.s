@@ -25,6 +25,10 @@ _azn_cbtab:     .quad 0          // cb table ptr (from init())
     .p2align 3
 _azn_errbuf:    .space 1048576   // 1MB err arena
 _azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
+_azn_intern:    .space 2048       // 64 slots x 32B {gen, len, keyptr, napi_value}
+_azn_internkeys:.space 8192        // bump region for interned key bytes
+_azn_interncur: .space 8
+_azn_interngen: .space 8           // generation, bumped per parse — stale slots miss
 _azn_lazytab:   .space 32768      // 4096 resolved lazy-subblob data ptrs
 _azn_ctortab:   .space 8192       // 1024 constructor napi_values for instanceof
 _azn_cbrefine:  .space 8192       // refine[cbid] napi_values
@@ -549,6 +553,12 @@ _aznapi_parsemany:
     AZ_ADR x9, _azn_obuf
     AZ_ADR x10, _azn_ocur
     str x9, [x10]
+    AZ_ADR x9, _azn_interngen
+    ldr x10, [x9]
+    add x10, x10, #1
+    str x10, [x9]
+    AZ_ADR x9, _azn_interncur
+    str xzr, [x9]
     mov x0, x25
     ldr x1, [sp, #152]
     add x2, sp, #160
@@ -730,7 +740,13 @@ _aznapi_parse:
     AZ_ADR x20, _azn_scratch
     AZ_ADR x9, _azn_obuf
     AZ_ADR x10, _azn_ocur
-    str x9, [x10]             // reset staging cursor per parse
+    str x9, [x10]
+    AZ_ADR x9, _azn_interngen
+    ldr x10, [x9]
+    add x10, x10, #1
+    str x10, [x9]
+    AZ_ADR x9, _azn_interncur
+    str xzr, [x9]             // reset staging cursor per parse
     str xzr, [x22]
     str xzr, [x22, #8]
     str xzr, [x22, #16]
@@ -1542,13 +1558,93 @@ _azn_blob_to_napi:
 .Lb2n_str:
     ldr x9, [sp, #16]
     ldr x1, [x9, #1]            // len
-    add x2, x9, #9              // bytes — wait: create_string_utf8(str,len,out)
+    add x2, x9, #9              // bytes
+    // intern short strings per-parse: values stay alive in this call's
+    // handle scope, so no napi_refs needed (and Bun can't ref primitives)
+    cmp x1, #32
+    b.hi .Lb2n_str_mk
+    str x1, [sp, #96]
+    str x2, [sp, #104]
+    mov x10, #131
+    mul x10, x1, x10
+    ldrb w11, [x2]              // b[0]
+    eor x10, x10, x11
+    sub x12, x1, #1
+    ldrb w11, [x2, x12]         // b[len-1]
+    eor x10, x10, x11
+    and x10, x10, #63
+    lsl x10, x10, #5            // *32
+    AZ_ADR x11, _azn_intern
+    add x10, x11, x10           // slot
+    str x10, [sp, #112]
+    AZ_ADR x11, _azn_interngen
+    ldr x11, [x11]              // current gen
+    ldr x13, [x10]              // entry gen
+    cmp x13, x11
+    b.ne .Lb2n_str_miss
+    ldr x13, [x10, #8]          // entry len
+    cmp x13, x1
+    b.ne .Lb2n_str_miss
+    ldr x0, [x10, #16]          // keyptr
+    ldr x1, [sp, #104]          // our bytes
+    ldr x2, [sp, #96]           // len
+    bl _az_memeq
+    cbz w0, .Lb2n_str_miss
+    // hit: return the interned napi_value
+    ldr x9, [sp, #112]
+    ldr x9, [x9, #24]
+    ldr x10, [sp, #24]
+    str x9, [x10]
+    mov x0, #0
+    b .Lb2n_out
+.Lb2n_str_miss:
+    mov x0, x26
+    ldr x1, [sp, #104]
+    ldr x2, [sp, #96]
+    ldr x3, [sp, #24]
+    bl AZ_NAPI(napi_create_string_utf8)
+    cbnz x0, .Lb2n_str_plain
+    // copy key bytes into bump region (skip interning if full)
+    AZ_ADR x9, _azn_interncur
+    ldr x10, [x9]
+    ldr x11, [sp, #96]
+    add x12, x10, x11
+    cmp x12, #8192
+    b.hs .Lb2n_str_plain
+    AZ_ADR x13, _azn_internkeys
+    add x13, x13, x10
+    mov x0, x13
+    ldr x1, [sp, #104]
+    mov x2, x11
+    str x13, [sp, #120]
+    bl _az_memcpy
+    AZ_ADR x9, _azn_interncur
+    ldr x10, [x9]
+    ldr x11, [sp, #96]
+    add x10, x10, x11
+    str x10, [x9]
+    ldr x10, [sp, #112]
+    AZ_ADR x9, _azn_interngen
+    ldr x11, [x9]
+    str x11, [x10]              // gen
+    ldr x11, [sp, #96]
+    str x11, [x10, #8]          // len
+    ldr x11, [sp, #120]
+    str x11, [x10, #16]         // keyptr
+    ldr x9, [sp, #24]
+    ldr x9, [x9]
+    str x9, [x10, #24]          // value
+    b .Lb2n_ok
+.Lb2n_str_mk:
     mov x9, x2
     mov x2, x1
     mov x1, x9
     mov x0, x26
     ldr x3, [sp, #24]
     bl AZ_NAPI(napi_create_string_utf8)
+    b .Lb2n_ok
+.Lb2n_str_plain:
+    mov x0, #0
     b .Lb2n_ok
 .Lb2n_big:
     ldr x9, [sp, #16]

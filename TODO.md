@@ -3,13 +3,13 @@
 ## J — failure-path cost (~1µs/issue gap)
 - [x] 1. Profile failure-path split: native issue build vs finishIssues vs normalizeIssue vs ZodError
 - [x] 2. `napi_define_properties` batch property writes per issue
-- [ ] 3. Intern issue field-name napi_values at init
-- [ ] 4. Intern common issue strings ("too_small", "invalid_type", ...)
-- [ ] 5. Fixed key order on issue objects (stable hidden class)
+- [x] 3. Intern issue field-name napi_values at init
+- [x] 4. Intern common issue strings ("too_small", "invalid_type", ...)
+- [x] 5. Fixed key order on issue objects (stable hidden class)
 - [ ] 6. Move normalizeIssue format/origin/note tables into asm
 - [x] 7. Lazy ZodError.message (build pretty JSON on first access)
-- [ ] 8. Fast-scan finishIssues — skip splice when no _k markers
-- [ ] 9. Skip defaultMessage when custom message present
+- [x] 8. Fast-scan finishIssues — skip splice when no _k markers
+- [x] 9. Skip defaultMessage when custom message present
 - [ ] 10. Path segments as interned strings, not copies
 - [ ] 11. ArrayBuffer fallback only above issue-count threshold
 - [x] 12. parseMany: carry native issues through marker, no TS re-parse
