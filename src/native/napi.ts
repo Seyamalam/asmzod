@@ -16,6 +16,7 @@ interface AzNapi {
   initCtor(ctors: unknown[]): boolean;
   initCb(tables: unknown[][]): boolean;
   parse(blob: Uint8Array, value: unknown): { ok: true; value: unknown } | { ok: false; err: ArrayBuffer } | { ok: null; code: number } | undefined;
+  parseMany?(blob: Uint8Array, values: unknown[]): unknown[];
 }
 
 let lazyCount = 0;
@@ -112,4 +113,38 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
     cur = np;
   }
   return { ok: false, issues: finishIssues(issues) };
+}
+
+// parseMany: the addon loops aznapi_run over an array natively — per element
+// a bare output value on success or a {~azres, ok:null, code} marker, which
+// we re-run through the normal parse() path to build issues
+export function parseMany(blob: Uint8Array, values: unknown[], hosts: HostTable, cbUnsafe?: boolean): ParseResult[] | null {
+  const a = loadNapi();
+  if (!a?.parseMany || cbUnsafe) return null;
+  if (napiOff === undefined) {
+    try { napiOff = (globalThis as any).process?.env?.AZ_NAPI === "0"; } catch { napiOff = false; }
+  }
+  if (napiOff) return null;
+  if (!cbInit) {
+    cbInit = a.init(new Uint8Array(32));
+    if (!cbInit) return null;
+  }
+  ensureLazy(a);
+  ensureCtor(a);
+  ensureCb(a);
+  const out = a.parseMany(blob, values);
+  if (!Array.isArray(out) || out.length !== values.length) return null;
+  const res: ParseResult[] = [];
+  for (let i = 0; i < out.length; i++) {
+    const r = out[i] as any;
+    if (r?.[RES] === true) {
+      if (r.ok === null && r.code === -11) throw r.exc;
+      const again = parse(blob, values[i], hosts, false);
+      if (again === null) return null;
+      res.push(again);
+    } else {
+      res.push({ ok: true, value: r });
+    }
+  }
+  return res;
 }

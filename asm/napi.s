@@ -81,6 +81,19 @@ _napi_register_module_v1:       // alias for internal Mach-O-style refs
     mov x1, x20
     AZ_ADR x2, .Lnm_parse
     bl AZ_NAPI(napi_set_named_property)
+    // create "parseMany" fn
+    mov x0, x19
+    AZ_ADR x1, .Lnm_parsemany
+    mov x2, #9
+    AZ_ADR x3, _aznapi_parsemany
+    mov x4, #0
+    add x5, sp, #32
+    bl AZ_NAPI(napi_create_function)
+    ldr x3, [sp, #32]
+    mov x0, x19
+    mov x1, x20
+    AZ_ADR x2, .Lnm_parsemany
+    bl AZ_NAPI(napi_set_named_property)
     // create "init" fn
     mov x0, x19
     AZ_ADR x1, .Lnm_init
@@ -138,6 +151,7 @@ _napi_register_module_v1:       // alias for internal Mach-O-style refs
     ldp x29, x30, [sp], #64
     ret
 .Lnm_parse: .ascii "parse\0"
+.Lnm_parsemany: .ascii "parseMany\0"
 .Lnm_init:  .ascii "init\0"
 .Lnm_initlazy: .ascii "initLazy\0"
 .Lnm_initctor: .ascii "initCtor\0"
@@ -458,6 +472,154 @@ _aznapi_initcb:
 
 // ================= parse(blobTA, value) =================// ================= parse(blobTA, value) =================// ================= parse(blobTA, value) =================
 // -> value | {ok:false,err} | undefined(fallback)
+// ================= parseMany(blob, array) =================
+// per element: success -> output value bare; failure/punt/throw ->
+// {~azres:true, ok:null, code:n} — TS re-runs those through parse()
+    .globl _aznapi_parsemany
+    AZ_HIDDEN _aznapi_parsemany
+_aznapi_parsemany:
+    stp x29, x30, [sp, #-192]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    stp x23, x24, [sp, #48]
+    stp x25, x26, [sp, #64]
+    stp x27, x28, [sp, #80]
+    mov x26, x0               // env
+    mov x27, x1               // info
+    mov x9, #2
+    str x9, [sp, #112]        // argc
+    mov x0, x26
+    mov x1, x27
+    add x2, sp, #112
+    add x3, sp, #96           // argv
+    mov x4, #0
+    mov x5, #0
+    bl AZ_NAPI(napi_get_cb_info)
+    cbnz x0, .Lpm_ret0
+    ldr x1, [sp, #96]
+    mov x0, x26
+    add x2, sp, #112
+    add x3, sp, #120
+    add x4, sp, #128
+    mov x5, #0
+    mov x6, #0
+    bl AZ_NAPI(napi_get_typedarray_info)
+    ldr x25, [sp, #128]       // blob base
+    AZ_ADR x9, _azn_errbase
+    ldr x22, [x9]
+    add x23, x22, #1048576
+    AZ_ADR x9, _azn_cbtab
+    ldr x24, [x9]
+    cbz x24, .Lpm_ret0
+    mov x0, x26
+    add x1, sp, #144
+    bl AZ_NAPI(napi_get_undefined)
+    ldr x9, [sp, #144]
+    AZ_ADR x10, _azn_undef
+    str x9, [x10]
+    AZ_ADR x20, _azn_scratch
+    mov x0, x26
+    ldr x1, [sp, #104]        // array val
+    add x2, sp, #136
+    bl AZ_NAPI(napi_get_array_length)
+    ldr w19, [sp, #136]       // n (u32)
+    mov x0, x26
+    mov x1, x19
+    add x2, sp, #144
+    bl AZ_NAPI(napi_create_array_with_length)
+    cbnz x0, .Lpm_ret0
+    str wzr, [sp, #140]       // i
+.Lpm_loop:
+    ldr w9, [sp, #140]
+    cmp w9, w19
+    b.hs .Lpm_done
+    mov x0, x26
+    ldr x1, [sp, #104]
+    ldr w2, [sp, #140]
+    add x3, sp, #152
+    bl AZ_NAPI(napi_get_element)
+    cbnz x0, .Lpm_ret0
+    // per-element arena reset
+    add x21, x22, #3104
+    str xzr, [x22]
+    str xzr, [x22, #8]
+    str xzr, [x22, #16]
+    str xzr, [x22, #24]
+    AZ_ADR x9, _azn_obuf
+    AZ_ADR x10, _azn_ocur
+    str x9, [x10]
+    mov x0, x25
+    ldr x1, [sp, #152]
+    add x2, sp, #160
+    bl _aznapi_run
+    cmp x0, #0
+    b.ne .Lpm_mark
+    mov x0, x26
+    ldr x1, [sp, #144]
+    ldr w2, [sp, #140]
+    ldr x3, [sp, #160]
+    bl AZ_NAPI(napi_set_element)
+    b .Lpm_next
+.Lpm_mark:
+    str x0, [sp, #168]        // run code
+    mov x0, x26
+    add x1, sp, #176
+    bl AZ_NAPI(napi_create_object)
+    mov x0, x26
+    mov x1, #1
+    add x2, sp, #184
+    bl AZ_NAPI(napi_get_boolean)
+    mov x0, x26
+    ldr x1, [sp, #176]
+    AZ_ADR x2, .Lnm_azres
+    ldr x3, [sp, #184]
+    bl AZ_NAPI(napi_set_named_property)
+    mov x0, x26
+    add x1, sp, #184
+    bl AZ_NAPI(napi_get_null)
+    mov x0, x26
+    ldr x1, [sp, #176]
+    AZ_ADR x2, .Lnm_ok
+    ldr x3, [sp, #184]
+    bl AZ_NAPI(napi_set_named_property)
+    ldr x0, [sp, #168]
+    scvtf d0, x0
+    mov x0, x26
+    add x1, sp, #184
+    bl AZ_NAPI(napi_create_double)
+    mov x0, x26
+    ldr x1, [sp, #176]
+    AZ_ADR x2, .Lnm_code
+    ldr x3, [sp, #184]
+    bl AZ_NAPI(napi_set_named_property)
+    mov x0, x26
+    ldr x1, [sp, #144]
+    ldr w2, [sp, #140]
+    ldr x3, [sp, #176]
+    bl AZ_NAPI(napi_set_element)
+.Lpm_next:
+    ldr w9, [sp, #140]
+    add w9, w9, #1
+    str w9, [sp, #140]
+    b .Lpm_loop
+.Lpm_done:
+    ldr x0, [sp, #144]
+    b .Lpm_ret
+.Lpm_ret0:
+    mov x0, x26
+    add x1, sp, #144
+    bl AZ_NAPI(napi_get_undefined)
+    ldr x0, [sp, #144]
+.Lpm_ret:
+    ldp x19, x20, [sp, #16]
+    ldp x21, x22, [sp, #32]
+    ldp x23, x24, [sp, #48]
+    ldp x25, x26, [sp, #64]
+    ldp x27, x28, [sp, #80]
+    ldp x29, x30, [sp], #192
+    ret
+
 _aznapi_parse:
     stp x29, x30, [sp, #-256]!
     mov x29, sp
@@ -3702,12 +3864,13 @@ _azn_truthy:
     bl _azn_typeof
     cmp w0, #NAPI_OBJ
     b.ne .Ln_date_fail
-    mov x0, x28
-    AZ_ADR x1, .Ls_Date
-    mov x2, #4
-    bl _azn_is_proto
-    cmp w0, #1
-    b.ne .Ln_date_fail
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_A
+    bl AZ_NAPI(napi_is_date)
+    cbnz x0, .Ln_date_fail
+    ldrb w0, [sp, #LN_A]
+    cbz w0, .Ln_date_fail
     mov x0, x26
     mov x1, x28
     AZ_ADR x2, .Ls_getTime

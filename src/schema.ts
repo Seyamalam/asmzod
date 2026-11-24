@@ -242,6 +242,25 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   async safeParseAsync(data: unknown): Promise<SafeParseResult<Output>> {
     return this.safeParse(data);
   }
+  // extension: batch-validate through the addon's in-native loop when
+  // available; per-element results like a map of safeParse
+  safeParseMany(data: unknown[]): SafeParseResult<Output>[] {
+    const c = this._compile();
+    const rs = napiBackend.parseMany(c.blob, data, c.hosts, c.cbUnsafe);
+    if (rs !== null) {
+      return rs.map((r) => {
+        if (r.ok) return { success: true as const, data: r.value as Output };
+        return { success: false as const, error: new ZodError(r.issues) };
+      });
+    }
+    return data.map((v) => this.safeParse(v));
+  }
+  parseMany(data: unknown[]): Output[] {
+    return this.safeParseMany(data).map((r) => {
+      if (!r.success) throw r.error;
+      return r.data;
+    });
+  }
   spa(data: unknown): Promise<SafeParseResult<Output>> {
     return this.safeParseAsync(data);
   }
