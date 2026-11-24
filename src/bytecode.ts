@@ -361,8 +361,8 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       return;
     }
 
-    case "default": case "catch": {
-      w.u8(d.type === "default" ? 0x0d : 0x0e);
+    case "default": case "prefault": case "catch": {
+      w.u8(d.type === "catch" ? 0x0e : 0x0d);
       const f = w.field();
       w.raw(encodeValue(d.value, hosts));
       const at = w.pos;

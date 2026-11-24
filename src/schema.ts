@@ -1160,17 +1160,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return this.check({ kind: "tx", tx: fn });
   }
   prefault<V extends Input>(value: V | (() => V)): ZodType<Output, Input | undefined> {
-    return new ZodPipe({
-      type: "pipe",
-      prefault: true,
-      in: new ZodEffects<ZodAny>({
-        type: "transform", inner: new ZodAny(),
-        cbid: regId(reg.transform, (x: unknown) => x === undefined
-          ? (typeof value === "function" ? (value as () => V)() : value)
-          : x),
-      }),
-      out: this,
-    }) as any;
+    return new ZodPrefault({ type: "prefault", inner: this, value }) as any;
   }
   isOptional(): boolean { return this.safeParse(undefined).success; }
   isNullable(): boolean { return this.safeParse(null).success; }
@@ -1679,13 +1669,31 @@ export class ZodDefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_
   constructor(_def: any) { super(); this._def = _def; }
   removeDefault() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
-    if (this._isRec() || typeof this._def.value === "function") {
-      const v = data === undefined
-        ? (typeof this._def.value === "function" ? this._def.value() : this._def.value)
-        : data;
-      return (this._def.inner as any)._run(v);
+    if (this._isRec() || this._hasFx() || typeof this._def.value === "function") {
+      // zod: undefined input short-circuits to the default unvalidated; a
+      // defined input runs inner, and an undefined RESULT swaps in the
+      // default too (output-side default, e.g. transform -> undefined)
+      if (data === undefined)
+        return { ok: true as const, value: typeof this._def.value === "function" ? this._def.value() : this._def.value };
+      const r = (this._def.inner as any)._run(data);
+      if (r.ok && r.value === undefined)
+        return { ok: true as const, value: typeof this._def.value === "function" ? this._def.value() : this._def.value };
+      return r;
     }
     return super._runImpl(data);
+  }
+}
+export class ZodPrefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"] | undefined> {
+  constructor(_def: any) { super(); this._def = _def; }
+  protected override _runImpl(data: unknown) {
+    // prefault validates the substituted value through inner (unlike
+    // default, which trusts it) — the engine's 0x0d node shares that shape
+    if (!this._isRec() && !this._hasFx() && typeof this._def.value !== "function")
+      return super._runImpl(data);
+    const v = data === undefined
+      ? (typeof this._def.value === "function" ? this._def.value() : this._def.value)
+      : data;
+    return (this._def.inner as any)._run(v);
   }
 }
 export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
@@ -2711,8 +2719,9 @@ export function _encode(s: any, v: any): any {
       return ev;
     }
     case "default": case "prefault":
-      return _encode(d.inner ?? d.innerType,
-        v === undefined ? (typeof d.value === "function" ? d.value() : d.value) : v);
+      // backward direction: defaults are decode-only — the raw value goes
+      // through inner validation, so undefined earns invalid_type
+      return _encode(d.inner ?? d.innerType, v);
     case "catch": return _encode(d.inner ?? d.innerType, v);
     case "readonly": case "brand": case "success":
       return _encode(d.inner ?? d.innerType, v);

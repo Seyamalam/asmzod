@@ -6,7 +6,7 @@ import {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
-  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess,
+  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess, ZodPrefault,
   ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema, _zodPattern,
   deepPartial as _deepPartial,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
@@ -631,7 +631,7 @@ export const z = {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodPromise, ZodFunction, ZodStringbool,
-  ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform, ZodPreprocess,
+  ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform, ZodPreprocess, ZodPrefault,
   NEVER,
   ZodIssueCode: {
     invalid_type: "invalid_type",
