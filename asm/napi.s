@@ -317,6 +317,8 @@ _aznapi_run:
     b.eq .Ln_obj
     cmp w9, #0x06
     b.eq .Ln_arr
+    cmp w9, #0x07
+    b.eq .Ln_union
     cmp w9, #0x09
     b.eq .Ln_lit
     cmp w9, #0x0a
@@ -1240,6 +1242,294 @@ _az_issue_size_n:
     mov x0, #0
     b .Ln_ret
 
+// _azn_encval(x0=val, x1=dst) -> x0 = bytes written, or -1 unsupported
+// writes the same tagged format as codec.encodeValue (tags 0-7 only)
+_azn_encval:
+    stp x29, x30, [sp, #-160]!
+    mov x29, sp
+    stp x0, x1, [sp, #16]       // val, dst
+    bl _azn_typeof
+    cmp w0, #NAPI_UNDEF
+    b.eq .Lenc_und
+    cmp w0, #NAPI_NULL
+    b.eq .Lenc_nul
+    cmp w0, #NAPI_BOOL
+    b.eq .Lenc_bol
+    cmp w0, #NAPI_NUM
+    b.eq .Lenc_num
+    cmp w0, #NAPI_STR
+    b.eq .Lenc_str
+    cmp w0, #NAPI_BIG
+    b.eq .Lenc_big
+    cmp w0, #NAPI_OBJ
+    b.eq .Lenc_obj
+    mov x0, #-1
+    b .Lenc_out
+.Lenc_und:
+    ldr x9, [sp, #24]
+    mov w10, #0
+    strb w10, [x9]
+    mov x0, #1
+    b .Lenc_out
+.Lenc_nul:
+    ldr x9, [sp, #24]
+    mov w10, #1
+    strb w10, [x9]
+    mov x0, #1
+    b .Lenc_out
+.Lenc_bol:
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #32
+    bl _napi_get_value_bool
+    ldr x9, [sp, #24]
+    mov w10, #2
+    strb w10, [x9]
+    ldrb w10, [sp, #32]
+    strb w10, [x9, #1]
+    mov x0, #2
+    b .Lenc_out
+.Lenc_num:
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #32
+    bl _napi_get_value_double
+    ldr x9, [sp, #24]
+    mov w10, #3
+    strb w10, [x9]
+    ldr d0, [sp, #32]
+    str d0, [x9, #1]
+    mov x0, #9
+    b .Lenc_out
+.Lenc_str:
+    // fetch utf8 into scratch+1MB, then copy to dst
+    mov x0, x26
+    ldr x1, [sp, #16]
+    mov x12, #1048576
+    add x2, x20, x12
+    mov x3, #1048576
+    add x4, sp, #32
+    bl _napi_get_value_string_utf8
+    cbnz x0, .Lenc_neg
+    ldr x9, [sp, #24]
+    mov w10, #4
+    strb w10, [x9]
+    ldr x10, [sp, #32]          // len
+    str x10, [x9, #1]
+    add x0, x9, #9
+    mov x12, #1048576
+    add x1, x20, x12
+    mov x2, x10
+    bl _az_memcpy
+    ldr x10, [sp, #32]
+    add x0, x10, #9
+    b .Lenc_out
+.Lenc_big:
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #32
+    add x3, sp, #40
+    bl _napi_get_value_bigint_int64
+    ldr x9, [sp, #24]
+    mov w10, #5
+    strb w10, [x9]
+    ldr x10, [sp, #32]
+    str x10, [x9, #1]
+    mov x0, #9
+    b .Lenc_out
+.Lenc_obj:
+    // array -> tag7; plain/exotic object -> tag6 via own-property names
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #32
+    bl _napi_is_array
+    ldrb w9, [sp, #32]
+    cbnz w9, .Lenc_arr
+    // tag6 object: u64 nf | [u64 klen,key,val]*
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #32
+    bl _napi_get_property_names
+    cbnz x0, .Lenc_neg
+    mov x0, x26
+    ldr x1, [sp, #32]
+    add x2, sp, #40
+    bl _napi_get_array_length
+    ldr w9, [sp, #40]
+    str x9, [sp, #48]           // nf
+    ldr x10, [sp, #24]
+    mov w11, #6
+    strb w11, [x10]
+    str x9, [x10, #1]
+    add x10, x10, #9
+    str x10, [sp, #56]          // write cursor
+    str xzr, [sp, #64]          // i
+.Lenc_okv:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #48]
+    cmp x9, x10
+    b.hs .Lenc_odone
+    // key = names[i]
+    mov x0, x26
+    ldr x1, [sp, #32]
+    ldr x2, [sp, #64]
+    add x3, sp, #72
+    bl _napi_get_element
+    // klen via get_string_utf8 into scratch+1MB
+    mov x0, x26
+    ldr x1, [sp, #72]
+    mov x12, #1048576
+    add x2, x20, x12
+    mov x3, #1048576
+    add x4, sp, #80
+    bl _napi_get_value_string_utf8
+    cbnz x0, .Lenc_neg
+    ldr x9, [sp, #56]
+    ldr x10, [sp, #80]
+    str x10, [x9]
+    add x0, x9, #8
+    mov x12, #1048576
+    add x1, x20, x12
+    mov x2, x10
+    bl _az_memcpy
+    ldr x9, [sp, #56]
+    ldr x10, [sp, #80]
+    add x9, x9, x10
+    add x9, x9, #8
+    str x9, [sp, #56]
+    // prop value
+    mov x0, x26
+    ldr x1, [sp, #16]
+    ldr x2, [sp, #72]
+    add x3, sp, #88
+    bl _napi_get_property
+    ldr x0, [sp, #88]
+    ldr x1, [sp, #56]
+    bl _azn_encval
+    cmp x0, #-1
+    b.eq .Lenc_neg
+    ldr x9, [sp, #56]
+    add x9, x9, x0
+    str x9, [sp, #56]
+    ldr x9, [sp, #64]
+    add x9, x9, #1
+    str x9, [sp, #64]
+    b .Lenc_okv
+.Lenc_odone:
+    ldr x0, [sp, #56]
+    ldr x9, [sp, #24]
+    sub x0, x0, x9
+    b .Lenc_out
+.Lenc_arr:
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #40
+    bl _napi_get_array_length
+    ldr w9, [sp, #40]
+    str x9, [sp, #48]           // n
+    ldr x10, [sp, #24]
+    mov w11, #7
+    strb w11, [x10]
+    str x9, [x10, #1]
+    add x10, x10, #9
+    str x10, [sp, #56]
+    str xzr, [sp, #64]
+.Lenc_al:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #48]
+    cmp x9, x10
+    b.hs .Lenc_adone
+    mov x0, x26
+    ldr x1, [sp, #16]
+    ldr x2, [sp, #64]
+    add x3, sp, #88
+    bl _napi_get_element
+    ldr x0, [sp, #88]
+    ldr x1, [sp, #56]
+    bl _azn_encval
+    cmp x0, #-1
+    b.eq .Lenc_neg
+    ldr x9, [sp, #56]
+    add x9, x9, x0
+    str x9, [sp, #56]
+    ldr x9, [sp, #64]
+    add x9, x9, #1
+    str x9, [sp, #64]
+    b .Lenc_al
+.Lenc_adone:
+    ldr x0, [sp, #56]
+    ldr x9, [sp, #24]
+    sub x0, x0, x9
+    b .Lenc_out
+.Lenc_neg:
+    mov x0, #-1
+.Lenc_out:
+    ldp x29, x30, [sp], #160
+    ret
+
+// ---- 0x07 UNION ----
+// op|nopts(8)|fields[n]|uidx(8) — try each option; rollback err ctx per
+// failed option; all fail -> invalid_union + _u=uidx
+.Ln_union:
+    ldr x9, [x27, #1]         // nopts
+    str x9, [sp, #LN_A]
+    add x10, x27, #9
+    str x10, [sp, #LN_B]      // field cursor
+    // save err ctx for rollback
+    str x21, [sp, #LN_C]      // err cursor
+    ldr x9, [x22]
+    str x9, [sp, #LN_D]       // issue count
+    ldr x9, [x22, #8]
+    str x9, [sp, #LN_E]       // path depth
+    ldr x9, [x22, #16]
+    str x9, [sp, #LN_F]       // patch ptr
+.Ln_un_loop:
+    ldr x9, [sp, #LN_A]
+    cbz x9, .Ln_un_allfail
+    ldr x12, [sp, #LN_B]
+    ldr x0, [x12]
+    add x0, x12, x0           // child node
+    mov x1, x28
+    mov x2, x19
+    bl _aznapi_run
+    cmp x0, #0
+    b.eq .Ln_ret              // success — out written
+    cmp x0, #-2
+    b.ne .Ln_ret              // hard error propagates
+    // rollback err ctx, next option
+    ldr x21, [sp, #LN_C]
+    ldr x9, [sp, #LN_D]
+    str x9, [x22]
+    ldr x9, [sp, #LN_E]
+    str x9, [x22, #8]
+    ldr x9, [sp, #LN_F]
+    str x9, [x22, #16]
+    ldr x12, [sp, #LN_B]
+    add x12, x12, #8
+    str x12, [sp, #LN_B]
+    ldr x9, [sp, #LN_A]
+    sub x9, x9, #1
+    str x9, [sp, #LN_A]
+    b .Ln_un_loop
+.Ln_un_allfail:
+    mov x0, #3                // invalid_union
+    mov x1, #0
+    mov x2, #0
+    bl _az_issue_begin
+    cbnz x0, .Ln_ret
+    ldr x9, [x27, #1]
+    lsl x9, x9, #3
+    add x9, x9, #9
+    ldr x10, [x27, x9]        // uidx at node+9+8n
+    ucvtf d0, x10
+    AZ_ADR x0, .Lnk_u
+    mov x1, #2
+    bl _az_issue_f_f64
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    mov x0, #-2
+    b .Ln_ret
+
 // ---- 0x09 LITERAL ----
 // tagged value at node+1; miss -> -10 (correct invalid_value via FFI)
 .Ln_lit:
@@ -1330,7 +1620,23 @@ _az_issue_size_n:
     mov x0, #0
     b .Ln_ret
 .Ln_lit_miss:
-    mov x0, #-10
+    mov x0, #1                 // invalid_literal
+    mov x1, #0
+    mov x2, #0
+    bl _az_issue_begin
+    cbnz x0, .Ln_ret
+    add x2, x27, #1            // embedded value bytes
+    str x2, [sp, #LN_A]
+    mov x0, x2
+    bl _az_vsize
+    mov x3, x0
+    AZ_ADR x0, .Ln_k_expected
+    mov x1, #8
+    ldr x2, [sp, #LN_A]
+    bl _az_issue_f_rawval
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    mov x0, #-2
     b .Ln_ret
 
 // ---- 0x0A ENUM ----
@@ -1339,7 +1645,7 @@ _az_issue_size_n:
     mov x0, x28
     bl _azn_typeof
     cmp w0, #NAPI_STR
-    b.ne .Ln_lit_miss
+    b.ne .Ln_enum_miss
     bl _azn_getstr
     cmp x0, #-1
     b.eq .Ln_toobig
@@ -1351,7 +1657,7 @@ _az_issue_size_n:
     str x10, [sp, #LN_C]      // cursor
 .Ln_enum_loop:
     ldr x9, [sp, #LN_B]
-    cbz x9, .Ln_lit_miss
+    cbz x9, .Ln_enum_miss
     ldr x10, [sp, #LN_C]
     ldr x9, [x10]             // vallen
     ldr x11, [sp, #LN_A]
@@ -1372,6 +1678,40 @@ _az_issue_size_n:
     sub x9, x9, #1
     str x9, [sp, #LN_B]
     b .Ln_enum_loop
+.Ln_enum_miss:
+    mov x0, #4                 // invalid_enum_value
+    mov x1, #0
+    mov x2, #0
+    bl _az_issue_begin
+    cbnz x0, .Ln_ret
+    // received = encoded input at scratch+1.5MB
+    mov x12, #1572864
+    add x9, x20, x12
+    str x9, [sp, #LN_A]
+    mov x0, x28
+    mov x1, x9
+    bl _azn_encval
+    cmp x0, #-1
+    b.eq .Ln_enum_fallback
+    mov x3, x0
+    AZ_ADR x0, .Lnk_received
+    mov x1, #8
+    ldr x2, [sp, #LN_A]
+    bl _az_issue_f_rawval
+    cbnz x0, .Ln_ret
+    // options = strseq(node+9, n)
+    AZ_ADR x0, .Lnk_options
+    mov x1, #7
+    add x2, x27, #9
+    ldr x3, [x27, #1]
+    bl _az_issue_f_strseq
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    mov x0, #-2
+    b .Ln_ret
+.Ln_enum_fallback:
+    mov x0, #-10
+    b .Ln_ret
 
 // ---- 0x06 ARRAY ----
 // op|elemField(8)|min(8)|max(8)|exact(1)|elem
@@ -1858,6 +2198,9 @@ _az_issue_size_n:
 .Lex_tuple:      .ascii "tuple\0"
 .Lex_nonoptional:.ascii "nonoptional\0"
 .Ln_k_expected:  .ascii "expected\0"
+.Lnk_u:          .ascii "_u\0"
+.Lnk_received:   .ascii "received\0"
+.Lnk_options:    .ascii "options\0"
 .Ln_k_received:  .ascii "received\0"
     AZ_DATA
     .p2align 3
