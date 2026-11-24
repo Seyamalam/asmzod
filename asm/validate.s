@@ -1632,6 +1632,8 @@ _az_strtoi:
     AZ_ADR x9, az_nc_flag
     mov w10, #1
     strb w10, [x9]
+    AZ_ADR x9, az_arity_flag
+    strb w10, [x9]
     mov x7, #0             // default msg -> TS normalizer
     mov x0, #8
     AZ_ADR x1, .Lty_array
@@ -1643,6 +1645,8 @@ _az_strtoi:
     mov w5, #0
     bl _az_issue_size
     AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
+    AZ_ADR x9, az_arity_flag
     strb wzr, [x9]
     cbnz x0, .Lv_ret
     mov x9, #1
@@ -1662,6 +1666,8 @@ _az_strtoi:
     AZ_ADR x9, az_nc_flag
     mov w10, #1
     strb w10, [x9]
+    AZ_ADR x9, az_arity_flag
+    strb w10, [x9]
     mov x7, #0             // default msg -> TS normalizer
     mov x0, #9
     AZ_ADR x1, .Lty_array
@@ -1673,6 +1679,8 @@ _az_strtoi:
     mov w5, #0
     bl _az_issue_size
     AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
+    AZ_ADR x9, az_arity_flag
     strb wzr, [x9]
     cbnz x0, .Lv_ret
     mov x9, #1

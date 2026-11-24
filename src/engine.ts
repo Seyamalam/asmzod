@@ -523,6 +523,7 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
         // element validation, over-length still validates the fixed slots
         sizeFail(c, items.length < minItems ? "too_small" : "too_big", "array",
           BigInt(items.length < minItems ? minItems : n), true, false, undefined, true);
+        (c.issues[c.issues.length - 1] as any)._arity = true;
         if (items.length < minItems) throw FAILED;
       }
       // absent fixed slots still get validated as undefined: catch fills them,

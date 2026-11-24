@@ -1653,9 +1653,20 @@ _az_issue_size:
     // zod counts such failures as aborted for union best-match purposes
     AZ_ADR x9, az_nc_flag
     ldrb w9, [x9]
-    cbz w9, .Lsz_commit
+    cbz w9, .Lsz_arity
     AZ_ADR x0, ak_nc
     mov x1, #3
+    mov w2, #1
+    bl _az_issue_f_bool
+    cbnz x0, .Lsz_out
+.Lsz_arity:
+    // _arity marker — tuple arity issues order code-first in zod, unlike
+    // check issues (origin-first); the TS normalizer keys on this
+    AZ_ADR x9, az_arity_flag
+    ldrb w9, [x9]
+    cbz w9, .Lsz_commit
+    AZ_ADR x0, ak_arity
+    mov x1, #6
     mov w2, #1
     bl _az_issue_f_bool
     cbnz x0, .Lsz_out
@@ -1741,10 +1752,16 @@ ak_exact:      .ascii "exact"
     .globl ak_nc
     AZ_HIDDEN ak_nc
 ak_nc:         .ascii "_nc"
+    .globl ak_arity
+    AZ_HIDDEN ak_arity
+ak_arity:      .ascii "_arity"
     AZ_WDATA
     .globl az_nc_flag
     AZ_HIDDEN az_nc_flag
 az_nc_flag:    .byte 0
+    .globl az_arity_flag
+    AZ_HIDDEN az_arity_flag
+az_arity_flag: .byte 0
     .text
 ams_atleast:   .ascii "String must contain at least "
 ams_atmost:    .ascii "String must contain at most "

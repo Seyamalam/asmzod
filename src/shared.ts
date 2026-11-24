@@ -329,8 +329,11 @@ export function normalizeIssue(i: any): any {
   // that order, so normalize to it (expected-first for invalid_type etc)
   // zod builds nonoptional issues from a code-first literal, unlike the
   // expected-first order of every other invalid_type
+  // tuple arity issues are code-first literals in zod ({code, maximum,
+  // inclusive, origin}) — never carrying `exact` like a length check would
   const ord = out.code === "invalid_type" && out.expected === "nonoptional"
-    ? NONOPT_ORDER : ISSUE_ORDER[out.code as string];
+    ? NONOPT_ORDER : out._arity ? ARITY_ORDER : ISSUE_ORDER[out.code as string];
+  if (out._arity) { delete out._arity; delete out.exact; }
   if (ord) {
     const ordOut: any = {};
     for (const k of ord) if (k in out) ordOut[k] = out[k];
@@ -342,6 +345,8 @@ export function normalizeIssue(i: any): any {
 }
 
 const NONOPT_ORDER = ["code", "expected", "input", "path", "message"];
+// zod's tuple-arity literal: code, minimum|maximum, inclusive, origin
+const ARITY_ORDER = ["code", "minimum", "maximum", "inclusive", "origin", "path", "message", "input"];
 // field order of zod issue objects (their finalizeIssue copies creation order)
 const ISSUE_ORDER: Record<string, string[]> = {
   invalid_type: ["expected", "format", "code", "received", "input", "path", "message"],

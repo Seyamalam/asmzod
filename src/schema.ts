@@ -1555,6 +1555,9 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   }
   partial(): any {
     if (this._refinedObj()) throw new Error(".partial() cannot be used on object schemas containing refinements");
+    let s: any = this;
+    while (s instanceof ZodEffects && (s._def.kind === "refine" || s._def.kind === "superrefine")) s = s._def.inner;
+    if (s instanceof ZodTuple) throw new Error(".partial() cannot be used on tuple schemas containing refinements");
     throw new Error("Invalid input to partial: expected an object schema");
   }
 
@@ -1929,6 +1932,9 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
         if (present || res.value !== undefined) out[k] = res.value;
       } else {
         for (const i of res.issues) issues.push({ ...i, path: [k, ...(i.path ?? [])] });
+        // best-effort: keep the field's last-known value so downstream
+        // checks see the same partial object zod's payload carries
+        out[k] = "value" in (res as any) ? res.value : view[k];
       }
     }
     const extra = Object.keys(view).filter((k) => !consumed.has(k));
@@ -2095,34 +2101,86 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
   rest<R extends ZodTypeAny>(r: R) {
     return new ZodTuple({ ...this._def, rest: r }) as any;
   }
+  partial() {
+    const def = this._def;
+    // a refinement was authored against the full arity; partialing would run it on a shorter array
+    if (def.checks?.length) throw new Error(".partial() cannot be used on tuple schemas containing refinements");
+    return new ZodTuple({ ...def, items: def.items.map((it: any) => new ZodOptional({ type: "optional", inner: it })) }) as any;
+  }
+
+  private _dropStages(from: number, to: number) {
+    // discard async work queued by truncated tuple items — the tail slots
+    // never materialize so their refinements must not write back
+    pendingAsync.splice(from, to - from);
+  }
 
   protected override _runImpl(data: unknown) {
-    if (!this._hasFx() && !(MEMO && Array.isArray(data) && this._isRec())) return super._runImpl(data);
-    if (!Array.isArray(data)) return super._runImpl(data);
     const items: any[] = this._def.items ?? [];
     const rest = this._def.rest as any;
-    return _memoRun(this, data, () => new Array(data.length), (out) => {
+    const n = items.length;
+    // zod: optinStart — trailing run of optin!==undefined; optoutStart —
+    // trailing run of optout==="optional". truncation rules only apply from
+    // optoutStart, so optoutStart===n means the engine path is equivalent
+    let optinStart = n; while (optinStart > 0 && items[optinStart - 1]?._zod?.optin !== undefined) optinStart--;
+    let optoutStart = n; while (optoutStart > 0 && items[optoutStart - 1]?._zod?.optout === "optional") optoutStart--;
+    if (optoutStart === n && !this._hasFx() && !(MEMO && Array.isArray(data) && this._isRec()))
+      return super._runImpl(data);
+    if (!Array.isArray(data)) return super._runImpl(data);
+    return _memoRun(this, data, () => new Array(Math.max(data.length, optoutStart)), (out) => {
       const issues: any[] = [];
-      if (!rest && data.length !== items.length) {
-        const lim = items.length;
-        const code = data.length < lim ? "too_small" : "too_big";
-        issues.push({
-          code, origin: "array", [code === "too_small" ? "minimum" : "maximum"]: lim,
-          inclusive: true, exact: true, path: [],
-          message: `Too ${code === "too_small" ? "small" : "big"}: expected array to have ${code === "too_small" ? ">=" : "<="}${lim} items`,
-        });
-        // tuple arity aborts the whole union option it sits under
-        return { ok: false as const, issues, aborted: true };
+      if (!rest) {
+        if (data.length < optinStart) {
+          // zod's arity literal: code, minimum|maximum, inclusive, origin —
+          // non-check issues so `aborted` judges on continue===undefined
+          issues.push({ code: "too_small", minimum: optinStart, inclusive: true, origin: "array", path: [] });
+          // arity precheck skips element validation entirely
+          return { ok: false as const, issues, aborted: true };
+        }
+        if (data.length > n)
+          issues.push({ code: "too_big", maximum: n, inclusive: true, origin: "array", path: [] });
       }
-      for (let i = 0; i < data.length; i++) {
-        const it = i < items.length ? items[i] : rest;
-        if (!it) continue;
+      // every item runs — even absent and truncated slots — so their async
+      // work queues exactly like zod's parallel itemResults
+      const stageMarks: number[] = [];
+      const results: any[] = new Array(n);
+      for (let i = 0; i < n; i++) {
         const mark = pendingAsync.length;
-        const r = it._run(data[i]);
+        stageMarks[i] = mark;
+        const r = items[i]._run(data[i]);
         for (let j = mark; j < pendingAsync.length; j++)
           (pendingAsync[j] as any).path = [i, ...((pendingAsync[j] as any).path ?? [])];
-        if (r.ok) out[i] = r.value;
-        else for (const iss of r.issues) issues.push({ ...iss, path: [i, ...(iss.path ?? [])] });
+        results[i] = r;
+      }
+      stageMarks[n] = pendingAsync.length;
+      // rest validates input.slice(items.length) — every fixed index present
+      if (rest) {
+        for (let i = n; i < data.length; i++) {
+          const mark = pendingAsync.length;
+          const r = rest._run(data[i]);
+          for (let j = mark; j < pendingAsync.length; j++)
+            (pendingAsync[j] as any).path = [i, ...((pendingAsync[j] as any).path ?? [])];
+          if (!r.ok) for (const iss of r.issues) issues.push({ ...iss, path: [i, ...(iss.path ?? [])] });
+          out[i] = r.ok ? r.value : (r as any).value;
+        }
+      }
+      // handleTupleResults: ordered walk — absent optin==="optional" slots
+      // truncate outright; absent failing slots past optoutStart swallow
+      for (let i = 0; i < n; i++) {
+        const r = results[i];
+        const isPresent = i < data.length;
+        if (!isPresent && i >= optoutStart &&
+            (items[i]._zod?.optin === "optional" || !r.ok)) {
+          out.length = i;
+          this._dropStages(stageMarks[i]!, stageMarks[n]!);
+          break;
+        }
+        if (!r.ok) for (const iss of r.issues) issues.push({ ...iss, path: [i, ...(iss.path ?? [])] });
+        out[i] = r.ok ? r.value : (r as any).value;
+      }
+      // tail-trim: absent input + optout==="optional" + undefined value
+      for (let i = out.length - 1; i >= data.length; i--) {
+        if (items[i]?._zod?.optout === "optional" && out[i] === undefined) out.length = i;
+        else break;
       }
       return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
     });

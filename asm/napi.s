@@ -3477,6 +3477,8 @@ _azn_encval:
     AZ_ADR x9, az_nc_flag
     mov w10, #1
     strb w10, [x9]
+    AZ_ADR x9, az_arity_flag
+    strb w10, [x9]
     mov x0, #0
     mov x1, x15
     ldr x2, [sp, #LN_C]
@@ -3485,6 +3487,8 @@ _azn_encval:
     mov x5, #5
     bl _az_issue_size_n
     AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
+    AZ_ADR x9, az_arity_flag
     strb wzr, [x9]
     mov x0, #-2
     b .Ln_ret
@@ -3496,6 +3500,8 @@ _azn_encval:
     AZ_ADR x9, az_nc_flag
     mov w10, #1
     strb w10, [x9]
+    AZ_ADR x9, az_arity_flag
+    strb w10, [x9]
     mov x0, #1
     ldr x1, [sp, #LN_A]
     ldr x2, [sp, #LN_C]
@@ -3504,6 +3510,8 @@ _azn_encval:
     mov x5, #5
     bl _az_issue_size_n
     AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
+    AZ_ADR x9, az_arity_flag
     strb wzr, [x9]
     mov x9, #1
     str x9, [sp, #LN_I]
