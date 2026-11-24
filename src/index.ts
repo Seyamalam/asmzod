@@ -121,8 +121,88 @@ export const z = {
 
   optional: <T extends ZodTypeAny>(s: T) => new ZodOptional<T>({ type: "optional", inner: s }),
   nullable: <T extends ZodTypeAny>(s: T) => new ZodNullable<T>({ type: "nullable", inner: s }),
+  nullish: <T extends ZodTypeAny>(s: T) => new ZodNullable<T>({ type: "nullable", inner: s }).optional(),
   default: <T extends ZodTypeAny>(s: T, v: T["_input"]) =>
     new ZodDefault<T>({ type: "default", inner: s, value: v }),
+  catch: <T extends ZodTypeAny>(s: T, v: T["_input"]) => s.catch(v),
+  brand: <T extends ZodTypeAny>(s: T) => s.brand(),
+  nonoptional: <T extends ZodTypeAny>(s: T) => s.nonoptional(),
+  readonly: <T extends ZodTypeAny>(s: T) => s.readonly(),
+  refine: (fn: (v: unknown) => boolean, message?: string) =>
+    new ZodAny().refine(fn, message),
+  superRefine: (fn: (v: unknown, ctx: any) => void) =>
+    new ZodAny().superRefine(fn),
+  transform: (fn: (v: unknown) => unknown) => new ZodAny().transform(fn),
+
+  // string-format factories — equivalent to z.string().<fmt>()
+  email: (p?: string) => new ZodString().email(p),
+  url: (p?: string) => new ZodString().url(p),
+  uuid: (p?: string) => new ZodString().uuid(p),
+  uuidv4: (p?: string) => new ZodString().uuidv4(p),
+  uuidv6: (p?: string) => new ZodString().uuidv6(p),
+  uuidv7: (p?: string) => new ZodString().uuidv7(p),
+  guid: (p?: string) => new ZodString().guid(p),
+  cuid: (p?: string) => new ZodString().cuid(p),
+  cuid2: (p?: string) => new ZodString().cuid2(p),
+  ulid: (p?: string) => new ZodString().ulid(p),
+  nanoid: (p?: string) => new ZodString().nanoid(p),
+  emoji: (p?: string) => new ZodString().emoji(p),
+  base64: (p?: string) => new ZodString().base64(p),
+  base64url: (p?: string) => new ZodString().base64url(p),
+  jwt: (p?: string) => new ZodString().jwt(p),
+  hex: (p?: string) => new ZodString().hex(p),
+  xid: (p?: string) => new ZodString().xid(p),
+  ksuid: (p?: string) => new ZodString().ksuid(p),
+  e164: (p?: string) => new ZodString().e164(p),
+  duration: (p?: string) => new ZodString().duration(p),
+  ipv4: (p?: string) => new ZodString().ipv4(p),
+  ipv6: (p?: string) => new ZodString().ipv6(p),
+  cidrv4: (p?: string) => new ZodString().cidrv4(p),
+  cidrv6: (p?: string) => new ZodString().cidrv6(p),
+  hostname: (p?: string) => new ZodString().hostname(p),
+  httpUrl: (p?: string) => new ZodString().httpUrl(p),
+  iso: {
+    datetime: (p?: string) => new ZodString().datetime(p),
+    date: (p?: string) => new ZodString().date(p),
+    time: (p?: string) => new ZodString().time(p),
+    duration: (p?: string) => new ZodString().duration(p),
+  },
+
+  file: () => new ZodInstanceof<File>({
+    type: "instof",
+    ctor: (globalThis as any).File,
+    name: "file",
+  }),
+  templateLiteral: (parts: readonly unknown[]) => {
+    // zod4: composes parts into a regex; schemas contribute their pattern
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pat = parts.map((p) => {
+      if (p instanceof ZodString) return ".*";
+      if (p instanceof ZodNumber || p instanceof ZodBigInt) return "-?\\d+(?:\\.\\d+)?";
+      if (p instanceof ZodLiteral) return esc(String(p._def.value));
+      if (typeof p === "string") return esc(p);
+      return esc(String(p));
+    }).join("");
+    return (new ZodString() as any)._fmtcheck(
+      "template_literal", new RegExp(`^${pat}$`));
+  },
+  json: () => {
+    let inner: any;
+    inner = new ZodLazy({
+      type: "lazy",
+      getter: () => new ZodUnion({
+        type: "union",
+        options: [
+          new ZodString(), new ZodNumber(), new ZodBoolean(), new ZodNull(),
+          new ZodArray({ type: "array", element: inner }),
+          new ZodRecord({ type: "record", keyType: null, valueType: inner }),
+        ],
+      }),
+    });
+    return inner;
+  },
+  success: <T extends ZodTypeAny>(s: T) =>
+    s.transform(() => true) as ZodTypeAny,
 
   // zod3 compatibility aliases
   ZodError: undefined as unknown as typeof import("./error").ZodError,

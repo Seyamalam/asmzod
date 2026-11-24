@@ -43,6 +43,12 @@ const FORMAT_NAMES: Record<string, string> = {
   ipv4: "ipv4", ipv6: "ipv6", ulid: "ulid", nanoid: "nanoid",
   cuid2: "cuid2", base64: "base64", hex: "hex",
   datetime: "datetime", date: "date", time: "time",
+  // regex-carried formats: the check embeds a `format` override so its
+  // issues take the zod format name instead of "regex"
+  guid: "guid", uuid6: "uuid", uuid7: "uuid", cuid: "cuid", xid: "xid",
+  ksuid: "ksuid", e164: "e164", cidrv4: "cidrv4", cidrv6: "cidrv6",
+  base64url: "base64url", jwt: "jwt", emoji: "emoji", duration: "duration",
+  hostname: "hostname", httpurl: "url", template_literal: "template_literal",
 };
 
 // zod 4 default messages, keyed off normalized issue fields. Engines emit
@@ -51,7 +57,8 @@ const FORMAT_NAMES: Record<string, string> = {
 const FORMAT_MSGS: Record<string, string> = {
   email: "Invalid email address", uuid: "Invalid UUID", url: "Invalid URL",
   emoji: "Invalid emoji", nanoid: "Invalid nanoid", guid: "Invalid GUID",
-  cuid: "Invalid CUID", cuid2: "Invalid CUID2", ulid: "Invalid ULID",
+  cuid: "Invalid cuid", cuid2: "Invalid cuid2", ulid: "Invalid ULID",
+  xid: "Invalid XID", ksuid: "Invalid KSUID", hostname: "Invalid hostname",
   base64: "Invalid base64-encoded string", base64url: "Invalid base64url-encoded string",
   hex: "Invalid hex", ipv4: "Invalid IPv4 address", ipv6: "Invalid IPv6 address",
   cidrv4: "Invalid IPv4 range", cidrv6: "Invalid IPv6 range",
@@ -59,6 +66,7 @@ const FORMAT_MSGS: Record<string, string> = {
   datetime: "Invalid ISO datetime", date: "Invalid ISO date", time: "Invalid ISO time",
   duration: "Invalid ISO duration", lowercase: "Invalid lowercase",
   uppercase: "Invalid uppercase", regex: "Invalid string: must match pattern",
+  template_literal: "Invalid input",
 };
 
 // zod exposes `origin: "string"` + the check's regex `pattern` on these formats
@@ -87,7 +95,17 @@ const EXPOSED_RECEIVED = new Set(["NaN", "Infinity", "-Infinity", "Invalid Date"
 const FORMAT_ORIGIN = new Set([
   ...Object.keys(FORMAT_PATTERNS),
   "starts_with", "ends_with", "includes", "regex",
+  "guid", "cuid", "xid", "ksuid", "e164", "cidrv4",
 ]);
+
+// zod hides `pattern`/`origin` on these formats even when a regex carries
+// the actual match pattern — strip the embedded pattern field on normalize
+const FORMAT_NOPAT = new Set(["base64url", "jwt", "cidrv6", "hostname", "httpurl"]);
+
+// formats whose issues carry an extra `note` field
+const FORMAT_NOTES: Record<string, string> = {
+  httpurl: "Invalid URL format",
+};
 
 function repr(v: unknown): string {
   if (typeof v === "string") return JSON.stringify(v);
@@ -174,16 +192,24 @@ export function normalizeIssue(i: any): any {
       delete out.options;
       delete out.received;
       break;
-    case "invalid_string":
+    case "invalid_string": {
+      const val = i.validation;
       out.code = "invalid_format";
-      if (i.validation !== undefined) {
-        out.format = FORMAT_NAMES[i.validation] ?? i.validation;
+      if (val !== undefined) {
+        out.format = FORMAT_NAMES[val] ?? val;
         delete out.validation;
       }
       if (FORMAT_ORIGIN.has(out.format)) out.origin = "string";
       if (FORMAT_PATTERNS[out.format] !== undefined && out.pattern === undefined)
         out.pattern = FORMAT_PATTERNS[out.format];
+      if (FORMAT_NOPAT.has(out.format) || FORMAT_NOPAT.has(val)) {
+        delete out.pattern;
+        delete out.origin;
+      }
+      if (FORMAT_NOTES[val] !== undefined)
+        out.note = FORMAT_NOTES[val];
       break;
+    }
     case "not_multiple_of":
       out.origin = "number";
       break;

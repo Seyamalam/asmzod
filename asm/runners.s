@@ -465,11 +465,25 @@ _az_run_strchecks:
     ldr x12, [sp, #72]
     ldr x9, [x12, #8]            // srclen
     add x27, x12, x9
-    add x27, x27, #16
+    add x27, x27, #16            // -> fmtlen field
+    ldr x10, [x27]               // fmtlen
+    add x27, x27, x10
+    add x27, x27, #8
     b .Lsc_cont
 .Lsc_fmt_regex:
+    ldr x12, [sp, #72]
+    ldr x13, [x12, #8]           // srclen
+    add x14, x12, x13
+    add x14, x14, #16            // -> fmtlen field
+    ldr x15, [x14]               // fmtlen
+    cbz x15, .Lsc_fmt_regex_def
+    add x9, x14, #8              // fmt bytes = validation name
+    mov x10, x15
+    b .Lsc_fmt_regex_msg
+.Lsc_fmt_regex_def:
     AZ_ADR x9, .Lv_regex
     mov x10, #5
+.Lsc_fmt_regex_msg:
     AZ_ADR x11, .Lm_regex
     mov x12, #7
     b .Lsc_fmt_fail
@@ -558,7 +572,10 @@ _az_run_strchecks:
     ldr x12, [sp, #72]
     ldr x13, [x12, #8]
     add x27, x12, x13
-    add x27, x27, #16
+    add x27, x27, #16            // -> fmtlen field
+    ldr x10, [x27]
+    add x27, x27, x10
+    add x27, x27, #8
     b .Lsc_cont
 
 // advance: x9 = param size (or .Lsc_nextv recomputes for var-len)

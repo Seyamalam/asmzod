@@ -2936,7 +2936,11 @@ _azn_strmixed:
     b .Lnsm_padv
 .Lnsm_prx:
     ldr x13, [x12, #8]
-    add x13, x13, #16         // [u64 cbid][u64 srclen][src]
+    add x13, x13, #16         // [u64 cbid][u64 srclen][src][u64 fmtlen][fmt]
+    add x14, x12, x13         // -> fmtlen field
+    ldr x14, [x14]
+    add x13, x13, x14
+    add x13, x13, #8
 .Lnsm_padv:
     add x14, x12, x13         // next = params + psize
     ldr x9, [sp, #96]
@@ -2986,12 +2990,21 @@ _azn_strmixed:
     cmp x0, #-10
     b.eq .Lnsm_punt
     cbnz w0, .Lnsm_rnext
-    // regex miss -> invalid_string{validation:"regex", pattern:src}
+    // regex miss -> invalid_string{validation:fmt|"regex", pattern:src}
     ldr x12, [sp, #120]
     ldr x7, [x12, #8]         // srclen
     add x6, x12, #16          // src
+    add x8, x12, x7
+    add x8, x8, #16           // -> fmtlen field
+    ldr x9, [x8]
+    cbz x9, .Lnsm_fmt_def
+    add x0, x8, #8
+    mov x1, x9
+    b .Lnsm_fmt_go
+.Lnsm_fmt_def:
     AZ_ADR x0, .Lnv_regex
     mov x1, #5
+.Lnsm_fmt_go:
     ldp x2, x3, [sp, #104]    // msgptr,msglen
     AZ_ADR x4, .Lnk_pattern
     mov x5, #7

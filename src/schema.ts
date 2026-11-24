@@ -175,7 +175,75 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   brand<B extends string>(): ZodBranded<this, B> {
     return new ZodBranded({ type: "brand", inner: this });
   }
-  describe(_: string): this { return this; }
+  nonoptional(): ZodNonOptional<this> {
+    return new ZodNonOptional({ inner: this });
+  }
+  clone(): this {
+    return new (this.constructor as any)({ ...this._def });
+  }
+  describe(d: string): this {
+    const c = this.clone();
+    c._def = { ...c._def, description: d };
+    return c;
+  }
+  meta(m?: any): any {
+    if (m === undefined) return this._def.meta;
+    const c = this.clone();
+    c._def = { ...c._def, meta: { ...(c._def.meta ?? {}), ...m } };
+    return c;
+  }
+  register(registry: any, m?: any): this {
+    if (m !== undefined) this.meta(m);
+    registry?.add?.(this);
+    return this;
+  }
+  check(...fns: ((ctx: any) => void)[]): ZodEffects<this, Output> {
+    return this.superRefine((v, ctx) => {
+      for (const fn of fns) {
+        const payload = {
+          value: v, issues: [] as any[],
+          addIssue: (i: any) => payload.issues.push(i),
+        };
+        fn(payload);
+        for (const i of payload.issues) ctx.addIssue(i);
+      }
+    });
+  }
+  overwrite<N>(fn: (v: Output) => N): ZodEffects<this, N> {
+    return this.transform(fn);
+  }
+  prefault<V extends Input>(value: V | (() => V)): ZodType<Output, Input | undefined> {
+    const v = typeof value === "function" ? (value as () => V)() : value;
+    return new ZodPipe({
+      type: "pipe",
+      in: new ZodEffects<ZodAny>({
+        type: "transform", inner: new ZodAny(),
+        cbid: regId(reg.transform, (x: unknown) => x === undefined ? v : x),
+      }),
+      out: this,
+    }) as any;
+  }
+  isOptional(): boolean { return this.safeParse(undefined).success; }
+  isNullable(): boolean { return this.safeParse(null).success; }
+  get def(): any { return this._def; }
+  get type(): string { return this._def.type; }
+  get description(): string | undefined { return this._def.description; }
+  get "~standard"() {
+    const self = this;
+    return {
+      version: 1 as const, vendor: "zod",
+      validate: (v: unknown) => {
+        const r = self.safeParse(v);
+        return r.success ? { value: r.data } : { issues: r.error.issues };
+      },
+    };
+  }
+  async safeParseAsync(data: unknown): Promise<SafeParseResult<Output>> {
+    return this.safeParse(data);
+  }
+  spa(data: unknown): Promise<SafeParseResult<Output>> {
+    return this.safeParseAsync(data);
+  }
   readonly(): this { return this; }
 }
 
@@ -218,6 +286,93 @@ export class ZodString extends ZodType<string> {
   trim() { return this.transform((s) => s.trim()); }
   toLowerCase() { return this.transform((s) => s.toLowerCase()); }
   toUpperCase() { return this.transform((s) => s.toUpperCase()); }
+
+  private _fmtcheck(format: string, regex: RegExp, message?: string) {
+    return this._check({ kind: "regex", regex, format, message });
+  }
+  emoji(message?: string) {
+    return this._fmtcheck("emoji",
+      /^(?=[\s\S]*[\p{Extended_Pictographic}\p{Regional_Indicator}\u20E3])[\p{Extended_Pictographic}\p{Emoji_Component}]+$/u, message);
+  }
+  guid(message?: string) {
+    return this._fmtcheck("guid",
+      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/, message);
+  }
+  uuidv6(message?: string) {
+    return this._fmtcheck("uuid6",
+      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/, message);
+  }
+  uuidv7(message?: string) {
+    return this._fmtcheck("uuid7",
+      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/, message);
+  }
+  cuid(message?: string) {
+    return this._fmtcheck("cuid", /^[cC][0-9a-z]{6,}$/, message);
+  }
+  base64url(message?: string) {
+    return this._fmtcheck("base64url",
+      /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/, message);
+  }
+  jwt(message?: string) {
+    return this._fmtcheck("jwt",
+      /^([A-Za-z0-9_-]{2,})\.([A-Za-z0-9_-]{2,})\.([A-Za-z0-9_-]{2,})$/, message);
+  }
+  xid(message?: string) {
+    return this._fmtcheck("xid", /^[0-9a-vA-V]{20}$/, message);
+  }
+  ksuid(message?: string) {
+    return this._fmtcheck("ksuid", /^[A-Za-z0-9]{27}$/, message);
+  }
+  e164(message?: string) {
+    return this._fmtcheck("e164", /^\+[1-9]\d{6,14}$/, message);
+  }
+  cidrv4(message?: string) {
+    return this._fmtcheck("cidrv4",
+      /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/, message);
+  }
+  cidrv6(message?: string) {
+    return this._fmtcheck("cidrv6",
+      /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|::(ffff(:0{1,4})?:)?((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9]))\/(12[0-8]|1[01][0-9]|[0-9]{1,2})$/, message);
+  }
+  duration(message?: string) {
+    return this._fmtcheck("duration",
+      /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/, message);
+  }
+  hostname(message?: string) {
+    return this._fmtcheck("hostname",
+      /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?$/, message);
+  }
+  httpUrl(message?: string) {
+    return this._fmtcheck("httpurl",
+      /^https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b[-a-zA-Z0-9()@:%_+.~#?&/=]*$/, message);
+  }
+  normalize(form: "NFC" | "NFD" | "NFKC" | "NFKD" = "NFC") {
+    return this.transform((s) => s.normalize(form));
+  }
+  slugify() {
+    return this.transform((s) => s.toLowerCase().trim()
+      .replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, ""));
+  }
+
+  get format(): string | null {
+    for (const c of this._def.checks ?? [])
+      if (c.format) return c.format === "httpurl" ? "url" : (c.format.startsWith("uuid") ? "uuid" : c.format);
+    for (const c of this._def.checks ?? [])
+      if (!["min", "max", "length", "startsWith", "endsWith", "includes", "regex",
+             "lowercase", "uppercase"].includes(c.kind))
+        return c.kind === "datestr" ? "date" : c.kind === "timestr" ? "time" : c.kind;
+    return null;
+  }
+  get minLength(): number | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "min" || c.kind === "length") return c.value;
+    return null;
+  }
+  get maxLength(): number | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "max" || c.kind === "length") return c.value;
+    return null;
+  }
 }
 
 export class ZodNumber extends ZodType<number> {
@@ -238,6 +393,23 @@ export class ZodNumber extends ZodType<number> {
   nonnegative(message?: string) { return this.gte(0, message); }
   negative(message?: string) { return this.lt(0, message); }
   nonpositive(message?: string) { return this.lte(0, message); }
+  get minValue(): number | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "gte" || c.kind === "gt") return c.value;
+    return null;
+  }
+  get maxValue(): number | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "lte" || c.kind === "lt") return c.value;
+    return null;
+  }
+  get isInt(): boolean {
+    return (this._def.checks ?? []).some((c: any) => c.kind === "int" || c.kind === "safeInt");
+  }
+  get isFinite(): boolean { return true; }
+  get format(): string | null {
+    return this.isInt ? "safeint" : null;
+  }
 }
 
 export class ZodBigInt extends ZodType<bigint> {
@@ -254,6 +426,17 @@ export class ZodBigInt extends ZodType<bigint> {
   nonnegative(m?: string) { return this.gte(0n, m); }
   negative(m?: string) { return this.lt(0n, m); }
   nonpositive(m?: string) { return this.lte(0n, m); }
+  get minValue(): bigint | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "gte" || c.kind === "gt" || c.kind === "min") return c.value;
+    return null;
+  }
+  get maxValue(): bigint | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "lte" || c.kind === "lt" || c.kind === "max") return c.value;
+    return null;
+  }
+  get format(): string | null { return null; }
 }
 
 export class ZodBoolean extends ZodType<boolean> {
@@ -289,6 +472,16 @@ export class ZodDate extends ZodType<Date> {
   private _check(c: any) { return new ZodDate({ ...this._def, checks: [...this._def.checks, c] }); }
   min(d: Date, message?: string) { return this._check({ kind: "min", value: d.getTime(), message }); }
   max(d: Date, message?: string) { return this._check({ kind: "max", value: d.getTime(), message }); }
+  get minDate(): Date | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "min") return new Date(c.value);
+    return null;
+  }
+  get maxDate(): Date | null {
+    for (const c of this._def.checks ?? [])
+      if (c.kind === "max") return new Date(c.value);
+    return null;
+  }
 }
 
 // ---------- wrappers ----------
@@ -360,10 +553,17 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
   }
   keyof() { return new ZodEnum({ type: "enum", values: Object.keys(this._def.shape) }); }
   deepPartial() { return this.partial(); }
+  loose() { return this.passthrough(); }
+  merge<O extends ZodObject<any>>(o: O) {
+    return this.extend(o.shape) as ZodObject<T & any>;
+  }
+  safeExtend<S extends ZodRawShape>(s: S) { return this.extend(s); }
+  exactPartial() { return this.partial(); }
 }
 
 export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_input"][]> {
   constructor(_def: any) { super(); this._def = _def; }
+  unwrap(): T { return this._def.element; }
   get element(): T { return this._def.element; }
   min(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, _minMsg: message }); }
   max(n: number, message?: string) { return new ZodArray({ ...this._def, maxLen: n, _maxMsg: message }); }

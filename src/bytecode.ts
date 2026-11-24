@@ -34,10 +34,14 @@ const NUM_CHECK: Record<string, number> = {
 let cbUnsafe = false;
 const lazyThunks = new Map<() => unknown, () => Uint8Array>();
 
+// union defs land in a single global table — `_u` issue indexes must resolve
+// even when the union node was emitted by a lazy subschema compiled later
+const unionReg: SchemaLike[] = [];
+
 export function compile(schema: SchemaLike): Compiled {
   const w = new BW();
   const hosts: HostTable = [];
-  const unions: SchemaLike[] = [];
+  const unions: SchemaLike[] = unionReg;
   const outer = cbUnsafe;
   cbUnsafe = false;
   emit(w, schema, hosts, unions);
@@ -71,8 +75,14 @@ function emitStrChecks(w: BW, checks: any[]) {
       case "regex": {
         w.u64(regId(reg.regex, c.regex));
         // embed /src/flags so the engine can emit zod's `pattern` issue field
-        const src = enc.encode(`/${c.regex.source}/${c.regex.flags}`);
-        w.u64(src.length); w.raw(src); break;
+        const src = enc.encode(c.format === "template_literal"
+          ? c.regex.source
+          : `/${c.regex.source}/${c.regex.flags}`);
+        w.u64(src.length); w.raw(src);
+        // optional format-name override (e.g. "emoji") — emitted as the
+        // issue's `validation` field instead of "regex"
+        const fmt = enc.encode(c.format ?? "");
+        w.u64(fmt.length); w.raw(fmt); break;
       }
       default: break; // no params
     }
