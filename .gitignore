@@ -12,3 +12,4 @@ test/drv[0-9]
 core
 asm/asmzod.node
 .wrangler/
+*.tgz

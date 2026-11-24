@@ -62,15 +62,15 @@
 - [ ] 53. Cold-start import timing vs portable baseline
 
 ## N — runtime hardening
-- [ ] 54. Deno.dlopen driver (native engine on Deno)
-- [ ] 55. Node CJS consumer test
-- [ ] 56. Node <22 dist build (tsc emit)
-- [ ] 57. pnpm install verification
-- [ ] 58. bun build --compile smoke test
-- [ ] 59. x86_64 portable-fallback verification
-- [ ] 60. esbuild/vite/rollup bundle smoke tests
-- [ ] 61. npm pack → install → parse in clean dir
-- [ ] 62. asmzod/lite subpath (portable-only)
+- [x] 54. Deno native engine via N-API + createRequire (no dlopen needed)
+- [x] 55. Node CJS consumer test (node/cjs.test.cjs on dist)
+- [x] 56. Node <22 dist build (tsconfig.dist.json → dist/, NodeNext+declarations)
+- [x] 57. pnpm install verified (postinstall runs; dep-build warnings are pnpm policy)
+- [x] 58. bun build --compile verified (standalone binary → portable fallback)
+- [x] 59. x86_64 portable verified in linux/amd64 container
+- [x] 60. esbuild+rollup bundles verified on Node+Bun
+- [x] 61. npm pack → clean-dir install verified (native addon loads, ESM+CJS)
+- [x] 62. asmzod/lite portable-only subpath shipped
 
 ## O — compat expansion
 - [ ] 63. z.map/z.set opcodes (native)
