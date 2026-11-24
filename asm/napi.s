@@ -26,6 +26,7 @@ _azn_cbtab:     .quad 0          // cb table ptr (from init())
 _azn_errbuf:    .space 1048576   // 1MB err arena
 _azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
 _azn_lazytab:   .space 32768      // 4096 resolved lazy-subblob data ptrs
+_azn_ctortab:   .space 8192       // 1024 constructor napi_values for instanceof
 _azn_obuf:      .space 8388608   // 8MB staged child results (return-input-if-unchanged)
 _azn_obuf_end:  .space 8
 _azn_ocur:      .space 8
@@ -93,6 +94,19 @@ _napi_register_module_v1:
     mov x1, x20
     AZ_ADR x2, .Lnm_initlazy
     bl _napi_set_named_property
+    // create "initCtor" fn
+    mov x0, x19
+    AZ_ADR x1, .Lnm_initctor
+    mov x2, #8
+    AZ_ADR x3, _aznapi_initctor
+    mov x4, #0
+    add x5, sp, #32
+    bl _napi_create_function
+    ldr x3, [sp, #32]
+    mov x0, x19
+    mov x1, x20
+    AZ_ADR x2, .Lnm_initctor
+    bl _napi_set_named_property
     mov x0, x20
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #64
@@ -100,6 +114,7 @@ _napi_register_module_v1:
 .Lnm_parse: .ascii "parse\0"
 .Lnm_init:  .ascii "init\0"
 .Lnm_initlazy: .ascii "initLazy\0"
+.Lnm_initctor: .ascii "initCtor\0"
     .p2align 2
 
 // ================= init(cbTableBuf) -> true =================
@@ -215,6 +230,70 @@ _aznapi_initlazy:
     ldp x19, x20, [sp, #16]
     ldp x21, x22, [sp, #32]
     ldp x23, x24, [sp, #48]
+    ldp x29, x30, [sp], #160
+    ret
+
+// ================= initCtor(ctors) — instanceof ctor table =================
+// argv[0] = Array<Function> — ctortab[i] = ctor napi_value
+_aznapi_initctor:
+    stp x29, x30, [sp, #-160]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    mov x19, x0
+    mov x20, x1
+    mov x9, #1
+    str x9, [sp, #112]
+    mov x0, x19
+    mov x1, x20
+    add x2, sp, #112
+    add x3, sp, #96
+    mov x4, #0
+    mov x5, #0
+    bl _napi_get_cb_info
+    mov x0, x19
+    ldr x1, [sp, #96]
+    add x2, sp, #120
+    bl _napi_get_array_length
+    cbnz x0, .Lic_fail
+    ldr w9, [sp, #120]
+    mov x10, #1024
+    cmp x9, x10
+    b.hi .Lic_fail
+    str x9, [sp, #128]
+    str xzr, [sp, #136]
+.Lic_loop:
+    ldr x9, [sp, #136]
+    ldr x10, [sp, #128]
+    cmp x9, x10
+    b.hs .Lic_done
+    mov x0, x19
+    ldr x1, [sp, #96]
+    ldr x2, [sp, #136]
+    add x3, sp, #144
+    bl _napi_get_element
+    cbnz x0, .Lic_fail
+    ldr x9, [sp, #136]
+    ldr x10, [sp, #144]
+    AZ_ADR x11, _azn_ctortab
+    str x10, [x11, x9, lsl #3]
+    ldr x9, [sp, #136]
+    add x9, x9, #1
+    str x9, [sp, #136]
+    b .Lic_loop
+.Lic_done:
+    mov x0, x19
+    mov x1, #1
+    add x2, sp, #96
+    bl _napi_get_boolean
+    ldr x0, [sp, #96]
+    b .Lic_ret
+.Lic_fail:
+    mov x0, x19
+    add x1, sp, #96
+    bl _napi_get_undefined
+    ldr x0, [sp, #96]
+.Lic_ret:
+    ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #160
     ret
 
@@ -483,6 +562,8 @@ _aznapi_run:
     b.eq .Ln_nanop
     cmp w9, #0x1a
     b.eq .Ln_lazy
+    cmp w9, #0x1b
+    b.eq .Ln_instof
     cmp w9, #0x21
     b.eq .Ln_sym
     cmp w9, #0x23
@@ -2542,6 +2623,37 @@ _azn_encval:
     bl _aznapi_run
     b .Ln_ret
 .Ln_lazy_punt:
+    mov x0, #-10
+    b .Ln_ret
+
+// ============ 0x1B INSTANCEOF ============
+// [op][u64 ctid][u64 namelen][name]
+.Ln_instof:
+    ldr x9, [x27, #1]         // ctid
+    mov x10, #1024
+    cmp x9, x10
+    b.hs .Ln_io_punt
+    AZ_ADR x10, _azn_ctortab
+    ldr x2, [x10, x9, lsl #3]
+    cbz x2, .Ln_io_punt
+    mov x0, x26
+    mov x1, x28
+    add x3, sp, #LN_A
+    bl _napi_instanceof
+    cbnz x0, .Ln_io_punt
+    ldrb w9, [sp, #LN_A]
+    cbz w9, .Ln_io_fail
+    str x28, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_io_fail:
+    ldr x1, [x27, #9]         // namelen
+    add x0, x27, #17
+    bl _azn_issue_type
+    cbnz x0, .Ln_ret
+    mov x0, #-2
+    b .Ln_ret
+.Ln_io_punt:
     mov x0, #-10
     b .Ln_ret
 

@@ -13,6 +13,7 @@ const req = createRequire(import.meta.url);
 interface AzNapi {
   init(cbTable: Uint8Array): boolean;
   initLazy(blobs: Uint8Array[]): boolean;
+  initCtor(ctors: unknown[]): boolean;
   parse(blob: Uint8Array, value: unknown): { ok: true; value: unknown } | { ok: false; err: ArrayBuffer } | { ok: null; code: number } | undefined;
 }
 
@@ -25,6 +26,12 @@ function ensureLazy(a: AzNapi) {
     lazyBlobs.push(reg.lazy[lazyCount++]()); // compiles the subschema once (cached)
   }
   if (lazyBlobs.length) a.initLazy(lazyBlobs);
+}
+
+let ctorCount = 0;
+function ensureCtor(a: AzNapi) {
+  while (ctorCount < reg.ctor.length && ctorCount < 1024) ctorCount++;
+  if (ctorCount) a.initCtor(reg.ctor.slice(0, ctorCount));
 }
 
 let addon: AzNapi | null | undefined;
@@ -66,6 +73,7 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
     if (!cbInit) return null;
   }
   ensureLazy(a);
+  ensureCtor(a);
   const r = a.parse(blob, value);
   // success returns the raw output value; failure/fallback objects carry
   // the ~azres marker so an object result containing `ok` can't collide.
