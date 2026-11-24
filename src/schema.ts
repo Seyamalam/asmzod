@@ -168,7 +168,7 @@ function _hasFxWalk(inst: any, stack: Set<any>): boolean {
     // JS-effect check records (tx/checkfn/fn payloads) live inside defs, not
     // as schema children — the walk needs an explicit look
     if (!hit && Array.isArray(d.checks))
-      hit = d.checks.some((c: any) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.tx === "function" || typeof c.fn === "function"));
+      hit = d.checks.some((c: any) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.tx === "function" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined)));
     if (!hit && d.type === "lazy") hit = d._cachedInner ? see(d._cachedInner) : true;
   }
   stack.delete(inst);
@@ -381,6 +381,90 @@ function _propValuesInner(s: any, seen: Set<object>): any {
 }
 const _escapeRe = (v: any) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// zod's format validators as JS predicates — records with `fn` never compile
+// to engine opcodes, so every runtime agrees on these semantics
+const _uuidRe = (v?: number) => v === undefined
+  ? /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/
+  : new RegExp(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-${v}[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$`);
+
+const _isValidB64 = (data: string): boolean => {
+  if (data === "") return true;
+  if (/\s/.test(data)) return false;
+  if (data.length % 4 !== 0) return false;
+  try { atob(data); return true; } catch { return false; }
+};
+
+const _isValidB64Url = (data: string): boolean => {
+  if (!/^[A-Za-z0-9_-]*$/.test(data)) return false;
+  const b64 = data.replace(/[-_]/g, (c) => (c === "-" ? "+" : "/"));
+  return _isValidB64(b64.padEnd(Math.ceil(b64.length / 4) * 4, "="));
+};
+
+const _isValidJWT = (token: string, alg?: string | null): boolean => {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3 || !parts[0]) return false;
+    const header = JSON.parse(atob(parts[0]));
+    if ("typ" in header && header?.typ !== "JWT") return false;
+    if (!header.alg) return false;
+    if (alg && header.alg !== alg) return false;
+    return true;
+  } catch { return false; }
+};
+
+const _canParseURL = (s: string): boolean => {
+  try {
+    if (typeof URL !== "undefined" && typeof (URL as any).canParse === "function") return (URL as any).canParse(s);
+    new URL(s); return true;
+  } catch { return false; }
+};
+
+const _HTTP_PROTO = /^https?$/;
+const _urlCheck = (def: any) => (v: any): true | string | any[] | false => {
+  if (typeof v !== "string") return false;
+  const trimmed = v.trim();
+  const none = def.normalize === undefined && def.hostname === undefined && def.protocol === undefined;
+  const issues: any[] = [];
+  if (none) {
+    if (!_canParseURL(trimmed)) return [{ code: "invalid_format", format: "url", input: v }];
+    return trimmed.replace(/[\t\n\r]/g, "");
+  }
+  let url: URL | 1 | 2;
+  if (!def.normalize && def.protocol?.source === _HTTP_PROTO.source && !/^https?:\/\//i.test(trimmed)) url = 1;
+  else {
+    try {
+      const U: any = URL;
+      url = typeof U.parse === "function" ? (U.parse(trimmed) ?? 2) : new U(trimmed);
+    } catch { url = 2; }
+  }
+  if (url === 1) return [{ code: "invalid_format", format: "url", note: "Invalid URL format", input: v }];
+  if (url === 2) return [{ code: "invalid_format", format: "url", input: v }];
+  const u = url as URL;
+  if (def.hostname) { def.hostname.lastIndex = 0; if (!def.hostname.test(u.hostname)) issues.push({ code: "invalid_format", format: "url", note: "Invalid hostname", pattern: def.hostname.source, input: v }); }
+  if (def.protocol) { def.protocol.lastIndex = 0; const proto = u.protocol.endsWith(":") ? u.protocol.slice(0, -1) : u.protocol; if (!def.protocol.test(proto)) issues.push({ code: "invalid_format", format: "url", note: "Invalid protocol", pattern: def.protocol.source, input: v }); }
+  return issues.length ? issues : (def.normalize ? u.href : trimmed.replace(/[\t\n\r]/g, ""));
+};
+
+const FMT_FNS: Record<string, (c: any) => (v: any) => any> = {
+  email: () => { const re = /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/; return (s) => typeof s !== "string" || re.test(s); },
+  uuid: (c) => { const re = _uuidRe(c.version); return (s) => typeof s !== "string" || re.test(s); },
+  guid: () => { const re = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/; return (s) => typeof s !== "string" || re.test(s); },
+  nanoid: (c) => { const re = new RegExp(`^[a-zA-Z0-9_-]{${c.length ?? 21}}$`); return (s) => typeof s !== "string" || re.test(s); },
+  cuid: () => { const re = /^[cC][0-9a-z]{6,}$/; return (s) => typeof s !== "string" || re.test(s); },
+  cuid2: () => { const re = /^[0-9a-z]+$/; return (s) => typeof s !== "string" || re.test(s); },
+  ulid: () => { const re = /^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/; return (s) => typeof s !== "string" || re.test(s); },
+  xid: () => { const re = /^[0-9a-vA-V]{20}$/; return (s) => typeof s !== "string" || re.test(s); },
+  ksuid: () => { const re = /^[A-Za-z0-9]{27}$/; return (s) => typeof s !== "string" || re.test(s); },
+  e164: () => { const re = /^\+[1-9]\d{6,14}$/; return (s) => typeof s !== "string" || re.test(s); },
+  base64: () => (s) => typeof s !== "string" || _isValidB64(s),
+  base64url: () => (s) => typeof s !== "string" || _isValidB64Url(s),
+  jwt: (c) => (s) => typeof s !== "string" || _isValidJWT(s, c.alg ?? null),
+  url: (c) => _urlCheck(c),
+  httpurl: (c) => _urlCheck({ ...c, protocol: _HTTP_PROTO }),
+  ipv6: () => (s) => typeof s !== "string" || (/^[0-9a-fA-F:.]+$/.test(s) && _canParseURL(`http://[${s}]`)),
+  mac: (c) => { const d = String(c.delimiter ?? ":").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); const re = new RegExp(`^(?:[0-9A-F]{2}${d}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${d}){5}[0-9a-f]{2}$`); return (s) => typeof s !== "string" || re.test(s); },
+};
+
 const _cleanRe = (src: string): string =>
   src.slice(src.startsWith("^") ? 1 : 0, src.endsWith("$") ? src.length - 1 : undefined);
 
@@ -395,8 +479,8 @@ const TL_PATTERNS: Record<string, RegExp> = {
   xid: /^[0-9a-vA-V]{20}$/,
   ksuid: /^[A-Za-z0-9]{27}$/,
   e164: /^\+[1-9]\d{6,14}$/,
-  base64: /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/,
-  base64url: /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/,
+  base64: /^[0-9a-zA-Z+/]*={0,2}$/,
+  base64url: /^[A-Za-z0-9_-]*$/,
   hex: /^[0-9a-fA-F]*$/,
 };
 
@@ -750,7 +834,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   protected _runImpl(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const _checks = (this._def as any).checks as any[] | undefined;
-    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn")))
+    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined))))
       return this._runChecksTS(data, _checks);
     const c = this._compile();
     // direct N-API validation walks the JS value natively (no encode/decode);
@@ -840,9 +924,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     const Base = this.constructor as any;
     const base = new Base({ ...this._def, checks: [] });
     const r = base._run(data);
-    if (!r.ok) return r;
-    let v = r.value;
-    const issues: ZodIssue[] = [];
+    // zod still walks the check records on a failed base — their issues
+    // surface alongside invalid_type (min_length on a number, etc.)
+    let v = r.ok ? r.value : data;
+    const issues: ZodIssue[] = r.ok ? [] : [...r.issues];
     for (let i = 0; i < checks.length; i++) {
       const c = checks[i];
       if (typeof c === "function" || c.kind === "checkfn") {
@@ -867,8 +952,35 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         v = nv;
         continue;
       }
+      // format records carrying a JS predicate (url/jwt/base64/uuid-version/
+      // nanoid-length…) — zod's real semantics live in the function, so the
+      // check never compiles to an engine opcode
+      if (typeof c.fn === "function") {
+        // string-format checks are guarded upstream in zod — non-strings skip
+        if (typeof v !== "string") continue;
+        const nv = c.fn(v);
+        if (Array.isArray(nv)) {
+          for (const i of nv) if (i.message === undefined && c.message !== undefined) { i.path ??= []; i.message = c.message; }
+          issues.push(...nv);
+        }
+        else if (nv === false)
+          issues.push({ origin: "string", code: "invalid_format", format: c.fmt ?? c.kind,
+                        ...(FORMAT_PATTERNS[c.fmt ?? c.kind] ? { pattern: FORMAT_PATTERNS[c.fmt ?? c.kind] } : {}),
+                        input: v, path: [], message: c.message } as any);
+        else if (typeof nv === "string") v = nv;
+        continue;
+      }
+      // a positioned `includes` never compiles — the engines' substring check
+      // is position-agnostic, so it runs here like a format check
+      if (c.kind === "includes" && c.position !== undefined) {
+        if (typeof v !== "string" || !v.includes(c.value, c.position))
+          issues.push({ origin: "string", code: "invalid_format", format: "includes",
+                        includes: c.value, input: v, path: [], message: c.message } as any);
+        continue;
+      }
       const rr = new Base({ ...this._def, checks: [c] })._run(v);
-      if (!rr.ok) issues.push(...rr.issues);
+      // a failed base already emitted invalid_type — the check run repeats it
+      if (!rr.ok) issues.push(...(r.ok ? rr.issues : rr.issues.filter((i: any) => i.code !== "invalid_type")));
       else v = rr.value;
     }
     return issues.length
@@ -1226,16 +1338,33 @@ export type ZodTypeAny = ZodType<any, any>;
 // ---------- primitives ----------
 export class ZodString extends ZodType<string> {
   constructor(_def: any = { type: "string", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) {
+    const mk = FMT_FNS[c.kind];
+    const rec = mk ? { ...c, fn: mk(c) } : c;
+    return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, { ...rec, message: paramMsg(rec.message) }] });
+  }
   min(n: number, message?: string) { return this._check({ kind: "min", value: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "max", value: n, message }); }
   length(n: number, message?: string) { return this._check({ kind: "length", value: n, message }); }
   email(message?: string) { return this._check({ kind: "email", message }); }
-  url(message?: string) { return this._check({ kind: "url", message }); }
-  uuid(message?: string) { return this._check({ kind: "uuid", message }); }
+  url(params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    return this._check({ kind: "url", hostname: p.hostname, protocol: p.protocol, normalize: p.normalize,
+                         _hasOpts: true, message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
+  }
+  uuid(params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    return this._check({ kind: "uuid", version: p.version, message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
+  }
   uuidv4(message?: string) { return this._check({ kind: "uuid", version: 4, message }); }
   ulid(message?: string) { return this._check({ kind: "ulid", message }); }
-  nanoid(message?: string) { return this._check({ kind: "nanoid", message }); }
+  nanoid(params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    const length = p.length;
+    if (length !== undefined && (!Number.isInteger(length) || length <= 0))
+      throw new Error(`Invalid nanoid length: ${length}`);
+    return this._check({ kind: "nanoid", length, message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
+  }
   cuid2(message?: string) { return this._check({ kind: "cuid2", message }); }
   base64(message?: string) { return this._check({ kind: "base64", message }); }
   hex(message?: string) { return this._check({ kind: "hex", message }); }
@@ -1248,7 +1377,10 @@ export class ZodString extends ZodType<string> {
   regex(re: RegExp, message?: string) { return this._check({ kind: "regex", regex: re, message }); }
   startsWith(s: string, message?: string) { return this._check({ kind: "startsWith", value: s, message }); }
   endsWith(s: string, message?: string) { return this._check({ kind: "endsWith", value: s, message }); }
-  includes(s: string, message?: string) { return this._check({ kind: "includes", value: s, message }); }
+  includes(s: string, params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    return this._check({ kind: "includes", value: s, position: p.position, message: p.error ?? params });
+  }
   lowercase(message?: string) { return this._check({ kind: "lowercase", message }); }
   uppercase(message?: string) { return this._check({ kind: "uppercase", message }); }
   nonempty(message?: string) { return this.min(1, message); }
@@ -1267,24 +1399,15 @@ export class ZodString extends ZodType<string> {
     return this._fmtcheck("guid",
       /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/, message);
   }
-  uuidv6(message?: string) {
-    return this._fmtcheck("uuid6",
-      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/, message);
-  }
-  uuidv7(message?: string) {
-    return this._fmtcheck("uuid7",
-      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/, message);
-  }
+  uuidv6(message?: string) { return this._check({ kind: "uuid", version: 6, message }); }
+  uuidv7(message?: string) { return this._check({ kind: "uuid", version: 7, message }); }
   cuid(message?: string) {
     return this._fmtcheck("cuid", /^[cC][0-9a-z]{6,}$/, message);
   }
-  base64url(message?: string) {
-    return this._fmtcheck("base64url",
-      /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/, message);
-  }
-  jwt(message?: string) {
-    return this._fmtcheck("jwt",
-      /^([A-Za-z0-9_-]{2,})\.([A-Za-z0-9_-]{2,})\.([A-Za-z0-9_-]{2,})$/, message);
+  base64url(message?: string) { return this._check({ kind: "base64url", message }); }
+  jwt(params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    return this._check({ kind: "jwt", alg: p.algorithm ?? p.alg, message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
   }
   xid(message?: string) {
     return this._fmtcheck("xid", /^[0-9a-vA-V]{20}$/, message);
@@ -1312,15 +1435,18 @@ export class ZodString extends ZodType<string> {
       /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?$/, message);
   }
   httpUrl(message?: string) {
-    return this._fmtcheck("httpurl",
-      /^https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b[-a-zA-Z0-9()@:%_+.~#?&/=]*$/, message);
+    return this._check({ kind: "httpurl", normalize: false, _hasOpts: true, message });
+  }
+  mac(params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    return this._check({ kind: "mac", delimiter: p.delimiter, message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
   }
   normalize(form: "NFC" | "NFD" | "NFKC" | "NFKD" = "NFC") {
     return this._check({ kind: "tx", tx: (s: string) => s.normalize(form) });
   }
   slugify() {
     return this._check({ kind: "tx", tx: (s: string) => s.toLowerCase().trim()
-      .replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "") });
+      .replace(/[^\w\s-]/g, "").replace(/[\s_-]+/g, "-").replace(/^-+|-+$/g, "") });
   }
 
   get format(): string | null {
@@ -1329,18 +1455,20 @@ export class ZodString extends ZodType<string> {
     for (const c of this._def.checks ?? [])
       if (!["min", "max", "length", "startsWith", "endsWith", "includes", "regex",
              "lowercase", "uppercase", "tx", "checkfn", "meta"].includes(c.kind))
-        return c.kind === "datestr" ? "date" : c.kind === "timestr" ? "time" : c.kind;
+        return c.kind === "datestr" ? "date" : c.kind === "timestr" ? "time" : c.kind === "httpurl" ? "url" : c.kind;
     return null;
   }
   get minLength(): number | null {
+    let v: number | null = null;
     for (const c of this._def.checks ?? [])
-      if (c.kind === "min" || c.kind === "length") return c.value;
-    return null;
+      if (c.kind === "min" || c.kind === "length") v = v === null ? c.value : Math.max(v, c.value);
+    return v;
   }
   get maxLength(): number | null {
+    let v: number | null = null;
     for (const c of this._def.checks ?? [])
-      if (c.kind === "max" || c.kind === "length") return c.value;
-    return null;
+      if (c.kind === "max" || c.kind === "length") v = v === null ? c.value : Math.min(v, c.value);
+    return v;
   }
 }
 

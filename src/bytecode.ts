@@ -75,7 +75,10 @@ function emitStrChecks(w: BW, checks: any[]) {
         w.u64(b.length); w.raw(b); break;
       }
       case "regex": {
-        w.u64(regId(reg.regex, c.regex));
+        // the engines only ever `.test` — a global regex would carry lastIndex
+        // state across parses, so register a non-global equivalent
+        const re = c.regex.global ? new RegExp(c.regex.source, c.regex.flags.replace("g", "")) : c.regex;
+        w.u64(regId(reg.regex, re));
         // embed /src/flags so the engine can emit zod's `pattern` issue field
         const src = enc.encode(c.format === "template_literal"
           ? c.regex.source

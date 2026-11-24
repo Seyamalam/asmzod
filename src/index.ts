@@ -301,9 +301,9 @@ export const z = {
   /** Alias of z.string().email(). */
   email: (p?: string) => new ZodString().email(p),
   /** Alias of z.string().url(). */
-  url: (p?: string) => new ZodString().url(p),
+  url: (p?: any) => new ZodString().url(p),
   /** Alias of z.string().uuid(). */
-  uuid: (p?: string) => new ZodString().uuid(p),
+  uuid: (p?: any) => new ZodString().uuid(p),
   uuidv4: (p?: string) => new ZodString().uuidv4(p),
   uuidv6: (p?: string) => new ZodString().uuidv6(p),
   uuidv7: (p?: string) => new ZodString().uuidv7(p),
@@ -315,14 +315,14 @@ export const z = {
   /** Alias of z.string().ulid(). */
   ulid: (p?: string) => new ZodString().ulid(p),
   /** Alias of z.string().nanoid(). */
-  nanoid: (p?: string) => new ZodString().nanoid(p),
+  nanoid: (p?: any) => new ZodString().nanoid(p),
   /** Alias of z.string().emoji(). */
   emoji: (p?: string) => new ZodString().emoji(p),
   /** Alias of z.string().base64(). */
   base64: (p?: string) => new ZodString().base64(p),
   /** Alias of z.string().base64url(). */
   base64url: (p?: string) => new ZodString().base64url(p),
-  jwt: (p?: string) => new ZodString().jwt(p),
+  jwt: (p?: any) => new ZodString().jwt(p),
   hex: (p?: string) => new ZodString().hex(p),
   xid: (p?: string) => new ZodString().xid(p),
   ksuid: (p?: string) => new ZodString().ksuid(p),
@@ -353,6 +353,27 @@ export const z = {
   setErrorMap: (fn?: (i: any) => string | undefined) => setErrorMap(fn),
   getErrorMap: () => getErrorMap(),
   /** ISO 8601 formats: iso.date/datetime/time/duration. */
+  /** zod's exported format regexes */
+  regexes: {
+    domain: /^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/,
+    email: /^(?:[A-Za-z0-9_'+\-]+\.)*[A-Za-z0-9_'+\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/,
+    ipv4: /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/,
+    ipv6: /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/,
+    uuid: /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/,
+    cuid: /^[cC][0-9a-z]{6,}$/,
+    cuid2: /^[0-9a-z]+$/,
+    ulid: /^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/,
+    nanoid: /^[a-zA-Z0-9_-]{21}$/,
+    xid: /^[0-9a-vA-V]{20}$/,
+    ksuid: /^[A-Za-z0-9]{27}$/,
+    e164: /^\+[1-9]\d{6,14}$/,
+    base64: /^[0-9a-zA-Z+/]*={0,2}$/,
+    base64url: /^[A-Za-z0-9_-]*$/,
+    hex: /^[0-9a-fA-F]*$/,
+    emoji: /^(?=[\s\S]*[\p{Extended_Pictographic}\p{Regional_Indicator}⃝])[\p{Extended_Pictographic}\p{Emoji_Component}]+$/u,
+    httpProtocol: /^https?$/,
+  },
+
   iso: {
     datetime: (p?: any) => _isoCheck("datetime", p),
     /** Create a Date schema. */
@@ -522,14 +543,10 @@ export const z = {
   /** ISO 4217 currency code */
   currencyCode: (params?: any) => new ZodAlgoFormat({
     format: "currency_code", message: "Invalid currency code",
-    fn: (s: string) => /^[A-Z]{3}$/.test(s),
+    fn: (s: string) => /^(?:AED|AFN|ALL|AMD|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BHD|BIF|BMD|BND|BOB|BOV|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHE|CHF|CHW|CLF|CLP|CNY|COP|COU|CRC|CUP|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GEL|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MAD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MXV|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PEN|PGK|PHP|PKR|PLN|PYG|QAR|RON|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLE|SOS|SRD|SSP|STN|SVC|SYP|SZL|THB|TJS|TMT|TND|TOP|TRY|TTD|TWD|TZS|UAH|UGX|USD|USN|UYI|UYU|UYW|UZS|VED|VES|VND|VUV|WST|XAD|XAF|XAG|XAU|XBA|XBB|XBC|XBD|XCD|XCG|XDR|XOF|XPD|XPF|XPT|XSU|XTS|XUA|XXX|YER|ZAR|ZMW|ZWG)$/.test(s),
   }),
   /** MAC address — same regex as zod */
-  mac: (params?: any) => new ZodString({
-    type: "string",
-    checks: [{ kind: "regex", regex: /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/, format: "mac" }],
-    error: params,
-  }),
+  mac: (params?: any) => new ZodString().mac(params),
   /** JSON Schema -> schema (covers the subset toJSONSchema emits + common constructs) */
   fromJSONSchema: (js: any): ZodTypeAny => fromJSONSchema(js),
 
@@ -880,6 +897,7 @@ export const {
   creditCard, iban, currencyCode, mac, pipe, prefault,
   exactOptional, deepPartial, properties, property, compile, memoizer,
   invertCodec, getDiscriminatedOption, withParser, stringFormat,
+  regexes,
 } = z;
 export { setErrorMap, getErrorMap, fromJSONSchema, toZod };
 export { toJSONSchema };

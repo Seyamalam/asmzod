@@ -356,7 +356,7 @@ const ISSUE_ORDER: Record<string, string[]> = {
   unrecognized_keys: ["code", "keys", "path", "message"],
   too_small: ["origin", "code", "minimum", "inclusive", "path", "message", "exact"],
   too_big: ["origin", "code", "maximum", "inclusive", "path", "message", "exact"],
-  invalid_format: ["origin", "code", "format", "pattern", "path", "message", "note"],
+  invalid_format: ["origin", "code", "format", "pattern", "includes", "prefix", "suffix", "position", "algorithm", "minimum", "maximum", "delimiter", "encoding", "path", "message", "note"],
   not_multiple_of: ["code", "divisor", "path", "message"],
   invalid_union: ["code", "errors", "inclusive", "matches", "path", "message"],
 };
