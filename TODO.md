@@ -33,7 +33,7 @@
 - [x] 28. Datetime ASCII+digit structure via NEON
 
 ## L — success-path & structural perf
-- [ ] 29. Per-node N-API call counter (AZ_NAPICALLS)
+- [x] 29. Per-node N-API call counter (AZ_COUNT build: asmzod-count.node + az_napicalls FFI dump)
 - [ ] 30. Objects: get_property_names+indexed vs per-key get_named_property
 - [ ] 31. Return-input for strip-mode objects
 - [ ] 32. Return-input for tuples

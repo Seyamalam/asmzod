@@ -947,6 +947,7 @@ _aznapi_parse:
 .equ LN_N, 168
 .equ LN_O, 176
 .equ LN_P, 184
+.equ LN_Q, 240            // obj: children-changed flag
 _aznapi_run:
     stp x29, x30, [sp, #-256]!
     mov x29, sp
@@ -2858,6 +2859,7 @@ _azn_encval:
     bl AZ_NAPI(napi_create_object)
     ldr x9, [sp, #LN_A]
     str x9, [sp, #LN_A]       // outobj
+    str xzr, [sp, #LN_Q]      // changed flag (strip-mode return-input)
     // records are interleaved: [klen][key][field]*n starting at node+18
     add x10, x27, #18
     str x10, [sp, #LN_B]      // record cursor
@@ -2910,6 +2912,7 @@ _azn_encval:
     ldr x0, [x12]
     add x0, x12, x0           // node = fldaddr + reloff
     ldr x1, [sp, #LN_G]
+    str x1, [sp, #LN_K]       // save input handle for identity check
     add x2, sp, #LN_G
     bl _aznapi_run
     str x0, [sp, #LN_H]
@@ -2922,6 +2925,13 @@ _azn_encval:
     b .Ln_obj_adv
 .Ln_obj_st:
     cbnz x0, .Ln_ret
+    ldr x9, [sp, #LN_G]       // child out
+    ldr x10, [sp, #LN_K]      // child in
+    cmp x9, x10
+    b.eq .Ln_obj_same
+    mov x9, #1
+    str x9, [sp, #LN_Q]
+.Ln_obj_same:
     // set_named_property(outobj, key, outval)
     mov x0, x26
     ldr x1, [sp, #LN_A]
@@ -3089,6 +3099,31 @@ _azn_encval:
 .Ln_obj_wrapup:
     ldr x9, [sp, #LN_I]
     cbnz x9, .Ln_obj_failed
+    // strip mode + all children identical + input has exactly the
+    // declared keys -> return the input object, skip the copy
+    ldr x9, [sp, #LN_Q]
+    cbnz x9, .Ln_obj_retout
+    ldrb w9, [x27, #1]
+    ldr x10, [x27, #2]
+    orr x11, x9, x10
+    cbnz x11, .Ln_obj_retout  // non-strip mode ran pass2
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_K
+    bl AZ_NAPI(napi_get_property_names)
+    cbnz x0, .Ln_obj_retout
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    add x2, sp, #LN_L
+    bl AZ_NAPI(napi_get_array_length)
+    ldr w9, [sp, #LN_L]
+    ldr x10, [x27, #10]
+    cmp x9, x10
+    b.ne .Ln_obj_retout
+    str x28, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_obj_retout:
     ldr x9, [sp, #LN_A]
     str x9, [x19]
     mov x0, #0
@@ -3192,6 +3227,7 @@ _azn_encval:
     csel x16, x16, x11, lo
     str x16, [sp, #LN_D]      // emitn
     str xzr, [sp, #LN_J]      // failed-any
+    str xzr, [sp, #LN_Q]      // changed flag (return-input)
     mov x0, x26
     mov x1, x16
     add x2, sp, #LN_E
@@ -3229,6 +3265,7 @@ _azn_encval:
     ldr x0, [x12]
     add x0, x12, x0
     ldr x1, [sp, #LN_G]
+    str x1, [sp, #LN_K]       // save input handle
     add x2, sp, #LN_G
     bl _aznapi_run
     str x0, [sp, #LN_H]
@@ -3241,6 +3278,13 @@ _azn_encval:
     b .Ln_tup_skip
 .Ln_tup_st:
     cbnz x0, .Ln_ret
+    ldr x9, [sp, #LN_G]
+    ldr x10, [sp, #LN_K]
+    cmp x9, x10
+    b.eq .Ln_tup_same
+    mov x9, #1
+    str x9, [sp, #LN_Q]
+.Ln_tup_same:
     ldr x9, [sp, #LN_F]
     ldr x13, [sp, #LN_D]
     cmp x9, x13
@@ -3260,6 +3304,20 @@ _azn_encval:
     cbnz x9, .Ln_tup_lenfail
     ldr x9, [sp, #LN_J]
     cbnz x9, .Ln_tup_lenfail
+    // all elements identical + emitn==nin==n -> return input array
+    ldr x9, [sp, #LN_Q]
+    cbnz x9, .Ln_tup_new
+    ldr x9, [sp, #LN_C]
+    ldr x10, [sp, #LN_A]
+    cmp x9, x10
+    b.ne .Ln_tup_new
+    ldr x9, [sp, #LN_D]
+    cmp x9, x10
+    b.ne .Ln_tup_new
+    str x28, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_tup_new:
     ldr x9, [sp, #LN_E]
     str x9, [x19]
     mov x0, #0

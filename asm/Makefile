@@ -1,6 +1,6 @@
 # Dual-target build: Mach-O dylib on macOS, ELF .so on Linux.
 UNAME  := $(shell uname -s)
-ASMSRC := $(wildcard *.s)
+ASMSRC := $(filter-out aznc.s,$(wildcard *.s))
 OBJ    := $(filter-out napi.o,$(ASMSRC:.s=.o))
 NOBJ   := $(OBJ) napi.o
 
@@ -45,3 +45,11 @@ clean:
 	rm -f $(OBJ) napi.o $(OUT) $(NODE)
 
 .PHONY: all clean napi
+
+# instrumented build: every AZ_NAPI call counted (az_napicalls() -> base,count)
+aznc.o: aznc.s port.h
+	clang -x assembler-with-cpp -I. -arch arm64 -c -o aznc.o aznc.s
+asmzod-count.node: $(patsubst %.s,%-c.o,$(ASMSRC)) aznc.o
+	clang -shared -arch arm64 -undefined dynamic_lookup -o $@ $(patsubst %.s,%-c.o,$(ASMSRC)) aznc.o
+%-c.o: %.s port.h
+	clang -x assembler-with-cpp -DAZ_COUNT -I. -arch arm64 -c -o $@ $<
