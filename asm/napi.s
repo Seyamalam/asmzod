@@ -45,7 +45,13 @@ _azn_ocur:      .space 8
 
 // ================= napi_register_module_v1(env, exports) -> exports =================
     .globl _napi_register_module_v1
+#ifdef __APPLE__
 _napi_register_module_v1:
+#else
+    .globl napi_register_module_v1
+napi_register_module_v1:
+_napi_register_module_v1:       // alias for internal Mach-O-style refs
+#endif
     stp x29, x30, [sp, #-64]!
     mov x29, sp
     stp x19, x20, [sp, #16]
@@ -62,12 +68,12 @@ _napi_register_module_v1:
     AZ_ADR x3, _aznapi_parse
     mov x4, #0
     add x5, sp, #32
-    bl _napi_create_function
+    bl AZ_NAPI(napi_create_function)
     ldr x3, [sp, #32]
     mov x0, x19
     mov x1, x20
     AZ_ADR x2, .Lnm_parse
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     // create "init" fn
     mov x0, x19
     AZ_ADR x1, .Lnm_init
@@ -75,12 +81,12 @@ _napi_register_module_v1:
     AZ_ADR x3, _aznapi_init
     mov x4, #0
     add x5, sp, #32
-    bl _napi_create_function
+    bl AZ_NAPI(napi_create_function)
     ldr x3, [sp, #32]
     mov x0, x19
     mov x1, x20
     AZ_ADR x2, .Lnm_init
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     // create "initLazy" fn
     mov x0, x19
     AZ_ADR x1, .Lnm_initlazy
@@ -88,12 +94,12 @@ _napi_register_module_v1:
     AZ_ADR x3, _aznapi_initlazy
     mov x4, #0
     add x5, sp, #32
-    bl _napi_create_function
+    bl AZ_NAPI(napi_create_function)
     ldr x3, [sp, #32]
     mov x0, x19
     mov x1, x20
     AZ_ADR x2, .Lnm_initlazy
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     // create "initCtor" fn
     mov x0, x19
     AZ_ADR x1, .Lnm_initctor
@@ -101,12 +107,12 @@ _napi_register_module_v1:
     AZ_ADR x3, _aznapi_initctor
     mov x4, #0
     add x5, sp, #32
-    bl _napi_create_function
+    bl AZ_NAPI(napi_create_function)
     ldr x3, [sp, #32]
     mov x0, x19
     mov x1, x20
     AZ_ADR x2, .Lnm_initctor
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     mov x0, x20
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #64
@@ -133,7 +139,7 @@ _aznapi_init:
     add x3, sp, #40           // argv
     mov x4, #0
     mov x5, #0
-    bl _napi_get_cb_info
+    bl AZ_NAPI(napi_get_cb_info)
     // get_typedarray_info(env, argv[0], &type,&len,&data,&ab,&off)
     ldr x1, [sp, #40]
     mov x0, x19
@@ -142,7 +148,7 @@ _aznapi_init:
     add x4, sp, #64           // data
     mov x5, #0
     mov x6, #0
-    bl _napi_get_typedarray_info
+    bl AZ_NAPI(napi_get_typedarray_info)
     ldr x9, [sp, #64]
     AZ_ADR x10, _azn_cbtab
     str x9, [x10]
@@ -150,7 +156,7 @@ _aznapi_init:
     mov x0, x19
     mov x1, #1
     add x2, sp, #72
-    bl _napi_get_boolean
+    bl AZ_NAPI(napi_get_boolean)
     ldr x0, [sp, #72]
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #96
@@ -174,11 +180,11 @@ _aznapi_initlazy:
     add x3, sp, #96
     mov x4, #0
     mov x5, #0
-    bl _napi_get_cb_info
+    bl AZ_NAPI(napi_get_cb_info)
     mov x0, x19
     ldr x1, [sp, #96]
     add x2, sp, #120
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     cbnz x0, .Lil_fail
     ldr w9, [sp, #120]
     mov x10, #4096
@@ -195,7 +201,7 @@ _aznapi_initlazy:
     ldr x1, [sp, #96]
     ldr x2, [sp, #136]
     add x3, sp, #144
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     cbnz x0, .Lil_fail
     mov x0, x19
     ldr x1, [sp, #144]
@@ -204,7 +210,7 @@ _aznapi_initlazy:
     add x4, sp, #120          // data
     mov x5, #0
     mov x6, #0
-    bl _napi_get_typedarray_info
+    bl AZ_NAPI(napi_get_typedarray_info)
     cbnz x0, .Lil_fail
     ldr x9, [sp, #136]
     ldr x10, [sp, #120]
@@ -218,13 +224,13 @@ _aznapi_initlazy:
     mov x0, x19
     mov x1, #1
     add x2, sp, #96
-    bl _napi_get_boolean
+    bl AZ_NAPI(napi_get_boolean)
     ldr x0, [sp, #96]
     b .Lil_ret
 .Lil_fail:
     mov x0, x19
     add x1, sp, #96
-    bl _napi_get_undefined
+    bl AZ_NAPI(napi_get_undefined)
     ldr x0, [sp, #96]
 .Lil_ret:
     ldp x19, x20, [sp, #16]
@@ -249,11 +255,11 @@ _aznapi_initctor:
     add x3, sp, #96
     mov x4, #0
     mov x5, #0
-    bl _napi_get_cb_info
+    bl AZ_NAPI(napi_get_cb_info)
     mov x0, x19
     ldr x1, [sp, #96]
     add x2, sp, #120
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     cbnz x0, .Lic_fail
     ldr w9, [sp, #120]
     mov x10, #1024
@@ -270,7 +276,7 @@ _aznapi_initctor:
     ldr x1, [sp, #96]
     ldr x2, [sp, #136]
     add x3, sp, #144
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     cbnz x0, .Lic_fail
     ldr x9, [sp, #136]
     ldr x10, [sp, #144]
@@ -284,13 +290,13 @@ _aznapi_initctor:
     mov x0, x19
     mov x1, #1
     add x2, sp, #96
-    bl _napi_get_boolean
+    bl AZ_NAPI(napi_get_boolean)
     ldr x0, [sp, #96]
     b .Lic_ret
 .Lic_fail:
     mov x0, x19
     add x1, sp, #96
-    bl _napi_get_undefined
+    bl AZ_NAPI(napi_get_undefined)
     ldr x0, [sp, #96]
 .Lic_ret:
     ldp x19, x20, [sp, #16]
@@ -318,7 +324,7 @@ _aznapi_parse:
     add x3, sp, #96           // argv[0]@96, argv[1]@104
     mov x4, #0
     mov x5, #0
-    bl _napi_get_cb_info
+    bl AZ_NAPI(napi_get_cb_info)
     // typedarray info -> blob ptr into x25, node
     ldr x1, [sp, #96]
     mov x0, x26
@@ -327,7 +333,7 @@ _aznapi_parse:
     add x4, sp, #128          // data
     mov x5, #0
     mov x6, #0
-    bl _napi_get_typedarray_info
+    bl AZ_NAPI(napi_get_typedarray_info)
     ldr x25, [sp, #128]       // blob base
     // err arena ctx
     AZ_ADR x9, _azn_errbase
@@ -364,16 +370,16 @@ _aznapi_parse:
     // {ok:false, issues:[...]} — build natively when all fields convert
     mov x0, x26
     add x1, sp, #144
-    bl _napi_create_object
+    bl AZ_NAPI(napi_create_object)
     mov x0, x26
     mov x1, #0
     add x2, sp, #152
-    bl _napi_get_boolean
+    bl AZ_NAPI(napi_get_boolean)
     ldr x1, [sp, #144]
     AZ_ADR x2, .Lnm_ok
     ldr x3, [sp, #152]
     mov x0, x26
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     ldr x0, [sp, #144]
     bl _azn_mark_res
     ldr x9, [x22]              // issue count
@@ -382,7 +388,7 @@ _aznapi_parse:
     str x9, [sp, #168]         // arena cursor
     mov x0, x26
     add x1, sp, #136          // &arr
-    bl _napi_create_array
+    bl AZ_NAPI(napi_create_array)
     str xzr, [sp, #176]        // i
 .Lnpf_loop:
     ldr x9, [sp, #176]
@@ -397,7 +403,7 @@ _aznapi_parse:
     ldr x1, [sp, #136]
     ldr w2, [sp, #176]         // u32 index
     ldr x3, [sp, #184]
-    bl _napi_set_element
+    bl AZ_NAPI(napi_set_element)
     ldr x0, [sp, #168]
     bl _az_vsize
     ldr x9, [sp, #168]
@@ -412,7 +418,7 @@ _aznapi_parse:
     AZ_ADR x2, .Lnm_issues
     ldr x3, [sp, #136]
     mov x0, x26
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     ldr x0, [sp, #144]
     b .Lnparse_ret
 .Lnparse_failbuf:
@@ -424,7 +430,7 @@ _aznapi_parse:
     mov x1, x12
     add x2, sp, #152          // &data
     add x3, sp, #136          // &ab
-    bl _napi_create_arraybuffer
+    bl AZ_NAPI(napi_create_arraybuffer)
     mov x1, x22               // src
     ldr x0, [sp, #152]        // dst
     sub x2, x21, x22          // len
@@ -433,7 +439,7 @@ _aznapi_parse:
     AZ_ADR x2, .Lnm_err
     ldr x3, [sp, #136]
     mov x0, x26
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     ldr x0, [sp, #144]
     b .Lnparse_ret
 .Lnparse_undef:
@@ -441,27 +447,27 @@ _aznapi_parse:
     str x0, [sp, #104]
     mov x0, x26
     add x1, sp, #144
-    bl _napi_create_object
+    bl AZ_NAPI(napi_create_object)
     mov x0, x26
     add x1, sp, #152
-    bl _napi_get_null
+    bl AZ_NAPI(napi_get_null)
     ldr x1, [sp, #144]
     AZ_ADR x2, .Lnm_ok
     ldr x3, [sp, #152]
     mov x0, x26
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     ldr x0, [sp, #144]
     bl _azn_mark_res
     ldr x0, [sp, #104]
     scvtf d0, x0
     mov x0, x26
     add x1, sp, #152
-    bl _napi_create_double
+    bl AZ_NAPI(napi_create_double)
     ldr x1, [sp, #144]
     AZ_ADR x2, .Lnm_code
     ldr x3, [sp, #152]
     mov x0, x26
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
     ldr x0, [sp, #144]
 .Lnparse_ret:
     ldp x19, x20, [sp, #16]
@@ -586,7 +592,7 @@ _azn_typeof:
     mov x1, x0
     mov x0, x26
     add x2, sp, #16
-    bl _napi_typeof
+    bl AZ_NAPI(napi_typeof)
     ldr w0, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
@@ -600,12 +606,12 @@ _azn_mark_res:
     mov x0, x26
     mov x1, #1
     add x2, sp, #24
-    bl _napi_get_boolean
+    bl AZ_NAPI(napi_get_boolean)
     mov x0, x26
     ldr x1, [sp, #16]
     AZ_ADR x2, .Lnm_azres
     ldr x3, [sp, #24]
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
 .Lmr_ret:
     ldp x29, x30, [sp], #64
     ret
@@ -620,7 +626,7 @@ _azn_getstr:
     mov x2, #0
     mov x3, #0
     add x4, sp, #16
-    bl _napi_get_value_string_utf8
+    bl AZ_NAPI(napi_get_value_string_utf8)
     ldr x9, [sp, #16]
     mov x10, #2097152
     cmp x9, x10
@@ -631,7 +637,7 @@ _azn_getstr:
     mov x2, x20
     mov x3, #2097152
     add x4, sp, #16
-    bl _napi_get_value_string_utf8
+    bl AZ_NAPI(napi_get_value_string_utf8)
     ldr x0, [sp, #16]
     b .Lgs_ret
 .Lgs_big:
@@ -657,7 +663,7 @@ _azn_origin:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #24
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #24]
     cbz w9, .Lor_unk
     AZ_ADR x9, .Ls_array
@@ -686,7 +692,7 @@ _azn_recvname:
     mov x0, x26
     ldr x1, [sp, #80]
     add x2, sp, #64
-    bl _napi_get_value_double
+    bl AZ_NAPI(napi_get_value_double)
     ldr d0, [sp, #64]
     fcmp d0, d0
     b.vc .Lrn_numfin
@@ -715,7 +721,7 @@ _azn_recvname:
     mov x0, x26
     ldr x1, [sp, #80]
     add x2, sp, #64
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #64]
     cbz w9, .Lrn_ctor
     AZ_ADR x9, .Ls_array
@@ -727,48 +733,48 @@ _azn_recvname:
     mov x0, x26
     ldr x1, [sp, #80]
     add x2, sp, #64
-    bl _napi_get_prototype
+    bl AZ_NAPI(napi_get_prototype)
     ldr x1, [sp, #64]
     cbz x1, .Lrn_plain
     str x1, [sp, #88]          // proto
     mov x0, x26
     add x1, sp, #64
-    bl _napi_get_global
+    bl AZ_NAPI(napi_get_global)
     ldr x1, [sp, #64]
     mov x0, x26
     AZ_ADR x2, .Ls_Objstr
     add x3, sp, #64
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     ldr x1, [sp, #64]
     mov x0, x26
     AZ_ADR x2, .Ls_protoname
     add x3, sp, #64
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     ldr x1, [sp, #88]
     ldr x2, [sp, #64]
     mov x0, x26
     add x3, sp, #96
-    bl _napi_strict_equals
+    bl AZ_NAPI(napi_strict_equals)
     ldrb w9, [sp, #96]
     cbnz w9, .Lrn_plain
     ldr x1, [sp, #88]          // proto
     mov x0, x26
     AZ_ADR x2, .Ls_ctor
     add x3, sp, #64
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lrn_plain
     ldr x1, [sp, #64]
     mov x0, x26
     AZ_ADR x2, .Ls_name
     add x3, sp, #64
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lrn_plain
     ldr x1, [sp, #64]
     mov x0, x26
     mov x2, x20
     mov x3, #2097152
     add x4, sp, #72
-    bl _napi_get_value_string_utf8
+    bl AZ_NAPI(napi_get_value_string_utf8)
     ldr x10, [sp, #72]
     cbz x10, .Lrn_plain
     mov x9, x20
@@ -808,7 +814,7 @@ _azn_input_len:
     mov x2, x20
     mov x3, #1048576
     add x4, sp, #24
-    bl _napi_get_value_string_utf16
+    bl AZ_NAPI(napi_get_value_string_utf16)
     cbnz x0, .Lilen_neg
     ldr x0, [sp, #24]
     b .Lilen_out
@@ -816,13 +822,13 @@ _azn_input_len:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #24
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #24]
     cbz w9, .Lilen_plain
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #24
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     ldr w0, [sp, #24]
     b .Lilen_out
 .Lilen_plain:
@@ -830,27 +836,27 @@ _azn_input_len:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #24
-    bl _napi_get_prototype
+    bl AZ_NAPI(napi_get_prototype)
     ldr x9, [sp, #24]
     cbz x9, .Lilen_neg
     mov x0, x26
     add x1, sp, #32
-    bl _napi_get_global
+    bl AZ_NAPI(napi_get_global)
     ldr x1, [sp, #32]
     mov x0, x26
     AZ_ADR x2, .Ls_Objstr
     add x3, sp, #32
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     ldr x1, [sp, #32]
     mov x0, x26
     AZ_ADR x2, .Ls_protoname
     add x3, sp, #32
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     ldr x1, [sp, #24]           // proto
     ldr x2, [sp, #32]           // Object.prototype
     mov x0, x26
     add x3, sp, #40
-    bl _napi_strict_equals
+    bl AZ_NAPI(napi_strict_equals)
     ldrb w9, [sp, #40]
     cbnz w9, .Lilen_neg         // plain object -> -1
 .Lilen_len:
@@ -858,7 +864,7 @@ _azn_input_len:
     ldr x1, [sp, #16]
     AZ_ADR x2, .Ls_length
     add x3, sp, #24
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lilen_neg
     ldr x0, [sp, #24]
     bl _azn_typeof
@@ -867,7 +873,7 @@ _azn_input_len:
     mov x0, x26
     ldr x1, [sp, #24]
     add x2, sp, #32
-    bl _napi_get_value_uint32
+    bl AZ_NAPI(napi_get_value_uint32)
     cbnz x0, .Lilen_neg
     ldr w0, [sp, #32]
     b .Lilen_out
@@ -1028,26 +1034,26 @@ _azn_blob_to_napi:
 .Lb2n_und:
     mov x0, x26
     ldr x1, [sp, #24]
-    bl _napi_get_undefined
+    bl AZ_NAPI(napi_get_undefined)
     b .Lb2n_ok
 .Lb2n_nul:
     mov x0, x26
     ldr x1, [sp, #24]
-    bl _napi_get_null
+    bl AZ_NAPI(napi_get_null)
     b .Lb2n_ok
 .Lb2n_bol:
     mov x0, x26
     ldr x9, [sp, #16]
     ldrb w1, [x9, #1]
     ldr x2, [sp, #24]
-    bl _napi_get_boolean
+    bl AZ_NAPI(napi_get_boolean)
     b .Lb2n_ok
 .Lb2n_num:
     ldr x9, [sp, #16]
     ldr d0, [x9, #1]
     mov x0, x26
     ldr x1, [sp, #24]
-    bl _napi_create_double
+    bl AZ_NAPI(napi_create_double)
     b .Lb2n_ok
 .Lb2n_str:
     ldr x9, [sp, #16]
@@ -1058,20 +1064,20 @@ _azn_blob_to_napi:
     mov x1, x9
     mov x0, x26
     ldr x3, [sp, #24]
-    bl _napi_create_string_utf8
+    bl AZ_NAPI(napi_create_string_utf8)
     b .Lb2n_ok
 .Lb2n_big:
     ldr x9, [sp, #16]
     ldr x1, [x9, #1]
     mov x0, x26
     ldr x2, [sp, #24]          // &result (was NULL — call failed, stale slot leaked)
-    bl _napi_create_bigint_int64
+    bl AZ_NAPI(napi_create_bigint_int64)
     b .Lb2n_ok
 .Lb2n_obj:
     // tag6: u64 nfields | [u64 klen, key, value]*
     mov x0, x26
     add x1, sp, #32
-    bl _napi_create_object
+    bl AZ_NAPI(napi_create_object)
     ldr x9, [sp, #16]
     ldr x10, [x9, #1]           // n
     str x10, [sp, #40]
@@ -1090,7 +1096,7 @@ _azn_blob_to_napi:
     mov x1, x12
     mov x2, x11
     add x3, sp, #64
-    bl _napi_create_string_utf8
+    bl AZ_NAPI(napi_create_string_utf8)
     // recurse value
     ldr x0, [sp, #56]
     add x1, sp, #72
@@ -1100,7 +1106,7 @@ _azn_blob_to_napi:
     ldr x1, [sp, #32]           // obj
     ldr x2, [sp, #64]           // key
     ldr x3, [sp, #72]           // val
-    bl _napi_set_property
+    bl AZ_NAPI(napi_set_property)
     // advance: value size = cur-after — recurse advanced? need vsize.
     ldr x0, [sp, #56]
     bl _az_vsize
@@ -1126,7 +1132,7 @@ _azn_blob_to_napi:
     mov x0, x26
     ldr x1, [sp, #40]
     add x2, sp, #32
-    bl _napi_create_array_with_length
+    bl AZ_NAPI(napi_create_array_with_length)
     str xzr, [sp, #56]          // i
 .Lb2n_aloop:
     ldr x10, [sp, #56]
@@ -1141,7 +1147,7 @@ _azn_blob_to_napi:
     ldr x1, [sp, #32]
     ldr x2, [sp, #56]
     ldr x3, [sp, #64]
-    bl _napi_set_element
+    bl AZ_NAPI(napi_set_element)
     ldr x0, [sp, #48]
     bl _az_vsize
     ldr x9, [sp, #48]
@@ -1241,7 +1247,7 @@ _az_issue_size_n:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_get_value_double
+    bl AZ_NAPI(napi_get_value_double)
     ldr d0, [sp, #LN_A]
     fcmp d0, d0
     b.vs .Ln_num_fail          // NaN -> invalid_type
@@ -1296,7 +1302,7 @@ _az_issue_size_n:
     mov x1, x28
     add x2, sp, #LN_A
     add x3, sp, #LN_B
-    bl _napi_get_value_bigint_int64
+    bl AZ_NAPI(napi_get_value_bigint_int64)
     ldr x2, [sp, #LN_A]
     ldrb w1, [x27, #1]
     cbz w1, .Ln_big_ok
@@ -1371,7 +1377,7 @@ _az_issue_size_n:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_get_value_double
+    bl AZ_NAPI(napi_get_value_double)
     ldr d0, [sp, #LN_A]
     fcmp d0, d0
     b.vc .Ln_nan_fail
@@ -1523,7 +1529,7 @@ _azn_encval:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #32
-    bl _napi_get_value_bool
+    bl AZ_NAPI(napi_get_value_bool)
     ldr x9, [sp, #24]
     mov w10, #2
     strb w10, [x9]
@@ -1535,7 +1541,7 @@ _azn_encval:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #32
-    bl _napi_get_value_double
+    bl AZ_NAPI(napi_get_value_double)
     ldr x9, [sp, #24]
     mov w10, #3
     strb w10, [x9]
@@ -1551,7 +1557,7 @@ _azn_encval:
     add x2, x20, x12
     mov x3, #1048576
     add x4, sp, #32
-    bl _napi_get_value_string_utf8
+    bl AZ_NAPI(napi_get_value_string_utf8)
     cbnz x0, .Lenc_neg
     ldr x9, [sp, #24]
     mov w10, #4
@@ -1571,7 +1577,7 @@ _azn_encval:
     ldr x1, [sp, #16]
     add x2, sp, #32
     add x3, sp, #40
-    bl _napi_get_value_bigint_int64
+    bl AZ_NAPI(napi_get_value_bigint_int64)
     ldr x9, [sp, #24]
     mov w10, #5
     strb w10, [x9]
@@ -1584,19 +1590,19 @@ _azn_encval:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #32
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #32]
     cbnz w9, .Lenc_arr
     // tag6 object: u64 nf | [u64 klen,key,val]*
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #32
-    bl _napi_get_property_names
+    bl AZ_NAPI(napi_get_property_names)
     cbnz x0, .Lenc_neg
     mov x0, x26
     ldr x1, [sp, #32]
     add x2, sp, #40
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     ldr w9, [sp, #40]
     str x9, [sp, #48]           // nf
     ldr x10, [sp, #24]
@@ -1616,7 +1622,7 @@ _azn_encval:
     ldr x1, [sp, #32]
     ldr x2, [sp, #64]
     add x3, sp, #72
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     // klen via get_string_utf8 into scratch+1MB
     mov x0, x26
     ldr x1, [sp, #72]
@@ -1624,7 +1630,7 @@ _azn_encval:
     add x2, x20, x12
     mov x3, #1048576
     add x4, sp, #80
-    bl _napi_get_value_string_utf8
+    bl AZ_NAPI(napi_get_value_string_utf8)
     cbnz x0, .Lenc_neg
     ldr x9, [sp, #56]
     ldr x10, [sp, #80]
@@ -1644,7 +1650,7 @@ _azn_encval:
     ldr x1, [sp, #16]
     ldr x2, [sp, #72]
     add x3, sp, #88
-    bl _napi_get_property
+    bl AZ_NAPI(napi_get_property)
     ldr x0, [sp, #88]
     ldr x1, [sp, #56]
     bl _azn_encval
@@ -1666,7 +1672,7 @@ _azn_encval:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #40
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     ldr w9, [sp, #40]
     str x9, [sp, #48]           // n
     ldr x10, [sp, #24]
@@ -1685,7 +1691,7 @@ _azn_encval:
     ldr x1, [sp, #16]
     ldr x2, [sp, #64]
     add x3, sp, #88
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     ldr x0, [sp, #88]
     ldr x1, [sp, #56]
     bl _azn_encval
@@ -1807,7 +1813,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_get_value_bool
+    bl AZ_NAPI(napi_get_value_bool)
     ldrb w9, [sp, #LN_A]
     ldrb w11, [x27, #2]       // literal bool byte (tag@+1, val@+2)
     cmp w9, w11
@@ -1819,7 +1825,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_get_value_double
+    bl AZ_NAPI(napi_get_value_double)
     ldr d0, [sp, #LN_A]
     ldr d1, [x27, #2]
     fcmp d0, d1
@@ -1836,7 +1842,7 @@ _azn_encval:
     mov x1, x28
     add x2, sp, #LN_A
     add x3, sp, #LN_B          // lossless out (NULL is invalid arg)
-    bl _napi_get_value_bigint_int64
+    bl AZ_NAPI(napi_get_value_bigint_int64)
     cbnz x0, .Ln_lit_miss      // read failed / doesn't fit i64 -> miss
     ldrb w9, [sp, #LN_B]
     cbz w9, .Ln_lit_miss       // lossy conversion can't equal a literal
@@ -1970,13 +1976,13 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #LN_A]
     cbz w9, .Ln_arr_fail
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     ldr w9, [sp, #LN_A]       // u32 out-param
     str x9, [sp, #LN_A]       // n
     str xzr, [sp, #LN_H]      // failed-any
@@ -2033,7 +2039,7 @@ _azn_encval:
     mov x1, x28
     mov x2, x9
     add x3, sp, #LN_E
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     ldr x0, [sp, #LN_C]
     bl _az_path_push_idx
     add x12, x27, #1
@@ -2082,7 +2088,7 @@ _azn_encval:
     mov x0, x26
     ldr x1, [sp, #LN_A]
     add x2, sp, #LN_E
-    bl _napi_create_array_with_length
+    bl AZ_NAPI(napi_create_array_with_length)
     cbnz x0, .Ln_ret
     str xzr, [sp, #LN_C]      // i
 .Ln_arr_sloop:
@@ -2095,7 +2101,7 @@ _azn_encval:
     ldr x2, [sp, #LN_C]
     ldr x10, [sp, #LN_B]
     ldr x3, [x10, x2, lsl #3]
-    bl _napi_set_element
+    bl AZ_NAPI(napi_set_element)
     cbnz x0, .Ln_ret
     ldr x9, [sp, #LN_C]
     add x9, x9, #1
@@ -2175,7 +2181,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #LN_A]
     cbnz w9, .Ln_obj_fail
     // zod validates ANY object type — exotic protos just miss schema keys
@@ -2183,7 +2189,7 @@ _azn_encval:
 .Ln_obj_mode:
     mov x0, x26
     add x1, sp, #LN_A
-    bl _napi_create_object
+    bl AZ_NAPI(napi_create_object)
     ldr x9, [sp, #LN_A]
     str x9, [sp, #LN_A]       // outobj
     // records are interleaved: [klen][key][field]*n starting at node+18
@@ -2228,7 +2234,7 @@ _azn_encval:
     mov x1, x28
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     // path push (blob ptr — stable)
     ldr x0, [sp, #LN_F]
     ldr x1, [sp, #LN_E]
@@ -2255,7 +2261,7 @@ _azn_encval:
     ldr x1, [sp, #LN_A]
     ldr x2, [sp, #LN_J]
     ldr x3, [sp, #LN_G]
-    bl _napi_set_named_property
+    bl AZ_NAPI(napi_set_named_property)
 .Ln_obj_adv:
     // advance: record = klen(8) + key + field(8)
     ldr x10, [sp, #LN_B]
@@ -2276,12 +2282,12 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_K
-    bl _napi_get_property_names
+    bl AZ_NAPI(napi_get_property_names)
     cbnz x0, .Ln_obj_hard
     mov x0, x26
     ldr x1, [sp, #LN_K]
     add x2, sp, #LN_L
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     str xzr, [sp, #LN_M]      // i
     str xzr, [sp, #LN_N]      // unk count
     str xzr, [sp, #LN_D]      // names-region bytes used
@@ -2299,7 +2305,7 @@ _azn_encval:
     ldr x1, [sp, #LN_K]
     ldr x2, [sp, #LN_M]
     add x3, sp, #LN_J
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     ldr x0, [sp, #LN_J]
     bl _azn_getstr            // x0=len, bytes at x20
     cmp x0, #-1
@@ -2351,19 +2357,19 @@ _azn_encval:
     mov x1, x28
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
-    bl _napi_get_property
+    bl AZ_NAPI(napi_get_property)
     mov x0, x26
     ldr x1, [sp, #LN_A]
     ldr x2, [sp, #LN_J]
     ldr x3, [sp, #LN_G]
-    bl _napi_set_property
+    bl AZ_NAPI(napi_set_property)
     b .Ln_obj_p2next
 .Ln_obj_p2ca:
     mov x0, x26
     mov x1, x28
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
-    bl _napi_get_property
+    bl AZ_NAPI(napi_get_property)
     mov x0, x20               // key bytes still at scratch — copy to ring (inner runs reuse scratch)
     ldr x1, [sp, #LN_E]
     bl _azn_path_push_skey
@@ -2387,7 +2393,7 @@ _azn_encval:
     ldr x1, [sp, #LN_A]
     ldr x2, [sp, #LN_J]
     ldr x3, [sp, #LN_G]
-    bl _napi_set_property
+    bl AZ_NAPI(napi_set_property)
 .Ln_obj_p2next:
     ldr x9, [sp, #LN_M]
     add x9, x9, #1
@@ -2451,7 +2457,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #LN_A]
     cbz w9, .Ln_tup_fail
     // layout: op|n(8)|fields[n]|restField|minItems|optoutStart
@@ -2466,7 +2472,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_C
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     ldr w9, [sp, #LN_C]       // u32 out-param
     str x9, [sp, #LN_C]       // nin
     str xzr, [sp, #LN_I]      // lenfail
@@ -2523,7 +2529,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x16
     add x2, sp, #LN_E
-    bl _napi_create_array_with_length
+    bl AZ_NAPI(napi_create_array_with_length)
     ldr x9, [sp, #LN_E]
     str x9, [sp, #LN_E]       // outarr
     str xzr, [sp, #LN_F]      // i
@@ -2540,12 +2546,12 @@ _azn_encval:
     mov x1, x28
     mov x2, x9
     add x3, sp, #LN_G
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     b .Ln_tup_have
 .Ln_tup_undv:
     mov x0, x26
     add x1, sp, #LN_G
-    bl _napi_get_undefined
+    bl AZ_NAPI(napi_get_undefined)
 .Ln_tup_have:
     ldr x0, [sp, #LN_F]
     bl _az_path_push_idx
@@ -2577,7 +2583,7 @@ _azn_encval:
     ldr x1, [sp, #LN_E]
     mov x2, x9
     ldr x3, [sp, #LN_G]
-    bl _napi_set_element
+    bl AZ_NAPI(napi_set_element)
 .Ln_tup_skip:
     ldr x9, [sp, #LN_F]
     add x9, x9, #1
@@ -2639,7 +2645,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x3, sp, #LN_A
-    bl _napi_instanceof
+    bl AZ_NAPI(napi_instanceof)
     cbnz x0, .Ln_io_punt
     ldrb w9, [sp, #LN_A]
     cbz w9, .Ln_io_fail
@@ -2667,7 +2673,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #LN_A]
     cbnz w9, .Ln_disc_fail
     // disc prop
@@ -2675,12 +2681,12 @@ _azn_encval:
     add x1, x27, #9           // dname ptr
     ldr x2, [x27, #1]         // dlen
     add x3, sp, #LN_J
-    bl _napi_create_string_utf8
+    bl AZ_NAPI(napi_create_string_utf8)
     mov x0, x26
     mov x1, x28
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
-    bl _napi_get_property
+    bl AZ_NAPI(napi_get_property)
     ldr x0, [sp, #LN_G]
     bl _azn_typeof
     cmp w0, #NAPI_STR
@@ -2807,24 +2813,24 @@ _azn_encval:
     mov x0, x26
     ldr x1, [sp, #LN_B]
     add x2, sp, #LN_A
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #LN_A]
     cbnz w9, .Ln_int_punt     // array merge -> FFI
     mov x0, x26
     ldr x1, [sp, #LN_C]
     add x2, sp, #LN_A
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #LN_A]
     cbnz w9, .Ln_int_punt
     // merge r's props into l
     mov x0, x26
     ldr x1, [sp, #LN_C]
     add x2, sp, #LN_K
-    bl _napi_get_property_names
+    bl AZ_NAPI(napi_get_property_names)
     mov x0, x26
     ldr x1, [sp, #LN_K]
     add x2, sp, #LN_L
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     str xzr, [sp, #LN_M]
 .Ln_int_ml:
     ldr w9, [sp, #LN_L]
@@ -2835,17 +2841,17 @@ _azn_encval:
     ldr x1, [sp, #LN_K]
     ldr x2, [sp, #LN_M]
     add x3, sp, #LN_J
-    bl _napi_get_element
+    bl AZ_NAPI(napi_get_element)
     mov x0, x26
     ldr x1, [sp, #LN_C]
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
-    bl _napi_get_property
+    bl AZ_NAPI(napi_get_property)
     mov x0, x26
     ldr x1, [sp, #LN_B]
     ldr x2, [sp, #LN_J]
     ldr x3, [sp, #LN_G]
-    bl _napi_set_property
+    bl AZ_NAPI(napi_set_property)
     ldr x9, [sp, #LN_M]
     add x9, x9, #1
     str x9, [sp, #LN_M]
@@ -2860,7 +2866,7 @@ _azn_encval:
     ldr x1, [sp, #LN_B]
     ldr x2, [sp, #LN_C]
     add x3, sp, #LN_A
-    bl _napi_strict_equals
+    bl AZ_NAPI(napi_strict_equals)
     ldrb w9, [sp, #LN_A]
     cbz w9, .Ln_int_punt
     ldr x9, [sp, #LN_B]
@@ -2881,7 +2887,7 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    bl _napi_is_array
+    bl AZ_NAPI(napi_is_array)
     ldrb w9, [sp, #LN_A]
     cbnz w9, .Ln_rec_fail
     // zod rejects exotic protos (Map/Set/Date...) — plain objects only
@@ -2894,15 +2900,15 @@ _azn_encval:
 .Ln_rec_plain:
     mov x0, x26
     add x1, sp, #LN_A
-    bl _napi_create_object
+    bl AZ_NAPI(napi_create_object)
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_K
-    bl _napi_get_property_names
+    bl AZ_NAPI(napi_get_property_names)
     mov x0, x26
     ldr x1, [sp, #LN_K]
     add x2, sp, #LN_L
-    bl _napi_get_array_length
+    bl AZ_NAPI(napi_get_array_length)
     str xzr, [sp, #LN_M]
     str xzr, [sp, #LN_I]
 .Ln_rec_loop:
@@ -2914,7 +2920,7 @@ _azn_encval:
     ldr x1, [sp, #LN_K]
     ldr x2, [sp, #LN_M]
     add x3, sp, #LN_J
-    bl _napi_get_element      // key string
+    bl AZ_NAPI(napi_get_element)      // key string
     // key check
     ldr x9, [x27, #1]
     cbz x9, .Ln_rec_val
@@ -2970,7 +2976,7 @@ _azn_encval:
     mov x1, x28
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_G
-    bl _napi_get_property
+    bl AZ_NAPI(napi_get_property)
     ldr x0, [sp, #LN_J]
     bl _azn_getstr            // key bytes at x20
     cmp x0, #-1
@@ -2999,7 +3005,7 @@ _azn_encval:
     ldr x1, [sp, #LN_A]
     ldr x2, [sp, #LN_J]
     ldr x3, [sp, #LN_G]
-    bl _napi_set_property
+    bl AZ_NAPI(napi_set_property)
 .Ln_rec_next:
     ldr x9, [sp, #LN_M]
     add x9, x9, #1
@@ -3038,7 +3044,7 @@ _azn_encval:
     mov x1, x28
     AZ_ADR x2, .Ls_getTime
     add x3, sp, #LN_A
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Ln_date_fail
     mov x0, x26
     mov x1, x28               // this
@@ -3046,12 +3052,12 @@ _azn_encval:
     mov x3, #0
     mov x4, #0
     add x5, sp, #LN_B
-    bl _napi_call_function
+    bl AZ_NAPI(napi_call_function)
     cbnz x0, .Ln_date_fail
     mov x0, x26
     ldr x1, [sp, #LN_B]
     add x2, sp, #LN_C
-    bl _napi_get_value_double
+    bl AZ_NAPI(napi_get_value_double)
     ldr d0, [sp, #LN_C]
     fcmp d0, d0
     b.vs .Ln_date_nan
@@ -3203,31 +3209,31 @@ _azn_is_proto_obj:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #40
-    bl _napi_get_prototype
+    bl AZ_NAPI(napi_get_prototype)
     cbnz x0, .Lpo_err
     ldr x9, [sp, #40]
     cbz x9, .Lpo_yes           // null proto -> plain
     mov x0, x26
     add x1, sp, #48
-    bl _napi_get_global
+    bl AZ_NAPI(napi_get_global)
     cbnz x0, .Lpo_err
     mov x0, x26
     ldr x1, [sp, #48]
     AZ_ADR x2, .Ls_Objstr
     add x3, sp, #56
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lpo_err
     mov x0, x26
     ldr x1, [sp, #56]
     AZ_ADR x2, .Ls_protoname
     add x3, sp, #64
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lpo_err
     mov x0, x26
     ldr x1, [sp, #40]
     ldr x2, [sp, #64]
     add x3, sp, #72
-    bl _napi_strict_equals
+    bl AZ_NAPI(napi_strict_equals)
     cbnz x0, .Lpo_err
     ldrb w0, [sp, #72]
     b .Lpo_ret
@@ -3249,37 +3255,37 @@ _azn_is_proto:
     mov x0, x26
     ldr x1, [sp, #16]
     add x2, sp, #40
-    bl _napi_get_prototype
+    bl AZ_NAPI(napi_get_prototype)
     cbnz x0, .Lip_err
     ldr x9, [sp, #40]
     cbz x9, .Lip_no
     mov x0, x26
     add x1, sp, #48
-    bl _napi_get_global
+    bl AZ_NAPI(napi_get_global)
     cbnz x0, .Lip_err
     mov x0, x26
     ldr x1, [sp, #24]
     ldr x2, [sp, #32]
     add x3, sp, #56
-    bl _napi_create_string_utf8
+    bl AZ_NAPI(napi_create_string_utf8)
     cbnz x0, .Lip_err
     mov x0, x26
     ldr x1, [sp, #48]
     ldr x2, [sp, #56]
     add x3, sp, #56
-    bl _napi_get_property     // ctor
+    bl AZ_NAPI(napi_get_property)     // ctor
     cbnz x0, .Lip_err
     mov x0, x26
     ldr x1, [sp, #56]
     AZ_ADR x2, .Ls_protoname
     add x3, sp, #64
-    bl _napi_get_named_property
+    bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lip_err
     mov x0, x26
     ldr x1, [sp, #40]
     ldr x2, [sp, #64]
     add x3, sp, #72
-    bl _napi_strict_equals
+    bl AZ_NAPI(napi_strict_equals)
     cbnz x0, .Lip_err
     ldrb w0, [sp, #72]
     b .Lip_ret

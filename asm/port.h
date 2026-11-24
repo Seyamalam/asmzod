@@ -1,6 +1,7 @@
 // port.h — dual-target (Mach-O / ELF) asm portability layer.
 // Assemble with `clang -x assembler-with-cpp` so these macros expand.
 #ifdef __APPLE__
+#define AZ_NAPI(n) _##n
 #define AZ_RODATA .section __TEXT,__const
 #define AZ_DATA   .section __DATA,__const
 #define AZ_WDATA  .section __DATA,__data
@@ -12,6 +13,7 @@
 	add  \reg, \reg, \sym@PAGEOFF
 .endm
 #else
+#define AZ_NAPI(n) n
 #define AZ_RODATA .section .rodata
 #define AZ_DATA   .section .data.rel.ro
 #define AZ_WDATA  .section .data

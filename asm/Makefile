@@ -19,6 +19,8 @@ ifeq ($(UNAME),Linux)
 ASFLAGS := -x assembler-with-cpp -I. --target=aarch64-linux-gnu -fPIC
 endif
 
+all: $(OUT) asmzod.node
+
 $(OUT): $(OBJ)
 	clang $(LDFLAGS) -o $@ $(OBJ)
 
@@ -42,4 +44,4 @@ napi: $(NODE)
 clean:
 	rm -f $(OBJ) napi.o $(OUT) $(NODE)
 
-.PHONY: clean napi
+.PHONY: all clean napi
