@@ -5,7 +5,8 @@ import {
   ZodArray, ZodTuple, ZodRecord, ZodUnion, ZodDiscriminatedUnion,
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
-  ZodBranded, ZodMap, ZodSet, ZodType, type ZodTypeAny, type ZodRawShape,
+  ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
+  type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
 
@@ -32,6 +33,21 @@ export const z = {
     new ZodObject<T>({ type: "object", shape, mode: "strip", catchall: null }),
   strictObject: <T extends ZodRawShape>(shape: T) =>
     new ZodObject<T>({ type: "object", shape, mode: "strict", catchall: null }),
+  looseObject: <T extends ZodRawShape>(shape: T) =>
+    new ZodObject<T>({ type: "object", shape, mode: "passthrough", catchall: null }),
+  promise: <T extends ZodTypeAny>(inner: T) =>
+    new ZodPromise<T>({ type: "instof", ctor: Promise, name: "promise", inner }),
+  function: (opts?: { input?: ZodTypeAny[]; output?: ZodTypeAny }) =>
+    new ZodFunction({
+      type: "instof", ctor: Function, name: "function",
+      args: opts?.input ?? null, ret: opts?.output ?? null,
+    }),
+  preprocess: <T extends ZodTypeAny>(fn: (v: unknown) => unknown, schema: T) =>
+    new ZodPipe<ZodEffects<ZodAny>, T>({
+      type: "pipe",
+      in: new ZodEffects<ZodAny>({ type: "transform", inner: new ZodAny(), cbid: regId(reg.transform, fn) }),
+      out: schema,
+    }),
 
   array: <T extends ZodTypeAny>(element: T) =>
     new ZodArray<T>({ type: "array", element }),

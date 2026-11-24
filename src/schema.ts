@@ -110,6 +110,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   safeParseAsync(_: unknown): Promise<SafeParseResult<Output>> {
     return Promise.reject(new Error("asmzod: safeParseAsync is not supported (synchronous engine)"));
   }
+  async parseAsync(data: unknown): Promise<Output> {
+    const r = await this.safeParseAsync(data);
+    if (!r.success) throw new ZodError(r.error.issues);
+    return r.data;
+  }
 
   optional(): ZodOptional<this> {
     return new ZodOptional({ type: "optional", inner: this });
@@ -517,6 +522,58 @@ export class ZodLazy<T extends ZodTypeAny> extends ZodType<T["_output"], T["_inp
 
 export class ZodInstanceof<T> extends ZodType<T> {
   constructor(_def: any) { super(); this._def = _def; }
+}
+
+export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output"]>, Promise<T["_input"]>> {
+  constructor(_def: any = { type: "instof", ctor: Promise, name: "promise", inner: null }) {
+    super(); this._def = _def;
+  }
+  private _syncThrow(): never {
+    throw new Error("Encountered Promise during synchronous parse. Use .parseAsync() instead.");
+  }
+  override parse(_: unknown): never { this._syncThrow(); }
+  override safeParse(_: unknown): never { this._syncThrow(); }
+  override async safeParseAsync(data: unknown): Promise<SafeParseResult<Promise<T["_output"]>>> {
+    const instof = new ZodInstanceof({ type: "instof", ctor: Promise, name: "promise" });
+    const r = instof.safeParse(data);
+    if (!r.success) return r as any;
+    const p = r.data as Promise<unknown>;
+    const inner = this._def.inner as T;
+    try {
+      const resolved = await p;
+      const ir = inner.safeParse(resolved);
+      if (!ir.success) return ir as any;
+      return { success: true, data: ir.data as any };
+    } catch (e) {
+      return { success: false, error: new ZodError([{ code: "custom", path: [], message: String(e) } as any]) };
+    }
+  }
+  override parseAsync(data: unknown) { return super.parseAsync(data); }
+}
+
+export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = ZodAny>
+  extends ZodType<(...args: any[]) => any, (...args: any[]) => any> {
+  constructor(_def: any = { type: "instof", ctor: Function, name: "function", args: null, ret: null }) {
+    super(); this._def = _def;
+  }
+  implement(fn: (...args: any[]) => any): (...args: any[]) => any {
+    const { args, ret } = this._def as { args: A | null; ret: R | null };
+    if (!args && !ret) return fn;
+    return (...callArgs: any[]) => {
+      if (args) {
+        const t = new ZodTuple({ type: "tuple", items: args, rest: null } as any);
+        const ar = t.safeParse(callArgs);
+        if (!ar.success) throw new ZodError(ar.error.issues);
+      }
+      const out = fn(...callArgs);
+      if (ret) {
+        const rr = ret.safeParse(out);
+        if (!rr.success) throw new ZodError(rr.error.issues);
+        return (rr as any).data;
+      }
+      return out;
+    };
+  }
 }
 
 export class ZodCustom<T> extends ZodType<T> {
