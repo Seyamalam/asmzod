@@ -38,8 +38,10 @@ CTR(\name): .quad 0
     AZNC napi_create_double
     AZNC napi_create_function
     AZNC napi_create_object
+    AZNC napi_create_reference
     AZNC napi_create_string_utf8
     AZNC napi_define_properties
+    AZNC napi_delete_reference
     AZNC napi_get_and_clear_last_exception
     AZNC napi_get_array_length
     AZNC napi_get_boolean
@@ -51,6 +53,7 @@ CTR(\name): .quad 0
     AZNC napi_get_property
     AZNC napi_get_property_names
     AZNC napi_get_prototype
+    AZNC napi_get_reference_value
     AZNC napi_get_typedarray_info
     AZNC napi_get_undefined
     AZNC napi_get_value_bigint_int64
@@ -96,10 +99,14 @@ SYM(aznct_names):
     .zero 20
     .ascii "napi_create_object"
     .zero 22
+    .ascii "napi_create_reference"
+    .zero 19
     .ascii "napi_create_string_utf8"
     .zero 17
     .ascii "napi_define_properties"
     .zero 18
+    .ascii "napi_delete_reference"
+    .zero 19
     .ascii "napi_get_and_clear_last_exception"
     .zero 7
     .ascii "napi_get_array_length"
@@ -122,6 +129,8 @@ SYM(aznct_names):
     .zero 17
     .ascii "napi_get_prototype"
     .zero 22
+    .ascii "napi_get_reference_value"
+    .zero 16
     .ascii "napi_get_typedarray_info"
     .zero 16
     .ascii "napi_get_undefined"
@@ -177,8 +186,10 @@ SYM(aznct_base):
     .quad CTR(napi_create_double)
     .quad CTR(napi_create_function)
     .quad CTR(napi_create_object)
+    .quad CTR(napi_create_reference)
     .quad CTR(napi_create_string_utf8)
     .quad CTR(napi_define_properties)
+    .quad CTR(napi_delete_reference)
     .quad CTR(napi_get_and_clear_last_exception)
     .quad CTR(napi_get_array_length)
     .quad CTR(napi_get_boolean)
@@ -190,6 +201,7 @@ SYM(aznct_base):
     .quad CTR(napi_get_property)
     .quad CTR(napi_get_property_names)
     .quad CTR(napi_get_prototype)
+    .quad CTR(napi_get_reference_value)
     .quad CTR(napi_get_typedarray_info)
     .quad CTR(napi_get_undefined)
     .quad CTR(napi_get_value_bigint_int64)
@@ -211,6 +223,6 @@ SYM(aznct_base):
     AZ_WDATA
     .p2align 3
 SYM(aznct_hdr):
-    .quad 41
+    .quad 44
     .quad SYM(aznct_base)
     .quad SYM(aznct_names)

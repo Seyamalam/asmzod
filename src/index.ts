@@ -736,3 +736,44 @@ function toZod(s: any, d = 0): string {
     default: return "z.unknown()";
   }
 }
+
+// named re-exports: `import * as z from "asmzod"` exposes the same
+// surface as the `z` object, matching zod's index exports
+export const {
+  string, number, bigint, boolean, date, symbol, any, unknown, never, nan,
+  object, strictObject, looseObject, promise, preprocess, array, tuple,
+  record, map, set, partialRecord, looseRecord, keyof, xor, stringbool,
+  file, codec, check, union, discriminatedUnion, intersection, literal,
+  nativeEnum, lazy, custom, coerce, optional, nullable, nullish, brand,
+  nonoptional, readonly, refine, superRefine, transform,
+  email, url, uuid, uuidv4, uuidv6, uuidv7, guid, cuid, cuid2, ulid,
+  nanoid, emoji, base64, base64url, jwt, hex, xid, ksuid, hash, uint64,
+  e164, duration, ipv4, ipv6, cidrv4, cidrv6, hostname, httpUrl,
+  config, iso, templateLiteral, json, success,
+  safeParse, parse, safeParseAsync, parseAsync, validate, validateAsync,
+  decode, decodeAsync, safeDecode, safeDecodeAsync, encode, encodeAsync,
+  safeEncode, safeEncodeAsync, input, output, clone, meta, registry,
+  int32, uint32, float64, float32, int64, gt, gte, min, lt, lte, max,
+  positive, nonnegative, negative, nonpositive, int, multipleOf,
+  minLength, maxLength, length, minSize, maxSize, size, regex,
+  startsWith, endsWith, includes, lowercase, uppercase, mime, trim,
+  toLowerCase, toUpperCase, normalize, overwrite, slugify, describe,
+  metaCheck, flattenError, formatError, prettifyError, treeifyError,
+  creditCard, iban, currencyCode, mac, pipe, prefault,
+  exactOptional, deepPartial, properties, property, compile, memoizer,
+  invertCodec, getDiscriminatedOption, withParser, stringFormat,
+} = z;
+export { setErrorMap, getErrorMap, fromJSONSchema, toZod };
+export { toJSONSchema };
+const _null = z.null;
+const _undefined = z.undefined;
+const _void = z.void;
+const _function = z.function;
+const _enum = z.enum;
+const _instanceof = z.instanceof;
+const _catch = z.catch;
+export {
+  _null as null, _undefined as undefined, _void as void,
+  _function as function, _enum as enum, _instanceof as instanceof,
+  _catch as catch,
+};

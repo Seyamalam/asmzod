@@ -295,9 +295,17 @@ _aznapi_init:
     AZ_ADR x2, .Lnm_bigint
     add x3, sp, #72
     bl AZ_NAPI(napi_get_named_property)
-    ldr x9, [sp, #72]
+    cbnz x0, .Lninit_noref
+    mov x0, x19
+    ldr x1, [sp, #72]
+    mov x2, #1
+    add x3, sp, #80
+    bl AZ_NAPI(napi_create_reference)
+    cbnz x0, .Lninit_noref
+    ldr x9, [sp, #80]
     AZ_ADR x10, _azn_bigintfn
     str x9, [x10]
+.Lninit_noref:
     // return true
     mov x0, x19
     mov x1, #1
@@ -425,7 +433,21 @@ _aznapi_initctor:
     bl AZ_NAPI(napi_get_element)
     cbnz x0, .Lic_fail
     ldr x9, [sp, #136]
-    ldr x10, [sp, #144]
+    AZ_ADR x11, _azn_ctortab
+    ldr x10, [x11, x9, lsl #3]
+    cbz x10, .Lic_noold
+    mov x0, x19
+    mov x1, x10
+    bl AZ_NAPI(napi_delete_reference)
+.Lic_noold:
+    mov x0, x19
+    ldr x1, [sp, #144]
+    mov x2, #1
+    add x3, sp, #152
+    bl AZ_NAPI(napi_create_reference)
+    cbnz x0, .Lic_fail
+    ldr x9, [sp, #136]
+    ldr x10, [sp, #152]
     AZ_ADR x11, _azn_ctortab
     str x10, [x11, x9, lsl #3]
     ldr x9, [sp, #136]
@@ -481,7 +503,20 @@ _azn_loadtab:                    // (x0=env, x1=arr, x2=tab) -> 0 / -1
     bl AZ_NAPI(napi_get_element)
     cbnz x0, .Llt_fail
     ldr x9, [sp, #64]
-    ldr x10, [sp, #72]
+    ldr x10, [x21, x9, lsl #3]
+    cbz x10, .Llt_noold
+    mov x0, x19
+    mov x1, x10
+    bl AZ_NAPI(napi_delete_reference)
+.Llt_noold:
+    mov x0, x19
+    ldr x1, [sp, #72]
+    mov x2, #1
+    add x3, sp, #80
+    bl AZ_NAPI(napi_create_reference)
+    cbnz x0, .Llt_fail
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #80]
     str x10, [x21, x9, lsl #3]
     add x9, x9, #1
     str x9, [sp, #64]
@@ -3486,8 +3521,11 @@ _azn_encval:
     cmp x9, x10
     b.hs .Ln_io_punt
     AZ_ADR x10, _azn_ctortab
-    ldr x2, [x10, x9, lsl #3]
-    cbz x2, .Ln_io_punt
+    ldr x0, [x10, x9, lsl #3]
+    cbz x0, .Ln_io_punt
+    bl _azn_refval
+    cbz x0, .Ln_io_punt
+    mov x2, x0
     mov x0, x26
     mov x1, x28
     add x3, sp, #LN_A
@@ -3595,25 +3633,39 @@ _azn_strmixed:
     cmp x9, x10
     b.hs .Lnsm_punt
     AZ_ADR x10, _azn_cbregex
-    ldr x9, [x10, x9, lsl #3]
-    cbz x9, .Lnsm_punt
+    ldr x0, [x10, x9, lsl #3]
+    cbz x0, .Lnsm_punt
+    bl _azn_refval
+    cbz x0, .Lnsm_punt
+    mov x9, x0
     str x9, [sp, #136]        // regex obj
     ldr x12, [sp, #120]
     ldr x12, [x12]            // cbid again
     AZ_ADR x10, _azn_cbtest
-    ldr x9, [x10, x12, lsl #3]
+    ldr x0, [x10, x12, lsl #3]
+    cbz x0, .Lnsm_gettest
+    bl _azn_refval
+    mov x9, x0
     cbnz x9, .Lnsm_havetest
+.Lnsm_gettest:
     mov x0, x26
     ldr x1, [sp, #136]
     AZ_ADR x2, .Lnm_test
     add x3, sp, #144
     bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lnsm_punt
-    ldr x9, [sp, #144]
+    mov x0, x26
+    ldr x1, [sp, #144]
+    mov x2, #1
+    add x3, sp, #152
+    bl AZ_NAPI(napi_create_reference)
+    cbnz x0, .Lnsm_punt
+    ldr x9, [sp, #152]
     ldr x12, [sp, #120]
     ldr x12, [x12]
     AZ_ADR x10, _azn_cbtest
-    str x9, [x10, x12, lsl #3]  // cache per-regex test fn
+    str x9, [x10, x12, lsl #3]  // cache per-regex test fn ref
+    ldr x9, [sp, #144]
 .Lnsm_havetest:
     str x9, [sp, #144]        // test fn
     ldr x0, [sp, #144]
@@ -3672,6 +3724,24 @@ _azn_strmixed:
     ret
 
 // ============ JS callback support ============
+// _azn_refval(x0=napi_ref) -> x0 = live napi_value or 0 (refs outlive scopes)
+_azn_refval:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    mov x9, x0
+    mov x0, x26
+    mov x1, x9
+    add x2, sp, #16
+    bl AZ_NAPI(napi_get_reference_value)
+    cbnz x0, .Lrv_null
+    ldr x0, [sp, #16]
+    cbnz x0, .Lrv_ret
+.Lrv_null:
+    mov x0, #0
+.Lrv_ret:
+    ldp x29, x30, [sp], #48
+    ret
+
 // _azn_callcb1(x0=fn, x1=recv, x2=arg, x3=outslot) -> 0 / -10 / -11 (pending exc)
 _azn_callcb1:
     stp x29, x30, [sp, #-64]!
@@ -3766,6 +3836,8 @@ _azn_truthy:
     AZ_ADR x9, _azn_bigintfn
     ldr x0, [x9]
     cbz x0, .Ln_cb_punt
+    bl _azn_refval
+    cbz x0, .Ln_cb_punt
     AZ_ADR x9, _azn_undef
     ldr x1, [x9]
     mov x2, x28
@@ -3837,9 +3909,10 @@ _azn_truthy:
     cmp x9, x10
     b.hs .Ln_cb_punt
     AZ_ADR x10, _azn_cbrefine
-    ldr x10, [x10, x9, lsl #3]
-    cbz x10, .Ln_cb_punt
-    mov x0, x10
+    ldr x0, [x10, x9, lsl #3]
+    cbz x0, .Ln_cb_punt
+    bl _azn_refval
+    cbz x0, .Ln_cb_punt
     AZ_ADR x9, _azn_undef
     ldr x1, [x9]
     ldr x2, [sp, #LN_G]
@@ -3883,9 +3956,10 @@ _azn_truthy:
     cmp x9, x10
     b.hs .Ln_cb_punt
     AZ_ADR x10, _azn_cbtransform
-    ldr x10, [x10, x9, lsl #3]
-    cbz x10, .Ln_cb_punt
-    mov x0, x10
+    ldr x0, [x10, x9, lsl #3]
+    cbz x0, .Ln_cb_punt
+    bl _azn_refval
+    cbz x0, .Ln_cb_punt
     AZ_ADR x9, _azn_undef
     ldr x1, [x9]
     ldr x2, [sp, #LN_G]
@@ -3901,9 +3975,10 @@ _azn_truthy:
     cmp x9, x10
     b.hs .Ln_cb_punt
     AZ_ADR x10, _azn_cbcustom
-    ldr x10, [x10, x9, lsl #3]
-    cbz x10, .Ln_cb_punt
-    mov x0, x10
+    ldr x0, [x10, x9, lsl #3]
+    cbz x0, .Ln_cb_punt
+    bl _azn_refval
+    cbz x0, .Ln_cb_punt
     AZ_ADR x9, _azn_undef
     ldr x1, [x9]
     mov x2, x28
