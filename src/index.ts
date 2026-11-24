@@ -17,33 +17,48 @@ export * from "./schema.ts";
 export * from "./error.ts";
 export { engineVersion, engineBackend } from "./ffi.ts";
 
+// factory params: { checks: [z.minLength(1), z.check(fn)], error|message... }
+const mk = (Cls: any, type: string, params: any, checks: any[] = []): any => {
+  const pc = params && typeof params === "object" && !Array.isArray(params) ? params.checks : undefined;
+  const all = [...checks, ...(Array.isArray(pc) ? pc : [])];
+  const fns = all.filter((c: any) => typeof c === "function" || c?.kind === "checkfn")
+    .map((c: any) => (typeof c === "function" ? c : c.fn));
+  let s: any = new Cls({
+    type,
+    checks: all.filter((c: any) => typeof c !== "function" && c?.kind !== "checkfn"),
+    error: params,
+  });
+  if (fns.length) s = s.check(...fns);
+  return s;
+};
+
 export const z = {
   /** Create a string schema. */
-  string: (params?: any) => new ZodString({ type: "string", checks: [], error: params }),
+  string: (params?: any) => mk(ZodString, "string", params),
   /** Create a number schema (rejects NaN/Infinity by default, like zod). */
-  number: (params?: any) => new ZodNumber({ type: "number", checks: [], error: params }),
+  number: (params?: any) => mk(ZodNumber, "number", params),
   /** Create a bigint schema. */
-  bigint: (params?: any) => new ZodBigInt({ type: "bigint", checks: [], error: params }),
+  bigint: (params?: any) => mk(ZodBigInt, "bigint", params),
   /** Create a boolean schema. */
-  boolean: (params?: any) => new ZodBoolean({ type: "boolean", checks: [], error: params }),
+  boolean: (params?: any) => mk(ZodBoolean, "boolean", params),
   /** Create a Date schema. */
-  date: (params?: any) => new ZodDate({ type: "date", checks: [], error: params }),
+  date: (params?: any) => mk(ZodDate, "date", params),
   /** Create a symbol schema. */
-  symbol: (params?: any) => new ZodSymbol({ type: "symbol", checks: [], error: params }),
+  symbol: (params?: any) => mk(ZodSymbol, "symbol", params),
   /** Schema that accepts any value. */
-  any: (params?: any) => new ZodAny({ type: "any", checks: [], error: params }),
+  any: (params?: any) => mk(ZodAny, "any", params),
   /** Schema that accepts any value typed as unknown. */
-  unknown: (params?: any) => new ZodUnknown({ type: "unknown", checks: [], error: params }),
+  unknown: (params?: any) => mk(ZodUnknown, "unknown", params),
   /** Schema that rejects every value. */
-  never: (params?: any) => new ZodNever({ type: "never", checks: [], error: params }),
+  never: (params?: any) => mk(ZodNever, "never", params),
   /** Schema accepting only null. */
-  null: (params?: any) => new ZodNull({ type: "null", checks: [], error: params }),
+  null: (params?: any) => mk(ZodNull, "null", params),
   /** Schema accepting only undefined. */
-  undefined: (params?: any) => new ZodUndefined({ type: "undefined", checks: [], error: params }),
+  undefined: (params?: any) => mk(ZodUndefined, "undefined", params),
   /** Schema accepting only undefined (void). */
-  void: (params?: any) => new ZodVoid({ type: "void", checks: [], error: params }),
+  void: (params?: any) => mk(ZodVoid, "void", params),
   /** Schema accepting only NaN. */
-  nan: (params?: any) => new ZodNaN({ type: "nan", checks: [], error: params }),
+  nan: (params?: any) => mk(ZodNaN, "nan", params),
 
   /** Create an object schema; unknown keys are stripped. */
   object: <T extends ZodRawShape>(shape: T, params?: any) =>
@@ -105,7 +120,7 @@ export const z = {
   /** Parses boolean-ish strings ("true"/"yes"/"on"/"0"/"off"/...) to booleans. */
   stringbool: (params?: any) => new ZodStringbool({ type: "stringbool", error: params }),
   /** File schema with .min/.max/.size (bytes) and .mime checks. */
-  file: (params?: any) => new ZodFile({ type: "file", checks: [], error: params }),
+  file: (params?: any) => mk(ZodFile, "file", params),
   /** Bidirectional codec: parse via decode (in->out), .encode() via encode. */
   codec: <A extends ZodTypeAny, B extends ZodTypeAny>(
     inSchema: A, outSchema: B,
@@ -115,7 +130,7 @@ export const z = {
     transform: params.decode, reverseTransform: params.encode,
   }),
   /** Check factory for use with .check(...). */
-  check: (fn: (ctx: any) => void) => fn,
+  check: (fn: (ctx: any) => void) => ({ kind: "checkfn", fn }),
 
   /** Try each option in order; first success wins. */
   union: <T extends ZodTypeAny[]>(options: [...T], params?: any) =>
@@ -160,24 +175,24 @@ export const z = {
   /** Coercion namespace: coerce.string/number/boolean/date/bigint. */
   coerce: {
     /** Create a string schema. */
-    string: () => new ZodEffects<ZodString, string>({
+    string: (params?: any) => new ZodEffects<ZodString, string>({
       type: "coerce_str",
-      inner: new ZodString(),
+      inner: mk(ZodString, "string", params),
     }),
     /** Create a number schema (rejects NaN/Infinity by default, like zod). */
-    number: () => new ZodEffects<ZodNumber, number>({
+    number: (params?: any) => new ZodEffects<ZodNumber, number>({
       type: "coerce_num",
-      inner: new ZodNumber(),
+      inner: mk(ZodNumber, "number", params),
     }),
     /** Create a boolean schema. */
-    boolean: () => new ZodEffects<ZodBoolean, boolean>({
+    boolean: (params?: any) => new ZodEffects<ZodBoolean, boolean>({
       type: "coerce_bool",
-      inner: new ZodBoolean(),
+      inner: mk(ZodBoolean, "boolean", params),
     }),
     /** Create a bigint schema. */
-    bigint: () => new ZodEffects<ZodBigInt, bigint>({
+    bigint: (params?: any) => new ZodEffects<ZodBigInt, bigint>({
       type: "coerce_bigint",
-      inner: new ZodBigInt(),
+      inner: mk(ZodBigInt, "bigint", params),
     }),
     /** Create a Date schema. */
     date: () => {
@@ -250,7 +265,7 @@ export const z = {
   },
   /** Bigint constrained to [0, 2^64-1]. */
   uint64: (params?: any) =>
-    new ZodBigInt({ type: "bigint", checks: [], error: params })
+    mk(ZodBigInt, "bigint", params)
       .min(0n).max(18446744073709551615n),
   e164: (p?: string) => new ZodString().e164(p),
   duration: (p?: string) => new ZodString().duration(p),
@@ -320,7 +335,7 @@ export const z = {
   parse: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parse(data, params),
   safeParseAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
   parseAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parseAsync(data),
-  validate: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
+  validate: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params).success,
   validateAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
   /** codec decode — same as parse on codecs */
   decode: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parse(data, params),
@@ -376,15 +391,15 @@ export const z = {
 
   // ---------- numeric factories ----------
   /** number int bounded to i32 */
-  int32: (params?: any) => new ZodNumber({ type: "number", checks: [{ kind: "int" }, { kind: "gte", value: -2147483648 }, { kind: "lte", value: 2147483647 }], error: params }),
+  int32: (params?: any) => mk(ZodNumber, "number", params, [{ kind: "int" }, { kind: "gte", value: -2147483648 }, { kind: "lte", value: 2147483647 }]),
   /** number int bounded to u32 */
-  uint32: (params?: any) => new ZodNumber({ type: "number", checks: [{ kind: "int" }, { kind: "gte", value: 0 }, { kind: "lte", value: 4294967295 }], error: params }),
+  uint32: (params?: any) => mk(ZodNumber, "number", params, [{ kind: "int" }, { kind: "gte", value: 0 }, { kind: "lte", value: 4294967295 }]),
   /** number (f64 slot named float64 in zod) */
-  float64: (params?: any) => new ZodNumber({ type: "number", checks: [], error: params }),
+  float64: (params?: any) => mk(ZodNumber, "number", params),
   /** number (f32 semantics deferred — same range as float64 in JS) */
-  float32: (params?: any) => new ZodNumber({ type: "number", checks: [], error: params }),
+  float32: (params?: any) => mk(ZodNumber, "number", params),
   /** bigint bounded to i64 */
-  int64: (params?: any) => new ZodBigInt({ type: "bigint", checks: [{ kind: "gte", value: BigInt("-9223372036854775808") }, { kind: "lte", value: BigInt("9223372036854775807") }], error: params }),
+  int64: (params?: any) => mk(ZodBigInt, "bigint", params, [{ kind: "gte", value: BigInt("-9223372036854775808") }, { kind: "lte", value: BigInt("9223372036854775807") }]),
 
   // ---------- check factories for .check(...) ----------
   /** number check: value > n */

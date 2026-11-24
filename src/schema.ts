@@ -236,6 +236,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       for (const o of objs) {
         const c = o._def ?? o;
         if (c.kind === "meta") { def.description = c.description ?? def.description; def.metadata = { ...(def.metadata ?? {}), ...(c.metadata ?? {}) }; }
+        else if (c.kind === "checkfn") fns.push(c.fn);
         else if (c.kind === "tx") s = new ZodEffects({ type: "transform", inner: s, cbid: regId(reg.transform, guardAsync(c.tx)), fn: c.tx, kind: "transform" });
         else checks.push(c);
       }

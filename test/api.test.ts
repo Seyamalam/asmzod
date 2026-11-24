@@ -128,3 +128,17 @@ test("zoderror format/flatten", () => {
     expect(fl.fieldErrors.a.length).toBe(1);
   }
 });
+
+test("factory {checks} params + z.check", () => {
+  const s = z.string({ checks: [z.minLength(1), z.maxLength(3)] });
+  expect(s.safeParse("").success).toBe(false);
+  expect(s.safeParse("ab").success).toBe(true);
+  expect(s.safeParse("abcd").success).toBe(false);
+  const fn = z.string({ checks: [z.check((c: any) => { if (c.value !== "ok") c.issues.push({ code: "custom", input: c.value }); })] });
+  expect(fn.safeParse("ok").success).toBe(true);
+  expect(fn.safeParse("bad").success).toBe(false);
+  expect(z.coerce.string({ checks: [z.minLength(2)] }).safeParse("a").success).toBe(false);
+  expect(z.coerce.string({ checks: [z.minLength(2)] }).safeParse("ab").success).toBe(true);
+  expect(z.validate(z.string(), "x")).toBe(true);
+  expect(z.validate(z.string(), 5)).toBe(false);
+});
