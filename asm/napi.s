@@ -26,6 +26,9 @@ _azn_cbtab:     .quad 0          // cb table ptr (from init())
 _azn_errbuf:    .space 1048576   // 1MB err arena
 _azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
 _azn_lazytab:   .space 8192       // 1024 resolved lazy-subblob data ptrs
+_azn_obuf:      .space 8388608   // 8MB staged child results (return-input-if-unchanged)
+_azn_obuf_end:  .space 8
+_azn_ocur:      .space 8
     .text
 
 #define NAPI_UNDEF 0
@@ -256,6 +259,9 @@ _aznapi_parse:
     ldr x24, [x9]
     cbz x24, .Lnparse_undef   // init() never ran
     AZ_ADR x20, _azn_scratch
+    AZ_ADR x9, _azn_obuf
+    AZ_ADR x10, _azn_ocur
+    str x9, [x10]             // reset staging cursor per parse
     str xzr, [x22]
     str xzr, [x22, #8]
     str xzr, [x22, #16]
@@ -1924,13 +1930,19 @@ _azn_encval:
     mov x9, #1
     str x9, [sp, #LN_H]
 .Ln_arr_lenok:
-    mov x0, x26
-    ldr x1, [sp, #LN_A]
-    add x2, sp, #LN_B
-    bl _napi_create_array_with_length
-    ldr x9, [sp, #LN_B]
-    str x9, [sp, #LN_B]       // outarr
+    // staging reservation: obuf[ocur .. ocur+n*8)
+    AZ_ADR x9, _azn_ocur
+    ldr x10, [x9]
+    str x10, [sp, #LN_B]      // st
+    ldr x11, [sp, #LN_A]
+    lsl x11, x11, #3
+    add x11, x10, x11         // ocur + n*8
+    AZ_ADR x12, _azn_obuf_end
+    cmp x11, x12
+    b.hi .Ln_arr_ofull
+    str x11, [x9]             // ocur += n*8
     str xzr, [sp, #LN_C]      // i
+    str xzr, [sp, #LN_D]      // changed
 .Ln_arr_loop:
     ldr x9, [sp, #LN_C]
     ldr x10, [sp, #LN_A]
@@ -1939,42 +1951,89 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     mov x2, x9
-    add x3, sp, #LN_D
+    add x3, sp, #LN_E
     bl _napi_get_element
     ldr x0, [sp, #LN_C]
     bl _az_path_push_idx
     add x12, x27, #1
     ldr x0, [x12]
     add x0, x12, x0           // elem node
-    ldr x1, [sp, #LN_D]
-    add x2, sp, #LN_D
+    ldr x1, [sp, #LN_E]
+    add x2, sp, #LN_F
     bl _aznapi_run
-    str x0, [sp, #LN_E]
+    str x0, [sp, #LN_G]
     bl _az_path_pop
-    ldr x0, [sp, #LN_E]
+    ldr x0, [sp, #LN_G]
     cmp x0, #-2
     b.ne .Ln_arr_elemst       // 0 ok / hard error
     mov x9, #1
     str x9, [sp, #LN_H]
     b .Ln_arr_next
 .Ln_arr_elemst:
-    cbnz x0, .Ln_ret
-    mov x0, x26
-    ldr x1, [sp, #LN_B]
-    ldr x2, [sp, #LN_C]
-    ldr x3, [sp, #LN_D]
-    bl _napi_set_element
+    cbnz x0, .Ln_arr_orest    // hard error — restore cursor then propagate
+    ldr x9, [sp, #LN_F]
+    ldr x10, [sp, #LN_B]
+    ldr x11, [sp, #LN_C]
+    str x9, [x10, x11, lsl #3] // stage result
+    ldr x10, [sp, #LN_E]
+    cmp x9, x10
+    b.eq .Ln_arr_next
+    mov x9, #1
+    str x9, [sp, #LN_D]       // changed
 .Ln_arr_next:
     ldr x9, [sp, #LN_C]
     add x9, x9, #1
     str x9, [sp, #LN_C]
     b .Ln_arr_loop
 .Ln_arr_done:
+    // restore cursor on every exit
+    AZ_ADR x9, _azn_ocur
+    ldr x10, [sp, #LN_B]
+    str x10, [x9]
     ldr x9, [sp, #LN_H]
     cbnz x9, .Ln_arr_failed
-    ldr x9, [sp, #LN_B]
+    ldr x9, [sp, #LN_D]
+    cbnz x9, .Ln_arr_mat
+    str x28, [x19]            // unchanged — return the input array verbatim
+    mov x0, #0
+    b .Ln_ret
+.Ln_arr_mat:
+    mov x0, x26
+    ldr x1, [sp, #LN_A]
+    add x2, sp, #LN_E
+    bl _napi_create_array_with_length
+    cbnz x0, .Ln_ret
+    str xzr, [sp, #LN_C]      // i
+.Ln_arr_sloop:
+    ldr x9, [sp, #LN_C]
+    ldr x10, [sp, #LN_A]
+    cmp x9, x10
+    b.hs .Ln_arr_sdone
+    mov x0, x26
+    ldr x1, [sp, #LN_E]
+    ldr x2, [sp, #LN_C]
+    ldr x10, [sp, #LN_B]
+    ldr x3, [x10, x2, lsl #3]
+    bl _napi_set_element
+    cbnz x0, .Ln_ret
+    ldr x9, [sp, #LN_C]
+    add x9, x9, #1
+    str x9, [sp, #LN_C]
+    b .Ln_arr_sloop
+.Ln_arr_sdone:
+    ldr x9, [sp, #LN_E]
     str x9, [x19]
     mov x0, #0
+    b .Ln_ret
+.Ln_arr_orest:
+    str x0, [sp, #LN_D]
+    AZ_ADR x9, _azn_ocur
+    ldr x10, [sp, #LN_B]
+    str x10, [x9]
+    ldr x0, [sp, #LN_D]
+    b .Ln_ret
+.Ln_arr_ofull:
+    mov x0, #-10              // staging exhausted — whole parse falls back
     b .Ln_ret
 .Ln_arr_failed:
     mov x0, #-2
