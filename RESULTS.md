@@ -6,18 +6,18 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 
 | workload | asmzod | zod4 | ratio |
 |---|---|---|---|
-| small-obj     x50k | 0.28µs | 0.12µs | 2.41x |
-| array-2000     x40 | 330.78µs | 130.00µs | 2.54x |
-| deep+arr500   x400 | 5.41µs | 20.45µs | **0.26x — faster** |
-| union-mixed   x30k | 0.18µs | 0.12µs | 1.43x |
-| disc-union    x30k | 0.20µs | 0.10µs | 1.99x |
-| record-200   x2000 | 16.70µs | 19.54µs | **0.85x — faster** |
-| tuple        x30k | 0.15µs | 0.16µs | **0.98x — faster** |
-| str-checks   x30k | 0.81µs | 0.16µs | 5.17x |
-| strict-obj   x30k | 1.37µs | 0.17µs | 7.89x |
-| lazy-rec     x30k | 0.35µs | 0.28µs | 1.27x |
-| opt/null/def x30k | 0.20µs | 0.13µs | 1.60x |
-| fail-issues  x10k | 3.01µs | 0.43µs | 7.09x |
+| small-obj     x50k | 0.29µs | 0.10µs | 2.79x |
+| array-2000     x40 | 319.02µs | 109.48µs | 2.91x |
+| deep+arr500   x400 | 6.17µs | 17.67µs | **0.35x — faster** |
+| union-mixed   x30k | 0.19µs | 0.12µs | 1.64x |
+| disc-union    x30k | 0.23µs | 0.09µs | 2.53x |
+| record-200   x2000 | 15.43µs | 17.07µs | **0.90x — faster** |
+| tuple        x30k | 0.17µs | 0.16µs | 1.07x |
+| str-checks   x30k | 0.17µs | 0.12µs | 1.46x |
+| strict-obj   x30k | 1.31µs | 0.16µs | 8.13x |
+| lazy-rec     x30k | 0.37µs | 0.27µs | 1.37x |
+| opt/null/def x30k | 0.20µs | 0.11µs | 1.83x |
+| fail-issues  x10k | 2.74µs | 0.43µs | 6.36x |
 
 ## Where the time goes
 
@@ -26,8 +26,9 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
   for an external validator; leaf schemas return the input handle
   verbatim and unchanged arrays return the input array (no output
   materialization).
-- **`str-checks`** goes through the regex path → JS callback → FFI
-  fallback. Inherent: regex needs the JS RegExp engine.
+- **`str-checks`** runs natively: check records are walked one at a
+  time, regex hits the host's `RegExp.test` through a single N-API
+  call instead of bouncing through the whole FFI engine.
 - **`strict-obj`** input carries an extra key, so every parse fails with
   `unrecognized_keys` — it measures the failure path, not objects.
 - **`fail-issues`** builds native issue objects then TypeScript
