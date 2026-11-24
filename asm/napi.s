@@ -33,6 +33,7 @@ _azn_cbcustom:  .space 8192
 _azn_cbregex:   .space 8192
 _azn_undef:     .space 8          // cached undefined value (per parse)
 _azn_pendingexc: .space 8         // exception value when a cb throws
+_azn_bigintfn:  .space 8          // globalThis.BigInt
 _azn_obuf:      .space 8388608   // 8MB staged child results (return-input-if-unchanged)
 _azn_obuf_end:  .space 8
 _azn_ocur:      .space 8
@@ -141,6 +142,7 @@ _napi_register_module_v1:       // alias for internal Mach-O-style refs
 .Lnm_initlazy: .ascii "initLazy\0"
 .Lnm_initctor: .ascii "initCtor\0"
 .Lnm_initcb: .ascii "initCb\0"
+.Lnm_bigint: .ascii "BigInt\0"
     .p2align 2
 
 // ================= init(cbTableBuf) -> true =================
@@ -171,6 +173,18 @@ _aznapi_init:
     bl AZ_NAPI(napi_get_typedarray_info)
     ldr x9, [sp, #64]
     AZ_ADR x10, _azn_cbtab
+    str x9, [x10]
+    // stash globalThis.BigInt for coerce_bigint
+    mov x0, x19
+    add x1, sp, #72
+    bl AZ_NAPI(napi_get_global)
+    mov x0, x19
+    ldr x1, [sp, #72]
+    AZ_ADR x2, .Lnm_bigint
+    add x3, sp, #72
+    bl AZ_NAPI(napi_get_named_property)
+    ldr x9, [sp, #72]
+    AZ_ADR x10, _azn_bigintfn
     str x9, [x10]
     // return true
     mov x0, x19
@@ -757,6 +771,14 @@ _aznapi_run:
     b.eq .Ln_transform
     cmp w9, #0x22
     b.eq .Ln_custom
+    cmp w9, #0x1c
+    b.eq .Ln_coerce
+    cmp w9, #0x1d
+    b.eq .Ln_coerce
+    cmp w9, #0x1e
+    b.eq .Ln_coerce
+    cmp w9, #0x1f
+    b.eq .Ln_coerce
     cmp w9, #0x21
     b.eq .Ln_sym
     cmp w9, #0x23
@@ -2911,6 +2933,95 @@ _azn_truthy:
     mov x0, #-10
     ldp x29, x30, [sp], #48
     ret
+
+// ============ 0x1C-0x1F COERCE ============
+// [op][field(8)][inner] — coerce x28, validate inner on the result.
+// Coercion failure (e.g. Symbol -> string) emits invalid_type after
+// clearing the pending exception — same shape as the encoded engine.
+.Ln_coerce:
+    ldrb w9, [x27]
+    cmp w9, #0x1e
+    b.eq .Ln_coerce_bool
+    cmp w9, #0x1f
+    b.eq .Ln_coerce_big
+    cmp w9, #0x1c
+    b.eq .Ln_coerce_str
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_G
+    bl AZ_NAPI(napi_coerce_to_number)
+    b .Ln_coerce_chk
+.Ln_coerce_str:
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_G
+    bl AZ_NAPI(napi_coerce_to_string)
+    b .Ln_coerce_chk
+.Ln_coerce_bool:
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_G
+    bl AZ_NAPI(napi_coerce_to_bool)
+    b .Ln_coerce_chk
+.Ln_coerce_big:
+    AZ_ADR x9, _azn_bigintfn
+    ldr x0, [x9]
+    cbz x0, .Ln_cb_punt
+    AZ_ADR x9, _azn_undef
+    ldr x1, [x9]
+    mov x2, x28
+    add x3, sp, #LN_G
+    bl _azn_callcb1
+    cmp x0, #-11
+    b.eq .Ln_coerce_clrexc
+    cbnz x0, .Ln_ret
+    b .Ln_coerce_ok
+.Ln_coerce_chk:
+    cbz x0, .Ln_coerce_ok
+.Ln_coerce_clrexc:
+    mov x0, x26
+    add x1, sp, #LN_H
+    bl AZ_NAPI(napi_is_exception_pending)
+    ldrb w9, [sp, #LN_H]
+    cbz w9, .Ln_coerce_badval
+    mov x0, x26
+    add x1, sp, #LN_H
+    bl AZ_NAPI(napi_get_and_clear_last_exception)
+.Ln_coerce_badval:
+    ldrb w9, [x27]
+    cmp w9, #0x1c
+    b.ne .Ln_cv_n1
+    AZ_ADR x0, .Lex_string
+    mov x1, #6
+    b .Ln_cv_emit
+.Ln_cv_n1:
+    cmp w9, #0x1d
+    b.ne .Ln_cv_n2
+    AZ_ADR x0, .Lex_number
+    mov x1, #6
+    b .Ln_cv_emit
+.Ln_cv_n2:
+    cmp w9, #0x1e
+    b.ne .Ln_cv_big
+    AZ_ADR x0, .Lex_boolean
+    mov x1, #7
+    b .Ln_cv_emit
+.Ln_cv_big:
+    AZ_ADR x0, .Lex_bigint
+    mov x1, #6
+.Ln_cv_emit:
+    bl _azn_issue_type
+    cbnz x0, .Ln_ret
+    mov x0, #-2
+    b .Ln_ret
+.Ln_coerce_ok:
+    add x9, x27, #1
+    ldr x10, [x9]
+    add x0, x9, x10
+    ldr x1, [sp, #LN_G]
+    mov x2, x19
+    bl _aznapi_run
+    b .Ln_ret
 
 // ============ 0x0F REFINE ============
 // [op][field(8)][cbid(8)][msglen(8)][msg]
