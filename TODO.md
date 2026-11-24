@@ -6,15 +6,15 @@
 - [x] 3. Intern issue field-name napi_values at init
 - [x] 4. Intern common issue strings ("too_small", "invalid_type", ...)
 - [x] 5. Fixed key order on issue objects (stable hidden class)
-- [ ] 6. Move normalizeIssue format/origin/note tables into asm
+- [x] 6. Move normalizeIssue format/origin/note tables into asm
 - [x] 7. Lazy ZodError.message (build pretty JSON on first access)
 - [x] 8. Fast-scan finishIssues — skip splice when no _k markers
 - [x] 9. Skip defaultMessage when custom message present
-- [ ] 10. Path segments as interned strings, not copies
-- [ ] 11. ArrayBuffer fallback only above issue-count threshold
+- [x] 10. Path segments as interned strings, not copies
+- [x] 11. ArrayBuffer fallback only above issue-count threshold
 - [x] 12. parseMany: carry native issues through marker, no TS re-parse
 - [x] 13. Measure ZodError construction cost separately
-- [ ] 14. Shared issue-shape dictionary across parseMany failures
+- [x] 14. Shared issue-shape dictionary across parseMany failures
 
 ## K — SIMD string checks (NEON)
 - [ ] 15. UTF-16 length counting via NEON

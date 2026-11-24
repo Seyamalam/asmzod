@@ -934,7 +934,150 @@ _az_issue_size:
     str x3, [sp, #32]        // bound bits
     stp x4, x5, [sp, #40]    // incl/exact (w's in x slots)
     str x0, [sp, #56]        // code
-    // begin
+    // zod default message, when no custom msg: "Too small|big: expected
+    // <type> to have|be [exactly|op]<bound>[ characters|items]"
+    cbnz x7, .Lsz_begin
+    // bound integral? f64 -> i64 round-trip; non-integral/huge -> skip msg
+    ldr x3, [sp, #32]
+    fmov d1, x3
+    fcvtzs x9, d1
+    scvtf d2, x9
+    fcmp d1, d2
+    b.ne .Lsz_begin
+    // -0 and bounds needing exponent text -> let TS build it
+    mov x10, #0x7ff
+    lsl x10, x10, #52
+    and x11, x3, x10
+    lsr x11, x11, #52            // exp field
+    cmp x11, #0x43c              // >=2^61ish -> bail (JS uses e+nn)
+    b.hs .Lsz_begin
+    str x9, [sp, #64]            // bound i64
+    AZ_ADR x13, _az_msgbuf
+    str x13, [sp, #72]           // cursor
+    // "Too small: expected " / "Too big: expected "
+    ldr x0, [sp, #72]
+    ldr x10, [sp, #56]
+    cmp x10, #9
+    b.eq .Lsz_pmax
+    AZ_ADR x1, .Lm_toosmall
+    mov x2, #20
+    b .Lsz_pref
+.Lsz_pmax:
+    AZ_ADR x1, .Lm_toobig
+    mov x2, #18
+.Lsz_pref:
+    bl _az_msgcat
+    str x0, [sp, #72]
+    // type
+    ldr x0, [sp, #72]
+    ldp x1, x2, [sp, #16]
+    bl _az_msgcat
+    str x0, [sp, #72]
+    // string|array -> " to have " + unit; else " to be "
+    ldp x10, x11, [sp, #16]
+    mov x14, #0                  // have=0
+    cmp x11, #6
+    b.ne .Lsz_tarr
+    mov x0, x10
+    AZ_ADR x1, ak_str6
+    mov x2, #6
+    bl _az_memeq
+    cbz w0, .Lsz_tarr
+    mov x14, #1
+    b .Lsz_thave
+.Lsz_tarr:
+    ldp x10, x11, [sp, #16]
+    cmp x11, #5
+    b.ne .Lsz_tbe
+    mov x0, x10
+    AZ_ADR x1, ak_arr5
+    mov x2, #5
+    bl _az_memeq
+    cbz w0, .Lsz_tbe
+    mov x14, #1
+.Lsz_thave:
+    str x14, [sp, #80]
+    ldr x0, [sp, #72]
+    AZ_ADR x1, .Lm_tohave
+    mov x2, #9
+    b .Lsz_mid
+.Lsz_tbe:
+    str x14, [sp, #80]
+    ldr x0, [sp, #72]
+    AZ_ADR x1, .Lm_tobe
+    mov x2, #7
+.Lsz_mid:
+    bl _az_msgcat
+    str x0, [sp, #72]
+    // exactly | op
+    ldr w10, [sp, #48]
+    cbz w10, .Lsz_op
+    ldr x0, [sp, #72]
+    AZ_ADR x1, .Lm_exactly
+    mov x2, #8
+    bl _az_msgcat
+    str x0, [sp, #72]
+    b .Lsz_num
+.Lsz_op:
+    // code8: incl -> ">=" else ">"; code9: incl -> "<=" else "<"
+    ldr x0, [sp, #72]
+    ldr x10, [sp, #56]
+    ldr w11, [sp, #40]           // inclusive
+    cmp x10, #9
+    b.eq .Lsz_opmax
+    cbz w11, .Lsz_gt
+    AZ_ADR x1, .Lm_gte
+    mov x2, #2
+    b .Lsz_opc
+.Lsz_gt:
+    AZ_ADR x1, .Lm_gt
+    mov x2, #1
+    b .Lsz_opc
+.Lsz_opmax:
+    cbz w11, .Lsz_lt
+    AZ_ADR x1, .Lm_lte
+    mov x2, #2
+    b .Lsz_opc
+.Lsz_lt:
+    AZ_ADR x1, .Lm_lt
+    mov x2, #1
+.Lsz_opc:
+    bl _az_msgcat
+    str x0, [sp, #72]
+.Lsz_num:
+    ldr x0, [sp, #72]
+    ldr x1, [sp, #64]
+    mov x9, x0
+    mov x0, x1
+    mov x1, x9
+    bl _az_i64toa
+    ldr x9, [sp, #72]
+    add x9, x9, x0
+    str x9, [sp, #72]
+    // unit for string|array origins
+    ldr x10, [sp, #80]
+    cbz x10, .Lsz_setd
+    ldr x0, [sp, #72]
+    ldp x10, x11, [sp, #16]
+    cmp x11, #6
+    b.ne .Lsz_items
+    AZ_ADR x1, .Lm_chars
+    mov x2, #11
+    b .Lsz_unit
+.Lsz_items:
+    AZ_ADR x1, .Lm_items
+    mov x2, #6
+.Lsz_unit:
+    bl _az_msgcat
+    str x0, [sp, #72]
+.Lsz_setd:
+    AZ_ADR x9, _az_msgbuf
+    ldr x10, [sp, #72]
+    sub x10, x10, x9
+    AZ_ADR x11, _az_default_msg
+    stp x9, x10, [x11]
+.Lsz_begin:
+    ldr x0, [sp, #56]
     mov x1, x6
     mov x2, x7
     bl _az_issue_begin
@@ -955,7 +1098,7 @@ _az_issue_size:
     cbnz x0, .Lsz_out
     // type
     AZ_ADR x0, ak_type
-    mov x1, #4
+    mov x1, #6
     ldp x2, x3, [sp, #16]
     bl _az_issue_f_str
     cbnz x0, .Lsz_out
@@ -992,6 +1135,19 @@ _az_issue_size:
     ret
 
     AZ_RODATA
+.Lm_toosmall: .ascii "Too small: expected "
+.Lm_toobig:   .ascii "Too big: expected "
+.Lm_tohave:   .ascii " to have "
+.Lm_tobe:     .ascii " to be "
+.Lm_exactly:  .ascii "exactly "
+.Lm_gte:      .ascii ">="
+.Lm_gt:       .ascii ">"
+.Lm_lte:      .ascii "<="
+.Lm_lt:       .ascii "<"
+.Lm_chars:    .ascii " characters"
+.Lm_items:    .ascii " items"
+ak_str6:      .ascii "string"
+ak_arr5:      .ascii "array"
     .globl ams_atleast
     AZ_HIDDEN ams_atleast
     .globl ams_atmost
@@ -1043,7 +1199,7 @@ ak_minimum:    .ascii "minimum"
 ak_maximum:    .ascii "maximum"
     .globl ak_type
     AZ_HIDDEN ak_type
-ak_type:       .ascii "type"
+ak_type:       .ascii "origin"
     .globl ak_inclusive
     AZ_HIDDEN ak_inclusive
 ak_inclusive:  .ascii "inclusive"

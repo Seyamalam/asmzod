@@ -296,6 +296,19 @@ _az_issue_f_strarr:
 
 // ---------- issue begin/commit ----------
 
+
+// _az_msgcat(x0=dst, x1=src, x2=n) -> x0 = dst+n
+    .globl _az_msgcat
+    AZ_HIDDEN _az_msgcat
+_az_msgcat:
+    stp x30, xzr, [sp, #-16]!
+    add x9, x0, x2
+    str x9, [sp, #8]
+    bl _az_memcpy
+    ldr x0, [sp, #8]
+    ldp x30, xzr, [sp], #16
+    ret
+
 // az_issue_begin(x0=code_idx, x1=msgptr, x2=msglen) -> x0 0/-4
 // writes {tag obj, cnt=0 patch, code, path, message}; count starts at 3
     .globl _az_issue_begin
@@ -538,7 +551,63 @@ _az_issue_type:
     ldp x11, x12, [x13]
     stp x11, x12, [sp, #48]
 .Lit_gotname:
-    // msglen 0 — TS normalizer composes "Invalid input: expected X, received Y"
+    // build zod default "Invalid input: expected X, received Y" in
+    // _az_msgbuf -> _az_default_msg (lowest-priority msg slot in begin)
+    ldp x10, x11, [sp, #16]     // exp
+    cmp x11, #3
+    b.ne .Lit_e_ok
+    ldrb w12, [x10]
+    cmp w12, #'n'
+    b.ne .Lit_e_ok
+    ldrb w12, [x10, #1]
+    cmp w12, #'a'
+    b.ne .Lit_e_ok
+    ldrb w12, [x10, #2]
+    cmp w12, #'n'
+    b.ne .Lit_e_ok
+    AZ_ADR x10, .Lhv_nan
+    mov x11, #3
+.Lit_e_ok:
+    stp x10, x11, [sp, #72]
+    ldp x10, x11, [sp, #48]     // recv
+    cmp x11, #12
+    b.ne .Lit_r_ok
+    mov x0, x10
+    AZ_ADR x1, .Lh7
+    mov x2, #12
+    bl _az_memeq
+    cbz w0, .Lit_r_ok
+    AZ_ADR x10, .Lhv_dname
+    mov x11, #4
+    stp x10, x11, [sp, #88]
+    b .Lit_r_done
+.Lit_r_ok:
+    ldp x10, x11, [sp, #48]
+    stp x10, x11, [sp, #88]
+.Lit_r_done:
+    AZ_ADR x13, _az_msgbuf
+    str x13, [sp, #104]         // cursor
+    ldr x0, [sp, #104]
+    AZ_ADR x1, .Lm_invexp
+    mov x2, #24
+    bl _az_msgcat
+    str x0, [sp, #104]
+    ldr x0, [sp, #104]
+    ldp x1, x2, [sp, #72]
+    bl _az_msgcat
+    str x0, [sp, #104]
+    ldr x0, [sp, #104]
+    AZ_ADR x1, .Lm_rcv
+    mov x2, #11
+    bl _az_msgcat
+    str x0, [sp, #104]
+    ldr x0, [sp, #104]
+    ldp x1, x2, [sp, #88]
+    bl _az_msgcat
+    AZ_ADR x9, _az_msgbuf
+    sub x10, x0, x9
+    AZ_ADR x11, _az_default_msg
+    stp x9, x10, [x11]
     mov x1, #0
     mov x2, #0
     mov x0, #0                  // code = invalid_type
@@ -696,6 +765,10 @@ _az_hosttype_table:
 .Lk_message:  .ascii "message"
 .Lk_expected: .ascii "expected"
 .Lk_received: .ascii "received"
+.Lm_invexp: .ascii "Invalid input: expected "
+.Lm_rcv:    .ascii ", received "
+.Lhv_nan:   .ascii "NaN"
+.Lhv_dname: .ascii "Date"
 .Lm_expected: .ascii "Expected "
 .Lm_received: .ascii ", received "
 .Lm_required: .ascii "Required"
@@ -849,6 +922,14 @@ _az_issue_f_strarr2:
     AZ_HIDDEN _az_pending_msg
 _az_pending_msg:      .quad 0
 _az_pending_msglen:   .quad 0
+    .globl _az_default_msg
+    AZ_HIDDEN _az_default_msg
+_az_default_msg:      .quad 0, 0
+    .bss
+    .p2align 3
+    .globl _az_msgbuf
+    AZ_HIDDEN _az_msgbuf
+_az_msgbuf:           .space 512
 
 // scoped schema-message stack: [count][slots x64 {depth,msgptr,msglen}]
     .p2align 3

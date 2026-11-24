@@ -846,7 +846,7 @@ _az_run_numchecks:
     bl _az_issue_f_f64
     cbnz x0, .Lnc_retx
     AZ_ADR x0, ak_type
-    mov x1, #4
+    mov x1, #6
     AZ_ADR x2, .Lty_integer
     mov x3, #3
     bl _az_issue_f_str
@@ -1002,7 +1002,7 @@ _az_run_bigintchecks:
     bl _az_issue_f_i64
     cbnz x0, .Lbc_retx
     AZ_ADR x0, ak_type
-    mov x1, #4
+    mov x1, #6
     AZ_ADR x2, .Lty_bigint
     mov x3, #6
     bl _az_issue_f_str

@@ -201,3 +201,40 @@ _az_f64_dec:
     sub x0, x10, x9
     ldp x29, x30, [sp], #48
     ret
+
+// _az_i64toa(x0=val, x1=dst) -> x0=len — signed decimal, no leading zeros
+    .globl _az_i64toa
+    AZ_HIDDEN _az_i64toa
+_az_i64toa:
+    mov x9, #0                  // sign flag
+    tst x0, x0
+    b.pl .Lia_pos
+    neg x0, x0
+    mov w9, #1
+    mov w10, #'-'
+    strb w10, [x1]
+    add x1, x1, #1
+.Lia_pos:
+    sub sp, sp, #48
+    mov x10, #0                 // ndig
+    mov x11, #10
+.Lia_loop:
+    udiv x12, x0, x11
+    msub x13, x12, x11, x0      // digit
+    add x13, x13, #'0'
+    strb w13, [sp, x10]
+    add x10, x10, #1
+    mov x0, x12
+    cbnz x0, .Lia_loop
+    mov x12, #0                 // i — copy reversed
+.Lia_cpy:
+    sub x13, x10, #1
+    sub x13, x13, x12
+    ldrb w14, [sp, x13]
+    strb w14, [x1, x12]
+    add x12, x12, #1
+    cmp x12, x10
+    b.lo .Lia_cpy
+    add x0, x10, x9             // len = ndig + sign
+    add sp, sp, #48
+    ret
