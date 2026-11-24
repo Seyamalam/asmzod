@@ -277,6 +277,21 @@ C("set-nested", () => z.set(z.object({ v: z.number() })),
   () => Z.set(Z.object({ v: Z.number() })),
   [new Set([{ v: 1 }]), new Set([{ v: "x" }, { v: 2 }])]);
 
+// null-prototype + exotic inputs
+C("record-nullproto", () => z.record(z.number()), () => Z.record(Z.number()),
+  [Object.create(null), Object.assign(Object.create(null), { a: 1 }), { a: 1 }]);
+C("str-on-nullproto", () => z.string(), () => Z.string(), [Object.create(null)]);
+C("boxed-inputs", () => z.string(), () => Z.string(),
+  [new String("x"), new Number(5), new Boolean(true)]);
+C("frozen-input", () => z.object({ a: z.string() }), () => Z.object({ a: Z.string() }),
+  [Object.freeze({ a: "x" }), Object.freeze({ a: 1 })]);
+
+// safe-integer range: zod4 int() is format "safeint"
+C("num-int-safebound", () => z.number().int(), () => Z.number().int(),
+  [1e21, -1e21, 9007199254740991, 9007199254740992, -9007199254740991, 0.5, 5]);
+C("num-safe-bound", () => z.number().safe(), () => Z.number().safe(),
+  [1e21, -1e21, 9007199254740991, 9007199254740992]);
+
 // union nested errors field
 C("union-errors", () => z.union([z.string().email(), z.number().min(10)]),
   () => Z.union([Z.string().email(), Z.number().min(10)]),
@@ -294,7 +309,9 @@ for (const c of cases) {
       const zr = zs.safeParse(input);
       expect(
         ar.success,
-        `success mismatch for input ${JSON.stringify(String(input))}: az=${ar.success} zz=${zr.success}`,
+        `success mismatch for input ${JSON.stringify(
+          typeof input === "object" && input !== null ? Object.getPrototypeOf(input)?.constructor?.name ?? "nullproto" : String(input),
+        )}: az=${ar.success} zz=${zr.success}`,
       ).toBe(zr.success);
       if (ar.success && zr.success) {
         expect(deepEq(ar.data, zr.data)).toBe(true);
@@ -322,7 +339,10 @@ for (const c of cases) {
                 ? Object.fromEntries(Object.keys(o).sort().map((k) => [k, skeys(o[k])]))
                 : (typeof o === "bigint" ? `${o}n` : o));
           const norm = (iss: any[]) => iss.map((x: any) => JSON.stringify(skeys(x))).sort();
-          expect(norm(ar.error.issues), `issues mismatch for ${JSON.stringify(String(input))}`)
+          const diag = typeof input === "object" && input !== null
+            ? Object.getPrototypeOf(input)?.constructor?.name ?? "nullproto"
+            : String(input);
+          expect(norm(ar.error.issues), `issues mismatch for ${JSON.stringify(diag)}`)
             .toEqual(norm(zr.error.issues));
         }
       }
