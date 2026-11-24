@@ -2,7 +2,7 @@
 import { compile, type Compiled } from "./bytecode.ts";
 import { engineParse, portableEngineParse, reg, regId } from "./ffi.ts";
 import * as napiBackend from "./native/napi.ts";
-import { parsedTypeName, defaultMessage } from "./shared.ts";
+import { parsedTypeName, defaultMessage, applyErrorMaps } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, type ZodIssue } from "./error.ts";
 import { msgFns, paramMsg } from "./shared.ts";
@@ -102,15 +102,16 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return r;
   }
 
-  parse(data: unknown): Output {
+  parse(data: unknown, params?: any): Output {
     const r = this._run(data);
-    if (!r.ok) throw new ZodError(r.issues);
+    if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); throw new ZodError(r.issues); }
     return r.value as Output;
   }
 
-  safeParse(data: unknown): SafeParseResult<Output> {
+  safeParse(data: unknown, params?: any): SafeParseResult<Output> {
     const r = this._run(data);
     if (r.ok) return { success: true, data: r.value as Output };
+    applyErrorMaps(r.issues, params?.error ?? params);
     return { success: false, error: new ZodError(r.issues) };
   }
 
@@ -689,14 +690,15 @@ export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[num
   constructor(_def: any) { super(); this._def = _def; }
   get options(): T { return [...this._def.optionsMap.values()] as T; }
 
-  override parse(data: unknown): T[number]["_output"] {
+  override parse(data: unknown, params?: any): T[number]["_output"] {
     const r = this._run(data);
-    if (!r.ok) { this._attachFields(r.issues); throw new ZodError(r.issues); }
+    if (!r.ok) { this._attachFields(r.issues); applyErrorMaps(r.issues, params?.error ?? params); throw new ZodError(r.issues); }
     return r.value as T[number]["_output"];
   }
-  override safeParse(data: unknown): SafeParseResult<T[number]["_output"]> {
+  override safeParse(data: unknown, params?: any): SafeParseResult<T[number]["_output"]> {
     const r = this._run(data);
     if (r.ok) return { success: true, data: r.value as T[number]["_output"] };
+    applyErrorMaps(r.issues, params?.error ?? params);
     this._attachFields(r.issues);
     return { success: false, error: new ZodError(r.issues) };
   }

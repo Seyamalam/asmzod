@@ -124,6 +124,31 @@ function repr(v: unknown): string {
 export const msgFns: ((i: any) => string)[] = [];
 
 // zod4 params: a message string or {message?, error?: string | fn}
+// ---- error maps: zod message priority is schema/check error > per-parse
+// error > config customError > default. engine-set messages are exempt;
+// only defaulted (_dflt) issues get remapped.
+export type ErrorMap = (issue: any) => string | undefined;
+let globalErrorMap: ErrorMap | undefined;
+export function setErrorMap(fn?: ErrorMap) { globalErrorMap = fn; }
+export function getErrorMap() { return globalErrorMap; }
+export function configure(opts: any) {
+  if (opts && typeof opts === "object" && "customError" in opts) globalErrorMap = opts.customError;
+}
+export function applyErrorMaps(issues: any[], perCall?: any) {
+  const pc: ErrorMap | undefined =
+    typeof perCall === "function" ? perCall :
+    typeof perCall === "string" ? () => perCall :
+    perCall && typeof perCall === "object" && typeof perCall.message === "string" ? () => perCall.message :
+    undefined;
+  if (!pc && !globalErrorMap) { for (const i of issues) delete i._dflt; return; }
+  for (const i of issues) {
+    const dflt = i._dflt; delete i._dflt;
+    if (!dflt) continue;
+    const m = pc?.(i) ?? globalErrorMap?.(i);
+    if (m !== undefined) i.message = m;
+  }
+}
+
 export function paramMsg(p: any): string | undefined {
   if (p === undefined || p === null) return undefined;
   if (typeof p === "string") return p;
@@ -250,6 +275,7 @@ export function normalizeIssue(i: any): any {
   if (out.code === "invalid_type" && out.expected === "int") out.format = "safeint";
   if (out.message === undefined) {
     out.message = defaultMessage(out);
+    out._dflt = true;
   } else if (typeof out.message === "string" && out.message.charCodeAt(0) === 0) {
     const fn = msgFns[+out.message.slice(2)];
     const { message: _m, ...rest } = out;

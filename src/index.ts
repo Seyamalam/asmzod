@@ -9,6 +9,7 @@ import {
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
+import { configure, setErrorMap, getErrorMap } from "./shared.ts";
 
 export * from "./schema.ts";
 export * from "./error.ts";
@@ -172,6 +173,9 @@ export const z = {
   cidrv6: (p?: string) => new ZodString().cidrv6(p),
   hostname: (p?: string) => new ZodString().hostname(p),
   httpUrl: (p?: string) => new ZodString().httpUrl(p),
+  config: (opts: any) => configure(opts),
+  setErrorMap: (fn?: (i: any) => string | undefined) => setErrorMap(fn),
+  getErrorMap: () => getErrorMap(),
   iso: {
     datetime: (p?: string) => new ZodString().datetime(p),
     date: (p?: string) => new ZodString().date(p),
