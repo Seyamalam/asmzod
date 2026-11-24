@@ -1,0 +1,7 @@
+<!doctype html>
+<!-- examples/browser — serve statically, e.g. `bunx serve examples/browser` -->
+<script type="module">
+  import { z } from "../../dist/index.js";
+  const S = z.object({ email: z.string().email() });
+  document.body.textContent = JSON.stringify(S.safeParse({ email: "x@y.z" }));
+</script>

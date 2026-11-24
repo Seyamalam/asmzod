@@ -1,5 +1,8 @@
 # AsmZod
 
+[![bundle size](https://img.shields.io/bundlephobia/minzip/asmzod?label=bundle%20size)](https://bundlephobia.com/package/asmzod)
+[![npm](https://img.shields.io/npm/v/asmzod)](https://www.npmjs.com/package/asmzod)
+
 > **This project is for shits and giggles.** Nobody asked for this. Nobody
 > needed this. We took a perfectly good, JIT-optimized, battle-tested
 > TypeScript validation library and reimplemented its core in **hand-written
@@ -136,6 +139,26 @@ allocates nothing when nothing changed.
 - Error `message` strings match Zod's defaults; custom `errorMap`s are
   applied JS-side.
 - See [`COMPAT.md`](COMPAT.md) for the full issue-shape contract.
+
+## When to use this
+
+**Use it when:**
+
+- you're on arm64 (Apple Silicon, AWS Graviton) and validation is a
+  measurable hot path — the N-API backend beats zod on realistic payloads
+  (see `bun bench/realworld.ts`: 0.02–0.6× zod's time on tsconfig,
+  GeoJSON and package-lock shapes);
+- you're shipping to workerd/browser/Deno where the portable engine must
+  carry the whole contract anyway and you want one codebase for both;
+- you want to read a non-trivial, fully commented ARM64 codebase that
+  does real work (SIMD format checks, arena allocation, N-API interop).
+
+**Use zod when:**
+
+- you need v3, plugins (`zod-openapi`, trpc integrations that poke at
+  internals), or `.transform` chains that must run inside the schema;
+- anything money or lives depends on the validator — zod has years of
+  production edge-case archaeology we have not redone.
 
 ## Layout
 

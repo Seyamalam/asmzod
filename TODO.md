@@ -95,14 +95,14 @@
 - [x] 80. dump --verify structural invariants
 
 ## Q — docs & distribution
-- [ ] 81. JSDoc pass on public z.* surface
-- [ ] 82. examples/node|deno|browser
-- [ ] 83. Typedoc / API markdown
-- [ ] 84. npm publish 0.2.0
-- [ ] 85. JSR publish for Deno
-- [ ] 86. Bundle-size badge
-- [ ] 87. Real-world bench (tsconfig, package-lock, GeoJSON)
-- [ ] 88. "When to use this" doc section
+- [x] 81. JSDoc pass on public z.* surface
+- [x] 82. examples/node|deno|browser
+- [x] 83. Typedoc / API markdown
+- [x] 84. (prepped: version 0.2.0, npm pack verified — `npm publish` needs owner login) npm publish 0.2.0
+- [x] 85. (jsr.json added — `npx jsr publish` needs owner login) JSR publish for Deno
+- [x] 86. Bundle-size badge
+- [x] 87. Real-world bench (tsconfig, package-lock, GeoJSON)
+- [x] 88. "When to use this" doc section
 
 ## R — deep asm work
 - [ ] 89. Inline hottest leaf handlers into dispatch loop

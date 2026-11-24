@@ -1,0 +1,11 @@
+{
+  "name": "@seyamalam/asmzod",
+  "version": "0.2.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./lite": "./src/lite.ts"
+  },
+  "publish": {
+    "include": ["src", "jsr.json", "README.md", "LICENSE"]
+  }
+}
