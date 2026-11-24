@@ -53,3 +53,9 @@ asmzod-count.node: $(patsubst %.s,%-c.o,$(ASMSRC)) aznc.o
 	clang -shared -arch arm64 -undefined dynamic_lookup -o $@ $(patsubst %.s,%-c.o,$(ASMSRC)) aznc.o
 %-c.o: %.s port.h
 	clang -x assembler-with-cpp -DAZ_COUNT -I. -arch arm64 -c -o $@ $<
+
+# AZ_GUARD: guard-page arenas (debug/fuzz builds)
+%-g.o: %.s port.h
+	clang -x assembler-with-cpp -DAZ_GUARD -I. -arch arm64 -c -o $@ $<
+asmzod-guard.node: $(patsubst %.s,%-g.o,$(ASMSRC))
+	clang -shared -arch arm64 -undefined dynamic_lookup -o $@ $(patsubst %.s,%-g.o,$(ASMSRC))

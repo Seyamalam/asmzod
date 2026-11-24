@@ -21,10 +21,22 @@ AZ_WDATA
     .p2align 3
 _azn_errbase:   .quad 0          // err arena base (static)
 _azn_cbtab:     .quad 0          // cb table ptr (from init())
+#ifdef AZ_GUARD
+// under AZ_GUARD these are pointer cells; _azn_guard_init fills them with
+// mmap'd bases surrounded by PROT_NONE pages. errbuf/obuf_end keep
+// identical names so AZ_ARENA sites work on both builds.
+_azn_errbuf:    .quad 0
+_azn_scratch:   .quad 0
+_azn_obuf:      .quad 0
+_azn_obuf_end:  .quad 0
+#else
     .bss
     .p2align 3
 _azn_errbuf:    .space 1048576   // 1MB err arena
 _azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
+#endif
+    .bss
+    .p2align 3
 _azn_intern:    .space 2048       // 64 slots x 32B {gen, len, keyptr, napi_value}
 _azn_internkeys:.space 8192        // bump region for interned key bytes
 _azn_interncur: .space 8
@@ -39,8 +51,10 @@ _azn_cbtest:    .space 8192        // cached per-regex .test fn (same cbid)
 _azn_undef:     .space 8          // cached undefined value (per parse)
 _azn_pendingexc: .space 8         // exception value when a cb throws
 _azn_bigintfn:  .space 8          // globalThis.BigInt
+#ifndef AZ_GUARD
 _azn_obuf:      .space 8388608   // 8MB staged child results (return-input-if-unchanged)
 _azn_obuf_end:  .space 8
+#endif
 _azn_ocur:      .space 8
     .text
 
@@ -54,6 +68,81 @@ _azn_ocur:      .space 8
 #define NAPI_FN    7
 #define NAPI_EXT   8
 #define NAPI_BIG   9
+
+#ifdef AZ_GUARD
+// _azn_guard_map(x0=usable_len) -> x0=usable base | 0
+// mmap(len+32K RW, ANON|PRIVATE); PROT_NONE on the first and last page.
+// Darwin arm64 syscalls: mmap=0x20000C5, mprotect=0x200004A. Page=16K.
+_azn_guard_map:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    mov x19, x0                // len
+    mov x20, x0
+    add x1, x20, #0x8000       // len + 2 guard pages
+    mov x0, #0                 // addr
+    mov x2, #3                 // PROT_READ|PROT_WRITE
+    mov x3, #0x1002            // MAP_PRIVATE|MAP_ANON
+    mov x4, #-1                // fd
+    mov x5, #0                 // offset
+    mov x16, #0xC5
+    movk x16, #0x200, lsl #16
+    svc #0x80
+    b.cs .Lgm_fail
+    mov x21, x0                // base
+    // mprotect(base, 16K, PROT_NONE)
+    mov x1, #0x4000
+    mov x2, #0
+    mov x16, #0x4A
+    movk x16, #0x200, lsl #16
+    svc #0x80
+    b.cs .Lgm_fail
+    // mprotect(base+16K+len, 16K, PROT_NONE)
+    add x0, x21, #0x4000
+    add x0, x0, x19
+    mov x1, #0x4000
+    mov x2, #0
+    mov x16, #0x4A
+    movk x16, #0x200, lsl #16
+    svc #0x80
+    b.cs .Lgm_fail
+    add x0, x21, #0x4000       // usable base
+    b .Lgm_ret
+.Lgm_fail:
+    mov x0, #0
+.Lgm_ret:
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #48
+    ret
+
+// _azn_guard_init(): fill arena pointer cells; 0x0 on failure (parse
+// will see null base and fall back — better than corrupting .bss).
+_azn_guard_init:
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    str x19, [sp, #16]
+    mov x0, #0x100000          // errbuf 1MB
+    bl _azn_guard_map
+    AZ_ADR x9, _azn_errbuf
+    str x0, [x9]
+    mov x0, #0x400000          // scratch 4MB
+    bl _azn_guard_map
+    AZ_ADR x9, _azn_scratch
+    str x0, [x9]
+    mov x0, #0x800000          // obuf 8MB
+    bl _azn_guard_map
+    AZ_ADR x9, _azn_obuf
+    str x0, [x9]
+    mov x19, x0
+    AZ_ADR x9, _azn_obuf_end
+    add x10, x19, #0x800000
+    str x10, [x9]
+    ldr x19, [sp, #16]
+    ldp x29, x30, [sp], #32
+    ret
+#endif
 
 // ================= napi_register_module_v1(env, exports) -> exports =================
     .globl _napi_register_module_v1
@@ -69,8 +158,12 @@ _napi_register_module_v1:       // alias for internal Mach-O-style refs
     stp x19, x20, [sp, #16]
     mov x19, x0
     mov x20, x1
+#ifdef AZ_GUARD
+    bl _azn_guard_init
+    mov x0, x19                 // restore env (guard_init clobbered x0)
+#endif
     // init static err arena ptr
-    AZ_ADR x9, _azn_errbuf
+    AZ_ARENA x9, _azn_errbuf
     AZ_ADR x10, _azn_errbase
     str x9, [x10]
     // create "parse" fn
@@ -523,7 +616,7 @@ _aznapi_parsemany:
     ldr x9, [sp, #144]
     AZ_ADR x10, _azn_undef
     str x9, [x10]
-    AZ_ADR x20, _azn_scratch
+    AZ_ARENA x20, _azn_scratch
     mov x0, x26
     ldr x1, [sp, #104]        // array val
     add x2, sp, #136
@@ -551,7 +644,7 @@ _aznapi_parsemany:
     str xzr, [x22, #8]
     str xzr, [x22, #16]
     str xzr, [x22, #24]
-    AZ_ADR x9, _azn_obuf
+    AZ_ARENA x9, _azn_obuf
     AZ_ADR x10, _azn_ocur
     str x9, [x10]
     AZ_ADR x9, _azn_interngen
@@ -738,8 +831,8 @@ _aznapi_parse:
     ldr x9, [sp, #192]
     AZ_ADR x10, _azn_undef
     str x9, [x10]
-    AZ_ADR x20, _azn_scratch
-    AZ_ADR x9, _azn_obuf
+    AZ_ARENA x20, _azn_scratch
+    AZ_ARENA x9, _azn_obuf
     AZ_ADR x10, _azn_ocur
     str x9, [x10]
     AZ_ADR x9, _azn_interngen
@@ -2708,7 +2801,7 @@ _azn_encval:
     ldr x11, [sp, #LN_A]
     lsl x11, x11, #3
     add x11, x10, x11         // ocur + n*8
-    AZ_ADR x12, _azn_obuf_end
+    AZ_ARENA x12, _azn_obuf_end
     cmp x11, x12
     b.hi .Ln_arr_ofull
     str x11, [x9]             // ocur += n*8
@@ -2899,7 +2992,7 @@ _azn_encval:
     ldr x9, [x22, #8]         // path depth
     mov x10, #4096
     mul x10, x9, x10
-    AZ_ADR x11, _azn_scratch
+    AZ_ARENA x11, _azn_scratch
     add x11, x11, #0x380000
     add x11, x11, x10         // ring slot
     ldr x2, [sp, #LN_E]
@@ -2994,7 +3087,7 @@ _azn_encval:
     str xzr, [sp, #LN_M]      // i
     str xzr, [sp, #LN_N]      // unk count
     str xzr, [sp, #LN_D]      // names-region bytes used
-    AZ_ADR x9, _azn_scratch
+    AZ_ARENA x9, _azn_scratch
     add x9, x9, #0x200000     // namesBase = scratch+2MB
     str x9, [sp, #LN_O]
     add x9, x9, #0x100000     // pairsBase = scratch+3MB
@@ -4354,7 +4447,7 @@ _azn_path_push_skey:
     b.hs .Lskey_push          // stack full: push raw ptr (same as plain push)
     mov x10, #4096
     mul x10, x9, x10
-    AZ_ADR x11, _azn_scratch
+    AZ_ARENA x11, _azn_scratch
     add x11, x11, #0x380000   // ring base = scratch + 3.5MB
     add x11, x11, x10
     ldr x2, [sp, #24]

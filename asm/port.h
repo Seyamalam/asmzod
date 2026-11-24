@@ -16,6 +16,19 @@
 	adrp \reg, \sym@PAGE
 	add  \reg, \reg, \sym@PAGEOFF
 .endm
+// AZ_GUARD: write arenas live in mmap'd regions with PROT_NONE guard
+// pages either side; symbols become pointer cells filled by _azn_guard_init.
+#ifdef AZ_GUARD
+.macro AZ_ARENA reg, sym
+	adrp \reg, \sym@PAGE
+	ldr  \reg, [\reg, \sym@PAGEOFF]
+.endm
+#else
+.macro AZ_ARENA reg, sym
+	adrp \reg, \sym@PAGE
+	add  \reg, \reg, \sym@PAGEOFF
+.endm
+#endif
 #else
 #ifdef AZ_COUNT
 #define AZ_NAPI(n) aznc_##n
@@ -32,4 +45,15 @@
 	adrp \reg, \sym
 	add  \reg, \reg, :lo12:\sym
 .endm
+#ifdef AZ_GUARD
+.macro AZ_ARENA reg, sym
+	adrp \reg, \sym
+	ldr  \reg, [\reg, :lo12:\sym]
+.endm
+#else
+.macro AZ_ARENA reg, sym
+	adrp \reg, \sym
+	add  \reg, \reg, :lo12:\sym
+.endm
+#endif
 #endif
