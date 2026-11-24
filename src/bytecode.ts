@@ -91,8 +91,34 @@ function emitStrChecks(w: BW, checks: any[]) {
 }
 
 function emitNumChecks(w: BW, checks: any[], isBig: boolean) {
-  w.u8(checks.length);
-  for (const c of checks) {
+  // fuse adjacent lower+upper bound pairs into one RANGE record
+  // ([9][lo f64][hi f64][flags]) when neither carries a custom message.
+  // The engine still checks both sides independently (NaN or an inverted
+  // range emits the same two issues zod would), so behavior is identical —
+  // one fewer record dispatch per bound pair.
+  const LO: Record<string, number> = { gt: 0, gte: 1, min: 1 };
+  const HI: Record<string, number> = { lt: 0, lte: 1, max: 1 };
+  const nomsg = (x: any) => !x.message;
+  type R = { kind: "one"; c: any } | { kind: "range"; lo: number; loIncl: number; hi: number; hiIncl: number };
+  const recs: R[] = [];
+  for (let i = 0; i < checks.length; i++) {
+    const c = checks[i], n = checks[i + 1];
+    if (!isBig && n && nomsg(c) && nomsg(n) &&
+        ((LO[c.kind] !== undefined && HI[n.kind] !== undefined) ||
+         (HI[c.kind] !== undefined && LO[n.kind] !== undefined))) {
+      const lo = LO[c.kind] !== undefined ? c : n;
+      const hi = LO[c.kind] !== undefined ? n : c;
+      recs.push({ kind: "range", lo: lo.value, loIncl: LO[lo.kind], hi: hi.value, hiIncl: HI[hi.kind] });
+      i++;
+    } else recs.push({ kind: "one", c });
+  }
+  w.u8(recs.length);
+  for (const r of recs) {
+    if (r.kind === "range") {
+      w.u8(9); checkMsg(w, undefined); w.f64(r.lo); w.f64(r.hi); w.u8(r.loIncl | (r.hiIncl << 1));
+      continue;
+    }
+    const c = r.c;
     const code = NUM_CHECK[c.kind];
     if (code === undefined) throw new Error(`asmzod: unsupported number check ${c.kind}`);
     w.u8(code);

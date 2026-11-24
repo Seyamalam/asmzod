@@ -678,7 +678,98 @@ _az_run_numchecks:
     b.eq .Lnc_mult
     cmp w9, #8
     b.eq .Lnc_safe
+    cmp w9, #9
+    b.eq .Lnc_range
     b .Lnc_next0
+// fused lo+hi bound pair: [code][msg][lo f64][hi f64][flags]
+// flags bit0 = lo inclusive, bit1 = hi inclusive. Both sides are checked
+// independently — NaN or an inverted range emits the same two issues the
+// unfused records would.
+.Lnc_range:
+    ldr d1, [x12]                // lo
+    ldr d2, [x12, #8]            // hi
+    ldrb w13, [x12, #16]         // flags
+    str w13, [sp, #160]
+    tbz w13, #0, .Lnc_rg_lox
+    fcmp d0, d1
+    b.lt .Lnc_rg_lofi            // fails gte
+    b .Lnc_rg_hi
+.Lnc_rg_lox:
+    fcmp d0, d1
+    b.le .Lnc_rg_lofx            // fails gt
+    b .Lnc_rg_hi
+.Lnc_rg_lofi:
+    AZ_ADR x1, amn_gte
+    mov x2, #40
+    mov w4, #1
+    mov x0, #8
+    str xzr, [sp, #152]         // after issue: check hi side
+    b .Lnc_rg_boundfail
+.Lnc_rg_lofx:
+    AZ_ADR x1, amn_gt
+    mov x2, #28
+    mov w4, #0
+    mov x0, #8
+    str xzr, [sp, #152]
+    b .Lnc_rg_boundfail
+.Lnc_rg_hi:
+    ldrb w13, [sp, #160]
+    tbz w13, #1, .Lnc_rg_hix
+    fcmp d0, d2
+    b.gt .Lnc_rg_hifi            // fails lte
+    b .Lnc_next17
+.Lnc_rg_hix:
+    fcmp d0, d2
+    b.ge .Lnc_rg_hifx            // fails lt
+    b .Lnc_next17
+.Lnc_rg_hifi:
+    fmov d1, d2
+    AZ_ADR x1, amn_lte
+    mov x2, #37
+    mov w4, #1
+    mov x0, #9
+    mov x9, #1
+    str x9, [sp, #152]          // after issue: advance
+    b .Lnc_rg_boundfail
+.Lnc_rg_hifx:
+    fmov d1, d2
+    AZ_ADR x1, amn_lt
+    mov x2, #25
+    mov w4, #0
+    mov x0, #9
+    mov x9, #1
+    str x9, [sp, #152]
+.Lnc_rg_boundfail:
+    // x0=code x1=prefix x2=prelen w4=incl ; bound in d1 — then check hi side too
+    str x0, [sp, #88]
+    stp x1, x2, [sp, #96]
+    str w4, [sp, #112]
+    fmov x9, d1
+    str x9, [sp, #116]
+    ldp x6, x7, [sp, #56]
+    ldr x0, [sp, #88]
+    AZ_ADR x1, .Lty_number
+    mov x2, #6
+    ldr x3, [sp, #116]
+    ldr w4, [sp, #112]
+    mov w5, #0
+    str x6, [sp, #136]
+    str x7, [sp, #144]
+    // custom msg -> pending cell (record msg is empty for fused anyway)
+    AZ_ADR x9, _az_pending_msg
+    stp x6, x7, [x9]
+    bl _az_issue_size
+    cbnz x0, .Lnc_retx
+    mov x9, #1
+    str x9, [sp, #400]
+    // lo fail -> still check hi side; hi fail -> next record
+    ldr x9, [sp, #152]
+    ldr d0, [sp, #32]
+    cbnz x9, .Lnc_next17
+    // az_issue_size clobbered d2/x12 — reload hi bound + params ptr
+    ldr x12, [sp, #72]
+    ldr d2, [x12, #8]
+    b .Lnc_rg_hi
 .Lnc_cmp:
     ldr d1, [x12]                // bound
     cmp w9, #1
@@ -903,6 +994,10 @@ _az_run_numchecks:
 
 .Lnc_next0:
     ldr x27, [sp, #72]
+    b .Lnc_cont
+.Lnc_next17:
+    ldr x12, [sp, #72]
+    add x27, x12, #17
     b .Lnc_cont
 .Lnc_next8:
     ldr x12, [sp, #72]

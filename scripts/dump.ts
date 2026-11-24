@@ -27,9 +27,9 @@ const STRCHK: Record<number, string> = {
   0x0f: "ULID", 0x10: "NANOID", 0x11: "CUID2", 0x12: "BASE64",
   0x13: "HEX", 0x14: "DATETIME", 0x15: "DATESTR", 0x16: "TIMESTR",
 };
-const NUMCHK: Record<number, string> = { 1: "GT", 2: "GTE", 3: "LT", 4: "LTE", 5: "INT", 6: "FINITE", 7: "MULTIPLEOF", 8: "SAFEINT" };
+const NUMCHK: Record<number, string> = { 1: "GT", 2: "GTE", 3: "LT", 4: "LTE", 5: "INT", 6: "FINITE", 7: "MULTIPLEOF", 8: "SAFEINT", 9: "RANGE" };
 const STR_PARAM: Record<number, number | "str" | "u8"> = { 1: 8, 2: 8, 3: 8, 5: "u8", 7: "str", 8: "str", 9: "str", 0x0a: 8 };
-const NUM_PARAM: Record<number, number | undefined> = { 1: 8, 2: 8, 3: 8, 4: 8, 7: 8 };
+const NUM_PARAM: Record<number, number | undefined> = { 1: 8, 2: 8, 3: 8, 4: 8, 7: 8, 9: 17 };
 
 let p = 0;
 const u64 = () => { const v = dv.getBigUint64(p, true); p += 8; return Number(v); };

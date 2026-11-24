@@ -34,16 +34,16 @@
 
 ## L — success-path & structural perf
 - [x] 29. Per-node N-API call counter (AZ_COUNT build: asmzod-count.node + az_napicalls FFI dump)
-- [ ] 30. Objects: get_property_names+indexed vs per-key get_named_property
-- [ ] 31. Return-input for strip-mode objects
-- [ ] 32. Return-input for tuples
-- [ ] 33. Cache RegExp.test/BigInt globals at init
-- [ ] 34. Fuse adjacent numeric checks into range records
-- [ ] 35. Union option ordering heuristic
-- [ ] 36. DiscUnion binary search / inline compares
-- [ ] 37. Enum sorted table + binary search
-- [ ] 38. Type-check elision for typed children
-- [ ] 39. Blob layout grouped by opcode
+- [x] 30. Objects: get_property_names+indexed vs per-key get_named_property
+- [x] 31. Return-input for strip-mode objects
+- [x] 32. Return-input for tuples
+- [x] 33. Cache RegExp.test/BigInt globals at init
+- [x] 34. Fuse adjacent numeric checks into range records
+- [x] 35. Union option ordering heuristic (rejected — reorder changes which option reports issues, breaks compat)
+- [x] 36. DiscUnion binary search / inline compares (analyzed: len-prefiltered linear wins at n<=8, typical)
+- [x] 37. Enum sorted table + binary search (analyzed: len prefilter already skips most; n usually <20)
+- [x] 38. Type-check elision for typed children (n/a — every node must classify its own input; no parent proof exists)
+- [x] 39. Blob layout grouped by opcode (n/a — sequential blob; dispatch already adjacent)
 - [ ] 40. pld prefetch of child nodes
 - [ ] 41. napi_strict_equals for literals
 - [ ] 42. Intern "length"/common property names

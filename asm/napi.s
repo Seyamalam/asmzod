@@ -35,6 +35,7 @@ _azn_cbrefine:  .space 8192       // refine[cbid] napi_values
 _azn_cbtransform: .space 8192
 _azn_cbcustom:  .space 8192
 _azn_cbregex:   .space 8192
+_azn_cbtest:    .space 8192        // cached per-regex .test fn (same cbid)
 _azn_undef:     .space 8          // cached undefined value (per parse)
 _azn_pendingexc: .space 8         // exception value when a cb throws
 _azn_bigintfn:  .space 8          // globalThis.BigInt
@@ -3476,13 +3477,25 @@ _azn_strmixed:
     ldr x9, [x10, x9, lsl #3]
     cbz x9, .Lnsm_punt
     str x9, [sp, #136]        // regex obj
+    ldr x12, [sp, #120]
+    ldr x12, [x12]            // cbid again
+    AZ_ADR x10, _azn_cbtest
+    ldr x9, [x10, x12, lsl #3]
+    cbnz x9, .Lnsm_havetest
     mov x0, x26
-    mov x1, x9
+    ldr x1, [sp, #136]
     AZ_ADR x2, .Lnm_test
     add x3, sp, #144
     bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Lnsm_punt
-    ldr x0, [sp, #144]        // test fn
+    ldr x9, [sp, #144]
+    ldr x12, [sp, #120]
+    ldr x12, [x12]
+    AZ_ADR x10, _azn_cbtest
+    str x9, [x10, x12, lsl #3]  // cache per-regex test fn
+.Lnsm_havetest:
+    str x9, [sp, #144]        // test fn
+    ldr x0, [sp, #144]
     ldr x1, [sp, #136]        // recv = regex
     ldr x2, [sp, #80]         // arg = strval
     add x3, sp, #144
