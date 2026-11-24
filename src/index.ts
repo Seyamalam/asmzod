@@ -158,7 +158,7 @@ export const z = {
   hash: (alg: string, params?: any) => {
     const enc = (typeof params === "object" && params !== null ? params.enc : undefined) ?? "hex";
     const fmt = `${alg}_${enc}`;
-    const t = (HASH_LENS as Record<string, [number, number, number]>)[fmt];
+    const t = (HASH_LENS as Record<string, readonly [number, number, number]>)[fmt];
     if (!t) throw new Error(`Unrecognized hash format: ${fmt}`);
     return (new ZodString() as any)._check({ kind: "hash", body: t[0], alpha: t[1], pad: t[2], format: fmt, message: params });
   },
@@ -234,6 +234,8 @@ const HASH_LENS = {
   sha512_hex: [128, 0, 0], sha512_base64: [86, 1, 2], sha512_base64url: [86, 2, 0],
 } as const;
 (z as any).ZodError = ZodError;
+import { toJSONSchema } from "./jsonschema.ts";
+(z as any).toJSONSchema = toJSONSchema;
 
 export default z;
 export type { ZodType } from "./schema.ts";

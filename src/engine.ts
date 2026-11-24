@@ -236,8 +236,8 @@ function runNumChecks(r: R, v: number | bigint, isBig: boolean, c: Ctx): boolean
       case 0x07: case 0x17: { const p = code === 0x17 ? bound() : isBig ? r.i64() : r.f64(); if ((v as any) % (p as any) !== (isBig ? 0n : 0)) { pushIssue(c, "not_multiple_of", { divisor: p, ...(msg ? { message: msg } : {}) }); fail = true; } break; }
       case 0x09: { // fused [lo f64][hi f64][flags] — both sides checked (numbers only)
         const lo = r.f64(), hi = r.f64(), flags = r.u8();
-        if (!(v >= lo)) { sizeFail(c, "too_small", "number", lo, (flags & 1) === 1, false, msg); fail = true; }
-        if (!(v <= hi)) { sizeFail(c, "too_big", "number", hi, (flags & 2) === 2, false, msg); fail = true; }
+        if (!(v >= lo)) { sizeFail(c, "too_small", "number", lo as any, (flags & 1) === 1, false, msg); fail = true; }
+        if (!(v <= hi)) { sizeFail(c, "too_big", "number", hi as any, (flags & 2) === 2, false, msg); fail = true; }
         break;
       }
       case 0x08: {

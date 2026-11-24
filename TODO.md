@@ -81,8 +81,8 @@
 - [x] 68. errorMap/z.config parity (done: z.config/setErrorMap/per-parse params, WeakSet no leak)
 - [x] 69. Property-based fuzz: random schemas × inputs vs zod (done: fuzz.test.ts covers random schemas x inputs vs zod)
 - [x] 70. Cross-engine consistency gate (done: engines.test.ts — 1144 napi/ffi/portable comparisons, all agree)
-- [ ] 71. Perf-regression harness (>25% = fail)
-- [ ] 72. toJSONSchema parity if in scope
+- [x] 71. Perf-regression harness (done: --write-baseline/--check, min-of-3, AZ_PERF_TOL)
+- [x] 72. toJSONSchema parity (done: draft 2020-12, 22-schema diff-clean, unrepresentable throws)
 
 ## P — tooling & CI
 - [ ] 73. scripts/flake.ts (N× rerun, flaky report)

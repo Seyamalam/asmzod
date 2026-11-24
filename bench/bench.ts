@@ -108,14 +108,61 @@ const cases: [string, any, any, unknown[], number][] = [
   ["date         x30k", dateAZ, dateZZ, dateIn, 30000],
 ];
 
-console.log("workload              asmzod        zod4         ratio");
-const rows: [string,string,string,string][] = [];
-for (const [name, sa, sz, inp, it] of cases) {
-  const n = (inp as unknown[]).length;
-  const ta = bench(i => sa.safeParse(inp[i % n]), it);
-  const tz = bench(i => sz.safeParse(inp[i % n]), it);
-  console.log(`${name}   ${fmt(ta).padEnd(13)} ${fmt(tz).padEnd(13)} ${(ta/tz).toFixed(2)}x`);
-  rows.push([name.trim(), fmt(ta), fmt(tz), `${(ta/tz).toFixed(2)}x`]);
+function runOnce(print: boolean): { rows: [string,string,string,string][]; ratios: Record<string, number> } {
+  if (print) console.log("workload              asmzod        zod4         ratio");
+  const rows: [string,string,string,string][] = [];
+  const ratios: Record<string, number> = {};
+  for (const [name, sa, sz, inp, it] of cases) {
+    const n = (inp as unknown[]).length;
+    const ta = bench(i => sa.safeParse(inp[i % n]), it);
+    const tz = bench(i => sz.safeParse(inp[i % n]), it);
+    if (print) console.log(`${name}   ${fmt(ta).padEnd(13)} ${fmt(tz).padEnd(13)} ${(ta/tz).toFixed(2)}x`);
+    rows.push([name.trim(), fmt(ta), fmt(tz), `${(ta/tz).toFixed(2)}x`]);
+    ratios[name.trim()] = ta / tz;
+  }
+  return { rows, ratios };
+}
+
+// --check samples 3 runs and keeps the min ratio — micro-bench variance
+// would otherwise flag timing noise as regressions
+const CHECK = process.argv.includes("--check");
+const N = CHECK ? 3 : 1;
+let rows: [string,string,string,string][] = [];
+const ratios: Record<string, number> = {};
+for (let i = 0; i < N; i++) {
+  const r = runOnce(i === 0);
+  rows = r.rows;
+  for (const [k, v] of Object.entries(r.ratios)) ratios[k] = Math.min(ratios[k] ?? Infinity, v);
+}
+if (CHECK) for (const [k, v] of Object.entries(ratios)) {
+  const row = rows.find(r2 => r2[0] === k)!;
+  row[3] = `${v.toFixed(2)}x`;
+}
+if (process.argv.includes("--write-baseline")) {
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(new URL("./baseline.json", import.meta.url), JSON.stringify(ratios, null, 2) + "\n");
+  console.log("wrote bench/baseline.json");
+}
+if (process.argv.includes("--check")) {
+  const { readFileSync } = await import("node:fs");
+  let base: Record<string, number>;
+  try {
+    base = JSON.parse(readFileSync(new URL("./baseline.json", import.meta.url), "utf8"));
+  } catch {
+    console.error("no baseline — run with --write-baseline first");
+    process.exit(1);
+  }
+  // sub-µs runs jitter ±25% easily; a real regression here is multiple-x.
+  // override with AZ_PERF_TOL (multiplier on baseline ratio)
+  const tol = Number(process.env.AZ_PERF_TOL ?? 1.5);
+  let bad = 0;
+  for (const [name, r] of Object.entries(ratios)) {
+    const b = base[name];
+    if (b === undefined) { console.log(`  ${name}: new workload (no baseline)`); continue; }
+    if (r > b * tol) { console.log(`  REGRESSED ${name}: ${b.toFixed(2)}x -> ${r.toFixed(2)}x`); bad++; }
+  }
+  if (bad) { console.error(`${bad} perf regressions beyond ${tol}x baseline`); process.exit(1); }
+  console.log(`perf check: all within ${tol}x of baseline`);
 }
 if (process.argv.includes("--md")) {
   console.log("\n| workload | asmzod | zod4 | ratio |\n|---|---|---|---|");
