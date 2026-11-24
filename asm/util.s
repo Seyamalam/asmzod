@@ -31,6 +31,19 @@ _az_memcpy:
     AZ_HIDDEN _az_memeq
 _az_memeq:
     cbz x2, .Lmeq1
+    cmp x2, #16
+    b.lo .Lmeq8ck
+.Lmeq16:
+    ldr q0, [x0], #16
+    ldr q1, [x1], #16
+    cmeq v2.16b, v0.16b, v1.16b
+    uminv b2, v2.16b         // 0 iff any byte differs
+    umov w9, v2.b[0]
+    cbz w9, .Lmeq0
+    sub x2, x2, #16
+    cmp x2, #16
+    b.hs .Lmeq16
+.Lmeq8ck:
     cmp x2, #8
     b.lo .Lmeqtail
 .Lmeq8:

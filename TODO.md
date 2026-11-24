@@ -22,15 +22,15 @@
 - [x] 17. HEX check via NEON nibble classification
 - [x] 18. BASE64 alphabet via vtbl nibble lookup
 - [x] 19. NANOID/CUID2/ULID alphabets via NEON
-- [ ] 20. Email fast screen via NEON
+- [x] 20. Email fast screen via NEON
 - [x] 21. UUID hex-digit runs vectorized
-- [ ] 22. startsWith/endsWith/includes long-needle NEON
-- [ ] 23. Object key-name compares via NEON (≥16B)
-- [ ] 24. Enum/literal string compares vectorized
-- [ ] 25. Arena zero-fill via NEON
-- [ ] 26. Scalar-vs-NEON crossover benchmarks
-- [ ] 27. UTF-16→byte position mapping vectorized
-- [ ] 28. Datetime ASCII+digit structure via NEON
+- [x] 22. startsWith/endsWith/includes long-needle NEON
+- [x] 23. Object key-name compares via NEON (≥16B)
+- [x] 24. Enum/literal string compares vectorized
+- [x] 25. Arena zero-fill via NEON (n/a — arenas are append-only cursors, no bulk zero path)
+- [x] 26. Scalar-vs-NEON crossover benchmarks
+- [x] 27. UTF-16→byte position mapping vectorized (n/a — no position mapping exists; only az_utf16_units, already NEON)
+- [x] 28. Datetime ASCII+digit structure via NEON
 
 ## L — success-path & structural perf
 - [ ] 29. Per-node N-API call counter (AZ_NAPICALLS)

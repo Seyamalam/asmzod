@@ -75,7 +75,49 @@ _az_memmem:
     cmp x3, x1
     b.hi .Lmm_no
     sub x4, x1, x3           // last start
-    mov x5, #0
+    ldrb w7, [x2]
+    dup v16.16b, w7          // broadcast first needle byte
+    mov x5, #0               // i
+.Lmm_vloop:
+    sub x10, x1, x5
+    cmp x10, #16
+    b.lo .Lmm_outer          // <16 haystack bytes left → scalar tail
+    ldr q0, [x0, x5]
+    cmeq v1.16b, v0.16b, v16.16b
+    umaxv b1, v1.16b
+    umov w11, v1.b[0]
+    cbnz w11, .Lmm_cand0
+    add x5, x5, #16
+    b .Lmm_vloop
+.Lmm_cand0:
+    // first-byte candidate(s) in chunk [x5,x5+16) — check each
+    mov x6, x5
+    add x10, x5, #16
+.Lmm_cand:
+    cmp x6, x10
+    b.hs .Lmm_cdone
+    cmp x6, x4
+    b.hi .Lmm_no             // no valid start remains
+    ldrb w11, [x0, x6]
+    cmp w11, w7
+    b.ne .Lmm_cnext
+    mov x8, #0               // verify full needle
+.Lmm_vfy:
+    cmp x8, x3
+    b.hs .Lmm_yes
+    add x9, x6, x8
+    ldrb w11, [x0, x9]
+    ldrb w12, [x2, x8]
+    cmp w11, w12
+    b.ne .Lmm_cnext
+    add x8, x8, #1
+    b .Lmm_vfy
+.Lmm_cnext:
+    add x6, x6, #1
+    b .Lmm_cand
+.Lmm_cdone:
+    mov x5, x10
+    b .Lmm_vloop
 .Lmm_outer:
     cmp x5, x4
     b.hi .Lmm_no
@@ -83,11 +125,10 @@ _az_memmem:
 .Lmm_inner:
     cmp x6, x3
     b.hs .Lmm_yes
-    ldrb w7, [x0, x5]
     add x8, x5, x6
-    ldrb w7, [x0, x8]
-    ldrb w9, [x2, x6]
-    cmp w7, w9
+    ldrb w11, [x0, x8]
+    ldrb w12, [x2, x6]
+    cmp w11, w12
     b.ne .Lmm_next
     add x6, x6, #1
     b .Lmm_inner
@@ -113,7 +154,53 @@ _az_memmem:
     AZ_HIDDEN _az_is_email
 _az_is_email:
     mov x9, #0               // i
+    movi v16.16b, #'0'
+    movi v17.16b, #10
+    movi v18.16b, #'A'
+    movi v19.16b, #26
+    movi v20.16b, #'a'
+    movi v21.16b, #'@'
 .Lem_scan:
+    // NEON skip: a whole 16B chunk with no '@' and all valid local chars
+    add x10, x9, #16
+    cmp x10, x1
+    b.hi .Lem_scalar
+    ldr q0, [x0, x9]
+    cmeq v4.16b, v0.16b, v21.16b   // '@' positions
+    umaxv b4, v4.16b
+    umov w11, v4.b[0]
+    cbnz w11, .Lem_scalar          // '@' in chunk → scalar takes over
+    sub v1.16b, v0.16b, v16.16b
+    cmhi v1.16b, v17.16b, v1.16b   // 0-9
+    sub v2.16b, v0.16b, v18.16b
+    cmhi v2.16b, v19.16b, v2.16b   // A-Z
+    orr v1.16b, v1.16b, v2.16b
+    sub v2.16b, v0.16b, v20.16b
+    cmhi v2.16b, v19.16b, v2.16b   // a-z
+    orr v1.16b, v1.16b, v2.16b
+    movi v5.16b, #'_'
+    cmeq v2.16b, v0.16b, v5.16b
+    orr v1.16b, v1.16b, v2.16b
+    movi v5.16b, #'\''
+    cmeq v2.16b, v0.16b, v5.16b
+    orr v1.16b, v1.16b, v2.16b
+    movi v5.16b, #'+'
+    cmeq v2.16b, v0.16b, v5.16b
+    orr v1.16b, v1.16b, v2.16b
+    movi v5.16b, #'-'
+    cmeq v2.16b, v0.16b, v5.16b
+    orr v1.16b, v1.16b, v2.16b
+    movi v5.16b, #'.'
+    cmeq v2.16b, v0.16b, v5.16b
+    orr v1.16b, v1.16b, v2.16b
+    movi v15.16b, #0
+    cmeq v2.16b, v1.16b, v15.16b   // invalid = no class matched
+    umaxv b2, v2.16b
+    umov w11, v2.b[0]
+    cbnz w11, .Lem_no
+    mov x9, x10
+    b .Lem_scan
+.Lem_scalar:
     cmp x9, x1
     b.hs .Lem_no             // no '@'
     ldrb w11, [x0, x9]
@@ -903,25 +990,36 @@ _az_is_ipv6:
 _az_is_datestr:
     cmp x1, #10
     b.ne .Lds_no
-    // 4 digits
-    mov x9, #0
-.Lds_y:
-    cmp x9, #4
-    b.hs .Lds_y2
-    ldrb w11, [x0, x9]
-    cmp w11, #'0'
-    b.lo .Lds_no
-    cmp w11, #'9'
-    b.hi .Lds_no
-    add x9, x9, #1
-    b .Lds_y
-.Lds_y2:
-    ldrb w11, [x0, #4]
-    cmp w11, #'-'
-    b.ne .Lds_no
-    ldrb w11, [x0, #7]
-    cmp w11, #'-'
-    b.ne .Lds_no
+    // NEON: two overlapping 8B loads cover "YYYY-MM-DD"
+    ldr d0, [x0]               // pos 0-7
+    ldr d1, [x0, #2]           // pos 2-9
+    movi v16.16b, #'0'
+    movi v17.16b, #10
+    movi v18.16b, #'-'
+    sub v2.8b, v0.8b, v16.8b
+    cmhi v2.8b, v17.8b, v2.8b  // digit mask (d0)
+    AZ_ADR x9, .Lds_E0
+    ldr d3, [x9]
+    bic v4.8b, v3.8b, v2.8b    // required digits missing
+    AZ_ADR x9, .Lds_D0
+    ldr d5, [x9]
+    cmeq v6.8b, v0.8b, v18.8b
+    bic v7.8b, v5.8b, v6.8b    // required dashes missing
+    orr v4.8b, v4.8b, v7.8b
+    sub v2.8b, v1.8b, v16.8b
+    cmhi v2.8b, v17.8b, v2.8b
+    AZ_ADR x9, .Lds_E1
+    ldr d3, [x9]
+    bic v5.8b, v3.8b, v2.8b
+    orr v4.8b, v4.8b, v5.8b
+    AZ_ADR x9, .Lds_D1
+    ldr d5, [x9]
+    cmeq v6.8b, v1.8b, v18.8b
+    bic v7.8b, v5.8b, v6.8b
+    orr v4.8b, v4.8b, v7.8b
+    umaxv b4, v4.8b
+    umov w9, v4.b[0]
+    cbnz w9, .Lds_no
     // MM
     ldrb w11, [x0, #5]
     sub w12, w11, #'0'
@@ -958,6 +1056,12 @@ _az_is_datestr:
 .Lds_no:
     mov w0, #0
     ret
+    AZ_RODATA
+.Lds_E0: .byte 0xFF,0xFF,0xFF,0xFF,0x00,0xFF,0xFF,0x00
+.Lds_D0: .byte 0x00,0x00,0x00,0x00,0xFF,0x00,0x00,0xFF
+.Lds_E1: .byte 0x00,0x00,0x00,0xFF,0xFF,0x00,0xFF,0xFF
+.Lds_D1: .byte 0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0x00
+    .text
 
 // az_is_timestr(x0,x1): HH:MM[:SS[.frac]]  len 5|8|>8
     .globl _az_is_timestr
