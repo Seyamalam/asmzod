@@ -470,7 +470,16 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const fi = r.pos; const ip = fi + Number(r.i64());
       const fo = r.pos; const opos = fo + Number(r.i64());
       const rr = new R(r.b); rr.pos = ip;
-      const mid = validate(rr, v, c);
+      const mark = c.issues.length;
+      let mid: any;
+      try {
+        mid = validate(rr, v, c);
+      } catch (err) {
+        // the out stage never ran — tag in's issues non-continuing so the
+        // boundary judges the payload aborted
+        for (let j = mark; j < c.issues.length; j++) (c.issues[j] as any)._nc = true;
+        throw err;
+      }
       const rr2 = new R(r.b); rr2.pos = opos;
       return validate(rr2, mid, c);
     }

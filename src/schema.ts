@@ -17,6 +17,19 @@ const pendingRefineIssues: any[] = [];
 // transforms rewrite a moving value, refines gate on it.
 let asyncMode = false;
 const pendingAsync: { type: string; fn: (v: unknown, ctx?: any) => unknown; msg?: string; cbid?: number; ipath?: any[] }[] = [];
+// the per-call parse ctx — catch callbacks finalize their issues against it
+let RUN_CTX: any;
+// zod's $ZodCatchCtx: the inner payload spread, with value/input pinned to
+// the data the catch was handed and a finalized mirror in `error`
+function _catchCtx(data: unknown, issues: any[], aborted: boolean, ctx?: any) {
+  return {
+    issues,
+    aborted,
+    value: data,
+    input: data,
+    error: { issues: issues.map((i: any) => finalizeIssueTree(i, ctx ?? RUN_CTX, globalConfig)) },
+  };
+}
 
 // ——— cyclic-data memoizer (port of zod's core/memoizer.ts) ———
 export class ZodCyclicError extends Error {
@@ -136,6 +149,9 @@ function _hasFxWalk(inst: any, stack: Set<any>): boolean {
         // can construct fresh schema graphs per call — never invoke those.
         try { v = d[key]; } catch { hit = true; break; }
       } else v = desc.value;
+      // raw function props (catchValue/defaultValue thunks, transforms) need
+      // the TS runner — registered cbids are the engine's callback channel
+      if (typeof v === "function") { hit = true; break; }
       if (see(v) || seeList(v)) { hit = true; break; }
       if (v && typeof v === "object" && !Array.isArray(v) && !_isSchema(v)) {
         for (const sk of Reflect.ownKeys(v)) {
@@ -417,16 +433,18 @@ const _ctxFrom = (params: any, async_: boolean): any =>
        : { async: async_ };
 
 // MEMO-scoped sync run — parse and safeParse share it
-function _runScoped(schema: any, value: unknown): any {
+function _runScoped(schema: any, value: unknown, ctx?: any): any {
   const prev = MEMO;
+  const prevCtx = RUN_CTX;
   MEMO = { buckets: new WeakMap() };
-  try { return schema._run(value); } finally { MEMO = prev; }
+  RUN_CTX = ctx;
+  try { return schema._run(value); } finally { MEMO = prev; RUN_CTX = prevCtx; }
 }
 
 export const _parse = (Err: any) => {
   const fn = (schema: any, value: unknown, _ctx?: any, _params?: any) => {
     const ctx = _ctxFrom(_ctx, false);
-    const r = _runScoped(schema, value);
+    const r = _runScoped(schema, value, ctx);
     if (!r.ok) {
       const e = new (_params?.Err ?? Err)(r.issues.map((i: any) => finalizeIssueTree(i, ctx, globalConfig)));
       captureStackTrace(e, _params?.callee ?? fn);
@@ -439,14 +457,14 @@ export const _parse = (Err: any) => {
 
 export const _safeParse = (Err: any) => (schema: any, value: unknown, _ctx?: any) => {
   const ctx = _ctxFrom(_ctx, false);
-  const r = _runScoped(schema, value);
+  const r = _runScoped(schema, value, ctx);
   return r.ok ? { success: true, data: r.value } : failure(Err, r.issues, ctx);
 };
 
 export const _parseAsync = (Err: any) => {
   const fn = async (schema: any, value: unknown, _ctx?: any, _params?: any) => {
     const ctx = _ctxFrom(_ctx, true);
-    let r = schema._runAsyncScoped(value);
+    let r = schema._runAsyncScoped(value, ctx);
     if (r instanceof Promise) r = await r;
     if (!r.ok) {
       const e = new (_params?.Err ?? Err)(r.issues.map((i: any) => finalizeIssueTree(i, ctx, globalConfig)));
@@ -460,7 +478,7 @@ export const _parseAsync = (Err: any) => {
 
 export const _safeParseAsync = (Err: any) => async (schema: any, value: unknown, _ctx?: any) => {
   const ctx = _ctxFrom(_ctx, true);
-  let r = schema._runAsyncScoped(value);
+  let r = schema._runAsyncScoped(value, ctx);
   if (r instanceof Promise) r = await r;
   return r.ok ? { success: true, data: r.value } : failure(Err, r.issues, ctx);
 };
@@ -723,12 +741,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return this.nullable().optional();
   }
   default<V extends Input>(value: V | (() => V)): ZodDefault<this> {
-    const v = typeof value === "function" ? (value as () => V)() : value;
-    return new ZodDefault({ type: "default", inner: this, value: v });
+    return new ZodDefault({ type: "default", inner: this, value });
   }
   catch<V extends Input>(value: V | (() => V)): ZodCatch<this> {
-    const v = typeof value === "function" ? (value as () => V)() : value;
-    return new ZodCatch({ type: "catch", inner: this, value: v });
+    return new ZodCatch({ type: "catch", inner: this, value });
   }
   array(): ZodArray<this> {
     return new ZodArray({ type: "array", element: this });
@@ -764,12 +780,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       fn, kind: "superrefine", message: undefined,
     });
   }
-  transform<N>(fn: (v: Output) => N): ZodEffects<this, N> {
-    return new ZodEffects({
-      type: "transform", inner: this,
-      cbid: regId(reg.transform, guardAsync(fn as (v: unknown) => unknown)),
-      fn, kind: "transform",
-    });
+  transform<N>(fn: (v: Output) => N): ZodPipe<this, ZodTransform> {
+    return new ZodPipe({ type: "pipe", in: this, out: new ZodTransform(fn as (v: unknown) => unknown) });
   }
   pipe<T extends ZodTypeAny>(target: T): ZodPipe<this, T> {
     return new ZodPipe({ type: "pipe", in: this, out: target });
@@ -824,17 +836,18 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     });
     return s;
   }
-  overwrite<N>(fn: (v: Output) => N): ZodEffects<this, N> {
+  overwrite<N>(fn: (v: Output) => N): ZodPipe<this, ZodTransform> {
     return this.transform(fn);
   }
   prefault<V extends Input>(value: V | (() => V)): ZodType<Output, Input | undefined> {
-    const v = typeof value === "function" ? (value as () => V)() : value;
     return new ZodPipe({
       type: "pipe",
       prefault: true,
       in: new ZodEffects<ZodAny>({
         type: "transform", inner: new ZodAny(),
-        cbid: regId(reg.transform, (x: unknown) => x === undefined ? v : x),
+        cbid: regId(reg.transform, (x: unknown) => x === undefined
+          ? (typeof value === "function" ? (value as () => V)() : value)
+          : x),
       }),
       out: this,
     }) as any;
@@ -860,17 +873,20 @@ export abstract class ZodType<Output = unknown, Input = Output> {
 
   // async run producing a raw {ok,value|issues} result — the public
   // safe/parse variants finalize issues through the lazy-error boundary
-  private _runAsyncScoped(data: unknown): any {
+  private _runAsyncScoped(data: unknown, ctx?: any): any {
     asyncMode = true;
     pendingAsync.length = 0;
     const prevMemo = MEMO;
+    const prevCtx = RUN_CTX;
     MEMO = { buckets: new WeakMap() };
+    RUN_CTX = ctx;
     let r: { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] };
     try {
       r = this._run(data);
     } finally {
       asyncMode = false;
       MEMO = prevMemo;
+      RUN_CTX = prevCtx;
     }
     if (!r.ok) return r;
     if (!pendingAsync.length) return r;
@@ -889,22 +905,47 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     };
     // zod collects every failed check's issue — refinements at sibling
     // positions and root-level checks all land in one error
-    const allIssues: ZodIssue[] = [];
-    for (const st of pendingAsync) {
-      const pp = (st as any).path as any[] | undefined;
-      const cur = atPath(value, pp);
-      if (st.type === "transform") {
-        value = setPath(value, pp, await st.fn(cur));
-      } else if (st.type === "superrefine") {
+    const runStage = async (st: any, root: any): Promise<{ value: any; issues: any[] }> => {
+      const p = st.path as any[] | undefined;
+      const cur = atPath(root, p);
+      if (st.type === "catchgate") {
+        // deferred inner work belongs to a catch — replay it inside the gate;
+        // failures get swallowed into the catch value instead of surfacing
+        let gval = cur;
+        const gIssues: any[] = [];
+        for (const sub of st.stages) {
+          const sr = await runStage(sub, gval);
+          gval = sr.value;
+          gIssues.push(...sr.issues);
+        }
+        const fin = gIssues.length
+          ? (typeof st.fn === "function" ? await st.fn(_catchCtx(st.data, gIssues, isAborted(gIssues), st.ctx)) : st.fn)
+          : gval;
+        return { value: setPath(root, p, fin), issues: [] };
+      }
+      if (st.type === "transform")
+        return { value: setPath(root, p, await st.fn(cur)), issues: [] };
+      if (st.type === "superrefine") {
         const pushed: any[] = [];
         await st.fn(cur, { addIssue: (i: any) => pushed.push(i) });
-        for (const { path, ...rest } of pushed)
-          allIssues.push({ ...rest, inst: (st as any).inst, schema: (st as any).schema, path: [...(pp ?? []), ...(path ?? [])] });
-      } else {
-        const res = await st.fn(cur);
-        if (!res)
-          allIssues.push({ code: "custom", path: [...(pp ?? []), ...((st as any).ipath ?? [])], message: st.msg ?? "Invalid input", inst: (st as any).inst, schema: (st as any).schema } as ZodIssue);
+        return {
+          value: root,
+          issues: pushed.map(({ path, ...rest }: any) => ({
+            ...rest, inst: st.inst, schema: st.schema, path: [...(p ?? []), ...(path ?? [])],
+          })),
+        };
       }
+      const res = await st.fn(cur);
+      return res ? { value: root, issues: [] } : {
+        value: root,
+        issues: [{ code: "custom", path: [...(p ?? []), ...(st.ipath ?? [])], message: st.msg ?? "Invalid input", inst: st.inst, schema: st.schema } as ZodIssue],
+      };
+    };
+    const allIssues: ZodIssue[] = [];
+    for (const st of pendingAsync) {
+      const r = await runStage(st, value);
+      value = r.value;
+      allIssues.push(...r.issues);
     }
     if (allIssues.length) return { ok: false as const, issues: allIssues };
     return { ok: true as const, value };
@@ -1198,7 +1239,7 @@ export class ZodDefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_
   constructor(_def: any) { super(); this._def = _def; }
   removeDefault() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
-    if (this._isRec()) {
+    if (this._isRec() || typeof this._def.value === "function") {
       const v = data === undefined
         ? (typeof this._def.value === "function" ? this._def.value() : this._def.value)
         : data;
@@ -1211,13 +1252,30 @@ export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_in
   constructor(_def: any) { super(); this._def = _def; }
   removeCatch() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
-    if (this._isRec()) {
-      const r = (this._def.inner as any)._run(data);
-      if (r.ok) return r;
-      const v = typeof this._def.value === "function" ? this._def.value() : this._def.value;
-      return { ok: true as const, value: v };
+    // function catchValues need the zod catch ctx and any fx inside the
+    // subtree needs TS-level staging — constants can stay on the engine
+    if (typeof this._def.value !== "function" && !this._isRec() && !this._hasFx())
+      return super._runImpl(data);
+    const mark = pendingAsync.length;
+    const ir = (this._def.inner as any)._run(data);
+    if (ir.ok) {
+      if (pendingAsync.length > mark) {
+        // the inner's deferred checks may still fail — gate them so the
+        // catch sees the full inner result, zod's handleCatchResult
+        const stages = pendingAsync.splice(mark);
+        pendingAsync.push({ type: "catchgate", stages, data, inst: this, fn: this._def.value, ctx: RUN_CTX } as any);
+      }
+      return (ir as any).memo
+        ? { ok: true as const, value: ir.value, memo: true }
+        : { ok: true as const, value: ir.value };
     }
-    return super._runImpl(data);
+    // a failed inner leaves nothing behind — its issues and queued stages
+    // are private to the catch's run
+    pendingAsync.length = mark;
+    const v = typeof this._def.value === "function"
+      ? this._def.value(_catchCtx(data, ir.issues, ir.aborted === true))
+      : this._def.value;
+    return { ok: true as const, value: v };
   }
 }
 export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<N, T["_input"]> {
@@ -1227,6 +1285,36 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
 
   // refine/superRefine wrap an object — object helpers delegate to the
   // inner object the way zod's checks-in-def model exposes them
+  // coerce wrappers carry no check methods of their own — delegate to the
+  // inner schema so `z.coerce.number().min(10)` behaves like zod's
+  // coerce-flagged ZodNumber
+  private _delegateCheck(m: string, args: any[]) {
+    const inner: any = this._def.inner;
+    if (typeof inner?.[m] !== "function") throw new TypeError(`asmzod: .${m}() not supported on this wrapper`);
+    return new ZodEffects({ ...this._def, inner: inner[m](...args) });
+  }
+  min(n: number, m?: any) { return this._delegateCheck("min", [n, m]); }
+  max(n: number, m?: any) { return this._delegateCheck("max", [n, m]); }
+  gt(n: number, m?: any) { return this._delegateCheck("gt", [n, m]); }
+  gte(n: number, m?: any) { return this._delegateCheck("gte", [n, m]); }
+  lt(n: number, m?: any) { return this._delegateCheck("lt", [n, m]); }
+  lte(n: number, m?: any) { return this._delegateCheck("lte", [n, m]); }
+  length(n: number, m?: any) { return this._delegateCheck("length", [n, m]); }
+  multipleOf(n: number, m?: any) { return this._delegateCheck("multipleOf", [n, m]); }
+  int(m?: any) { return this._delegateCheck("int", [m]); }
+  positive(m?: any) { return this._delegateCheck("positive", [m]); }
+  nonnegative(m?: any) { return this._delegateCheck("nonnegative", [m]); }
+  negative(m?: any) { return this._delegateCheck("negative", [m]); }
+  nonpositive(m?: any) { return this._delegateCheck("nonpositive", [m]); }
+  finite(m?: any) { return this._delegateCheck("finite", [m]); }
+  regex(r: RegExp, m?: any) { return this._delegateCheck("regex", [r, m]); }
+  startsWith(p: string, m?: any) { return this._delegateCheck("startsWith", [p, m]); }
+  endsWith(p: string, m?: any) { return this._delegateCheck("endsWith", [p, m]); }
+  includes(p: string, m?: any) { return this._delegateCheck("includes", [p, m]); }
+  email(m?: any) { return this._delegateCheck("email", [m]); }
+  url(m?: any) { return this._delegateCheck("url", [m]); }
+  uuid(m?: any) { return this._delegateCheck("uuid", [m]); }
+
   private _refinedObj(): any {
     let s: any = this;
     while (s instanceof ZodEffects && (s._def.kind === "refine" || s._def.kind === "superrefine")) s = s._def.inner;
@@ -1347,12 +1435,42 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
 export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<B["_output"], A["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
 
+  get in(): A { return this._def.in; }
+  get out(): B { return this._def.out; }
+
   protected override _runImpl(data: unknown) {
-    if (!(MEMO && _isRef(data) && this._isRec())) return super._runImpl(data);
+    if (!this._hasFx() && !(MEMO && _isRef(data) && this._isRec())) return super._runImpl(data);
     const ir = (this._def.in as any)._run(data);
-    if (!ir.ok) return ir;
-    return (this._def.out as any)._run(ir.value);
+    if (!ir.ok) {
+      // any blocking issue truncates the pipe (aborted); unrecognized keys
+      // forward through `out` so an enclosing intersection can reconcile them
+      if (ir.issues.some((i: any) => i.code !== "unrecognized_keys"))
+        return { ...ir, aborted: true };
+      const or = (this._def.out as any)._run(("value" in ir) ? ir.value : data);
+      if (or.ok)
+        return { ok: false as const, issues: ir.issues, aborted: true, value: or.value } as any;
+      return {
+        ok: false as const, issues: [...ir.issues, ...or.issues], aborted: true,
+        value: ("value" in or) ? or.value : (("value" in ir) ? ir.value : data),
+      } as any;
+    }
+    const or = (this._def.out as any)._run(ir.value);
+    if ((ir as any).memo) (or as any).memo = (or as any).memo ?? true;
+    return or;
   }
+}
+
+// zod's $ZodTransform — the function-holding `out` side of a transform pipe;
+// shares the effects runner with inner=any so the fn applies to the payload
+export class ZodTransform extends ZodEffects<any, any> {
+  constructor(fn: (v: unknown) => unknown) {
+    super({
+      type: "transform", kind: "transform", inner: new ZodAny(),
+      cbid: regId(reg.transform, guardAsync(fn as (v: unknown) => unknown)),
+      fn,
+    });
+  }
+  unwrap() { return undefined as any; }
 }
 export class ZodBranded<T extends ZodTypeAny, B extends string> extends ZodType<T["_output"] & { __brand: B }, T["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
@@ -2021,9 +2139,7 @@ export function _encode(s: any, v: any): any {
     case "default": case "prefault":
       return _encode(d.inner ?? d.innerType,
         v === undefined ? (typeof d.value === "function" ? d.value() : d.value) : v);
-    case "catch":
-      try { return _encode(d.inner ?? d.innerType, v); }
-      catch { return typeof d.value === "function" ? d.value() : d.value; }
+    case "catch": return _encode(d.inner ?? d.innerType, v);
     case "readonly": case "brand": case "success":
       return _encode(d.inner ?? d.innerType, v);
     default: {
@@ -2270,9 +2386,18 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
     // by re-running on the input minus that side's rejected keys
     const valueFor = (side: any, res: any, side_: "l" | "r") => {
       if (res.ok) return res.value;
-      if ((res as any).value !== undefined) return (res as any).value;
-      if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
       const dropped = [...unrecKeys].filter(([, f]) => f[side_]).map(([k]) => k);
+      if ((res as any).value !== undefined) {
+        let v = (res as any).value;
+        // a best-effort value can still carry keys this side rejected — the
+        // reconciling side's version wins the merge
+        if (dropped.length && v !== null && typeof v === "object" && !Array.isArray(v)) {
+          v = { ...(v as object) };
+          for (const k of dropped) delete (v as any)[k];
+        }
+        return v;
+      }
+      if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
       if (!dropped.length) return undefined;
       const trimmed: any = { ...(data as object) };
       for (const k of dropped) delete trimmed[k];

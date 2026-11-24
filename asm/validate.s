@@ -722,11 +722,17 @@ _az_vtype:
 // ---------- 0x11 PIPE ----------
 // [op][in i64][out i64]
 .Lv_pipe:
+    // in run — tag its issues _nc; a truncated pipe judges aborted upstream
+    AZ_ADR x9, az_nc_flag
+    mov w10, #1
+    strb w10, [x9]
     add x9, x27, #1
     ldr x10, [x9]
     add x0, x9, x10
     mov x1, x28
     bl _az_validate
+    AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
     cbnz x0, .Lv_ret
     // output value -> input of second; ptr in x1
     mov x28, x1

@@ -6,7 +6,7 @@ import {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
-  ZodStringbool, ZodXor, ZodFile, ZodCodec,
+  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform,
   ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
@@ -547,6 +547,15 @@ export const z = {
     : new ZodAlgoFormat({ format, message: opts?.message ?? `Invalid ${format}`, fn: check }),
   /** schema -> zod-ish source string (subset of defs) */
   toZod: (s: ZodTypeAny): string => toZod(s),
+
+  // ---------- public schema classes ----------
+  ZodType, ZodString, ZodNumber, ZodBigInt, ZodBoolean, ZodAny, ZodUnknown,
+  ZodNever, ZodNull, ZodUndefined, ZodVoid, ZodNaN, ZodSymbol, ZodDate,
+  ZodObject, ZodArray, ZodTuple, ZodRecord, ZodUnion, ZodDiscriminatedUnion,
+  ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
+  ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
+  ZodBranded, ZodMap, ZodSet, ZodPromise, ZodFunction, ZodStringbool,
+  ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform,
 };
 
 // attach the real class
@@ -830,6 +839,6 @@ export {
   ZodEnum as $ZodEnum, ZodLazy as $ZodLazy, ZodPromise as $ZodPromise,
   ZodCustom as $ZodCustom, ZodStringbool as $ZodStringbool, ZodFile as $ZodFile,
   ZodCodec as $ZodCodec, ZodInstanceof as $ZodInstanceof,
-  ZodFunction as $ZodFunction,
+  ZodFunction as $ZodFunction, ZodTransform as $ZodTransform,
 } from "./schema.ts";
 // $ZodError/ZodError/ZodRealError come through `export *` from error.ts

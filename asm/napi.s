@@ -4245,12 +4245,18 @@ _azn_truthy:
 // ============ 0x11 PIPE ============
 // [op][inField i64][outField i64]
 .Ln_pipe:
+    // in run — tag its issues _nc; a truncated pipe judges aborted upstream
+    AZ_ADR x9, az_nc_flag
+    mov w10, #1
+    strb w10, [x9]
     add x9, x27, #1
     ldr x10, [x9]
     add x0, x9, x10           // in node
     mov x1, x28
     add x2, sp, #LN_A
     bl _aznapi_run
+    AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
     cbnz x0, .Ln_ret          // propagate (-2 has issues)
     add x9, x27, #9
     ldr x10, [x9]
