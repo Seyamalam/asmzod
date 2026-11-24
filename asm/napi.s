@@ -876,8 +876,7 @@ _azn_blob_to_napi:
     ldr x9, [sp, #16]
     ldr x1, [x9, #1]
     mov x0, x26
-    mov x2, #0
-    ldr x3, [sp, #24]
+    ldr x2, [sp, #24]          // &result (was NULL — call failed, stale slot leaked)
     bl _napi_create_bigint_int64
     b .Lb2n_ok
 .Lb2n_obj:
@@ -1648,8 +1647,11 @@ _azn_encval:
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_A
-    mov x3, #0
+    add x3, sp, #LN_B          // lossless out (NULL is invalid arg)
     bl _napi_get_value_bigint_int64
+    cbnz x0, .Ln_lit_miss      // read failed / doesn't fit i64 -> miss
+    ldrb w9, [sp, #LN_B]
+    cbz w9, .Ln_lit_miss       // lossy conversion can't equal a literal
     ldr x9, [sp, #LN_A]
     ldr x11, [x27, #2]
     cmp x9, x11
