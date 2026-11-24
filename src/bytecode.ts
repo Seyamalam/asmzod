@@ -8,13 +8,14 @@ export interface Compiled {
   blob: Uint8Array;
   hosts: HostTable; // seed values for embedded hostrefs (literal/default/catch)
   unions: SchemaLike[]; // union defs in emission order — issues carry `_u` index
+  napi?: number; // 1 once a full native run has succeeded — parse() skips the pipeline
 }
 
 export interface SchemaLike { _def: any }
 
 const enc = new TextEncoder();
 
-const STR_CHECK: Record<string, number> = {
+export const STR_CHECK: Record<string, number> = {
   min: 0x01, max: 0x02, length: 0x03,
   email: 0x04, uuid: 0x05, url: 0x06,
   startsWith: 0x07, endsWith: 0x08, includes: 0x09,

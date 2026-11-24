@@ -163,3 +163,13 @@ export function parseMany(blob: Uint8Array, values: unknown[], hosts: HostTable,
   }
   return res;
 }
+
+// success-only probe for the per-schema fast flag — returns the output value,
+// or NAPI_MISS on failure/fallback so callers can run the full pipeline
+export const NAPI_MISS = Symbol("aznapi.miss");
+export function fastParse(blob: Uint8Array, value: unknown): unknown {
+  const a = addon;
+  if (!a) return NAPI_MISS;
+  const r = a.parse(blob, value);
+  return (r as any)?.[RES] === true ? NAPI_MISS : r;
+}

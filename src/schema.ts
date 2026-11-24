@@ -1,5 +1,5 @@
 // schema.ts — schema classes + chaining API (zod3-compatible surface)
-import { compile, type Compiled } from "./bytecode.ts";
+import { compile, STR_CHECK, type Compiled } from "./bytecode.ts";
 import { engineParse, portableEngineParse, reg, regId } from "./ffi.ts";
 import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, stripInternalFrames, globalConfig, defaultedIssues, globalRegistry, ZodRegistry } from "./shared.ts";
@@ -173,7 +173,7 @@ function _hasFxWalk(inst: any, stack: Set<any>): boolean {
     // JS-effect check records (tx/checkfn/fn payloads) live inside defs, not
     // as schema children — the walk needs an explicit look
     if (!hit && Array.isArray(d.checks))
-      hit = d.checks.some((c: any) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.tx === "function" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined)));
+      hit = d.checks.some((c: any) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.tx === "function" || (typeof c.fn === "function" && !c.builtin) || (c.kind === "includes" && c.position !== undefined)));
     if (!hit && d.type === "lazy") hit = d._cachedInner ? see(d._cachedInner) : true;
   }
   stack.delete(inst);
@@ -770,9 +770,11 @@ function _stampIss(r: any, inst: any, data?: any): void {
   if (r && !r.ok && r.issues) for (const i of r.issues) _stampTree(i, inst, data);
 }
 
+const _SYNC_CTX = { async: false };
+const _ASYNC_CTX = { async: true };
 const _ctxFrom = (params: any, async_: boolean): any =>
   params ? { ...params, async: async_, error: params.error ?? (typeof params === "function" ? params : undefined) }
-       : { async: async_ };
+       : async_ ? _ASYNC_CTX : _SYNC_CTX;
 
 // MEMO-scoped sync run — parse and safeParse share it
 function _runScoped(schema: any, value: unknown, ctx?: any): any {
@@ -875,6 +877,14 @@ export const _mkSafeEncodeAsync = (Err: any) => async (schema: any, value: unkno
 
 export const _decode = _parse;
 export const _decodeAsync = _parseAsync;
+
+// hot entrypoints hoist the factory call — the closure and callee params
+// were being allocated on every parse
+const _P = _parse(ZodRealError);
+const _SP = _safeParse(ZodRealError);
+const _PA = _parseAsync(ZodRealError);
+const _SPA = _safeParseAsync(ZodRealError);
+const _E = _mkEncode(ZodRealError);
 export const _safeDecode = _safeParse;
 export const _safeDecodeAsync = _safeParseAsync;
 
@@ -1111,12 +1121,25 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   protected _runImpl(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const _checks = (this._def as any).checks as any[] | undefined;
-    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || c.kind === "schemacheck" || c.kind === "size" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined) || (c.kind === "regex" && c.format !== undefined && c.format !== "regex"))))
+    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || c.kind === "schemacheck" || c.kind === "size" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined) || (c.kind === "regex" && c.format !== undefined && c.format !== "regex")))) {
+      // all-builtin-fn leaf on a typed input: run the predicates directly —
+      // failures still take the full machinery for exact issue semantics
+      const t = (this._def as any).type;
+      if ((t === "string" && typeof data === "string") || (t === "number" && typeof data === "number") || (t === "bigint" && typeof data === "bigint")) {
+        let fastOk = _checks.length > 0;
+        for (const c of _checks) {
+          // transforms return the new value — only pure boolean predicates can run here
+          if (!(c && typeof c.fn === "function" && c.builtin) || c.fn(data) !== true) { fastOk = false; break; }
+        }
+        if (fastOk) return { ok: true as const, value: data };
+      }
       return this._runChecksTS(data, _checks);
+    }
     const c = this._compile();
     // direct N-API validation walks the JS value natively (no encode/decode);
     // null -> schema needs the encoded engine path (callbacks, unions, ...)
     const nr = napiBackend.parse(c.blob, data, c.hosts, c.cbUnsafe);
+    if (nr !== null && !(this._def as any).hasSyms) c.napi = 1;
     // the encoded engine needs its own hosts array — encodeValue appends
     const hosts: HostTable | undefined = nr === null ? [...c.hosts] : undefined;
     // a bigint hostref in hosts means encodeValue met an out-of-i64 value —
@@ -1390,22 +1413,27 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   parse(data: unknown, params?: any): Output {
-    return _parse(ZodRealError)(this, data, params, { callee: ZodType.prototype.parse });
+    const c = this._compiled;
+    if (c?.napi === 1 && params === undefined) {
+      const r = napiBackend.fastParse(c.blob, data);
+      if (r !== napiBackend.NAPI_MISS) return r as Output;
+    }
+    return _P(this, data, params, _PARSE_PARAMS);
   }
 
   safeParse(data: unknown, params?: any): SafeParseResult<Output> {
-    return _safeParse(ZodRealError)(this, data, params);
+    return _SP(this, data, params);
   }
 
   async parseAsync(data: unknown, params?: any): Promise<Output> {
-    return await _parseAsync(ZodRealError)(this, data, params, { callee: ZodType.prototype.parseAsync });
+    return await _PA(this, data, params, _PARSE_ASYNC_PARAMS);
   }
 
   decode(data: unknown, params?: any): any {
-    return _decode(ZodRealError)(this, data, params, { callee: ZodType.prototype.decode });
+    return _P(this, data, params, _DECODE_PARAMS);
   }
   encode(data: unknown, params?: any): any {
-    return _mkEncode(ZodRealError)(this, data, params, { callee: ZodType.prototype.encode });
+    return _E(this, data, params, _ENCODE_PARAMS);
   }
   async decodeAsync(data: unknown, params?: any): Promise<any> {
     return await _decodeAsync(ZodRealError)(this, data, params, { callee: ZodType.prototype.decodeAsync });
@@ -1608,7 +1636,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     });
   }
   safeParseAsync(data: unknown, params?: any): Promise<SafeParseResult<Output>> {
-    return _safeParseAsync(ZodRealError)(this, data, params);
+    return _SPA(this, data, params);
   }
 
   validate(data: unknown, params?: any): boolean {
@@ -1858,7 +1886,7 @@ export class ZodString extends ZodType<string> {
   constructor(_def: any = { type: "string", checks: [] }) { super(); _definit(this, _def); }
   private _check(c: any) {
     const mk: any = FMT_FNS[c.kind];
-    const rec = mk ? { ...c, fn: mk(c), builtin: true } : c;
+    const rec = mk ? { ...c, fn: mk(c), builtin: STR_CHECK[c.kind] !== undefined } : c;
     // mk may annotate the record (fmt/pat for JSON Schema + issues)
     if (mk) Object.assign(rec, c);
     return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(rec)] });
@@ -2666,7 +2694,9 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     // recursive-capable subtree — cyclic input can only loop through lazy or
     // getter edges, and the engine can't close a reference cycle, so these
     // validate per-field at TS level through the parse memo
-    const syms = Reflect.ownKeys(shape).filter((k): k is symbol => typeof k === "symbol");
+    const d2 = this._def as any;
+    const syms = (d2.__syms ??= Reflect.ownKeys(shape).filter((k): k is symbol => typeof k === "symbol"));
+    if (syms.length) d2.hasSyms = true;
     if (MEMO && _isRef(data) && !Array.isArray(data) && this._isRec())
       return _memoRun(this, data, () => ({}), (out) => this._runTSObj(input, out));
     // JS-callback effects anywhere below need TS-level orchestration — the
@@ -4338,3 +4368,8 @@ for (const Cls of [
 ])
   if (Cls && !Object.getOwnPropertyDescriptor(Cls.prototype, "spa"))
     Object.defineProperty(Cls.prototype, "spa", _spaDesc);
+const _PARSE_PARAMS = { callee: ZodType.prototype.parse };
+const _PARSE_ASYNC_PARAMS = { callee: ZodType.prototype.parseAsync };
+const _DECODE_PARAMS = { callee: ZodType.prototype.decode };
+const _ENCODE_PARAMS = { callee: ZodType.prototype.encode };
+
