@@ -47,3 +47,28 @@ same suite through the interpreter.
   through the engine.
 - `bigint` checks bounded by i64 in the native engines — beyond that,
   inputs route to the portable engine (same results, slower path).
+
+## Zod-suite status (v4 classic, 2026)
+
+The repo's own tests were run against `packages/zod/src/v4/classic/tests`
+(vitest, `zod/v4` + relative imports aliased to `src/index.ts`). Baseline
+after the Node/V8 `napi_ref` handle-lifetime fix:
+
+- ~500/~1000 assertions failing across ~65 files; `anyunknown`, `brand`,
+  `custom`, `json`, `nullable`, `nan`, `prototypes`, `validations`,
+  `from-json-schema` (111) and others are fully green.
+- Largest failure clusters: `object`, `cyclic-data`, `deep-partial`,
+  `discriminated-unions`, `error-utils`, `record`, `error`, `string`,
+  `to-json-schema-methods`, `catch`, `record`.
+- Recurring missing semantics: `{ checks: [...] }` factory params,
+  `schema._zod.*` internals (`traits`, `parent`, `def`), `z.validate`,
+  `.includes({position})`, exact message snapshot wording, symbol-keyed
+  object schemas, cyclic input data, `default`/`catch`/`prefault` output
+  transforms, error-util shapes (`flatten`/`format`/`prettify`/`treeify`),
+  codec/pipe `in`/`out` typing behavior, detached methods.
+- Harness: `/private/tmp/zodsuite` (vitest 3.2.7, alias config maps
+  `zod`, `zod/*`, and `../index.js`/`../from-json-schema.js`/
+  `../deep-partial.js` relative imports to `src/index.ts`).
+
+Node/V8 no longer crashes the suite — callback tables store persistent
+`napi_ref`s instead of scoped `napi_value`s.
