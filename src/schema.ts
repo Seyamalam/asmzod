@@ -226,17 +226,29 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     registry?.add?.(this);
     return this;
   }
-  check(...fns: ((ctx: any) => void)[]): ZodEffects<this, Output> {
-    return this.superRefine((v, ctx) => {
+  check(...args: any[]): any {
+    const objs = args.filter((a) => a && typeof a === "object" && typeof a !== "function");
+    const fns = args.filter((a) => typeof a === "function");
+    let s: any = this;
+    if (objs.length) {
+      const checks = [...(this._def.checks ?? [])];
+      const def: any = { ...this._def, checks };
+      for (const o of objs) {
+        const c = o._def ?? o;
+        if (c.kind === "meta") { def.description = c.description ?? def.description; def.metadata = { ...(def.metadata ?? {}), ...(c.metadata ?? {}) }; }
+        else if (c.kind === "tx") s = new ZodEffects({ type: "transform", inner: s, cbid: regId(reg.transform, guardAsync(c.tx)), fn: c.tx, kind: "transform" });
+        else checks.push(c);
+      }
+      s = new (this as any).constructor(def);
+    }
+    if (fns.length) s = s.superRefine((v: any, ctx: any) => {
       for (const fn of fns) {
-        const payload = {
-          value: v, issues: [] as any[],
-          addIssue: (i: any) => payload.issues.push(i),
-        };
+        const payload = { value: v, issues: [] as any[], addIssue: (i: any) => payload.issues.push(i) };
         fn(payload);
         for (const i of payload.issues) ctx.addIssue(i);
       }
     });
+    return s;
   }
   overwrite<N>(fn: (v: Output) => N): ZodEffects<this, N> {
     return this.transform(fn);
@@ -1023,4 +1035,48 @@ export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
     return er.data as A["_output"];
   }
   decode(value: A["_input"]): B["_output"] { return this.parse(value); }
+}
+
+// ---------- algorithmic string formats (can't be regexes) ----------
+// emitted as invalid_format issues exactly like zod's ZodStringFormat defs
+export class ZodAlgoFormat extends ZodType<string, string> {
+  constructor(_def: { format: string; message: string; fn: (s: string) => boolean }) {
+    super(); this._def = { ..._def, type: "algoformat" };
+  }
+  protected override _run(data: unknown) {
+    if (typeof data !== "string")
+      return { ok: false as const, issues: [typeIssue("string", data)], aborted: true };
+    if (this._def.fn(data)) return { ok: true as const, value: data };
+    return {
+      ok: false as const, aborted: true,
+      issues: [{ code: "invalid_format", format: this._def.format, path: [], message: this._def.message }] as any[],
+    };
+  }
+}
+
+// Luhn, tolerating spaces/dashes like zod's credit card check
+export function luhnCheck(s: string): boolean {
+  const digits = s.replace(/[ -]/g, "");
+  if (!/^\d{13,19}$/.test(digits)) return false;
+  let sum = 0, dbl = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (dbl && (d *= 2) > 9) d -= 9;
+    sum += d; dbl = !dbl;
+  }
+  return sum % 10 === 0;
+}
+
+// IBAN: 2 letters + 2 digits + up to 30 alnum; mod-97 of rearranged digits == 1
+export function ibanCheck(s: string): boolean {
+  const ib = s.replace(/\s+/g, "").toUpperCase();
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(ib)) return false;
+  let rem = 0;
+  const moved = ib.slice(4) + ib.slice(0, 4);
+  for (const ch of moved) {
+    const code = ch.charCodeAt(0);
+    if (code >= 48 && code <= 57) rem = (rem * 10 + (code - 48)) % 97;
+    else { const n = code - 55; rem = (rem * 10 + Math.floor(n / 10)) % 97; rem = (rem * 10 + (n % 10)) % 97; }
+  }
+  return rem === 1;
 }

@@ -72,6 +72,7 @@ const FORMAT_MSGS: Record<string, string> = {
   sha384_hex: "Invalid sha384_hex", sha384_base64: "Invalid sha384_base64", sha384_base64url: "Invalid sha384_base64url",
   sha512_hex: "Invalid sha512_hex", sha512_base64: "Invalid sha512_base64", sha512_base64url: "Invalid sha512_base64url",
   template_literal: "Invalid input",
+  mac: "Invalid MAC address",
 };
 
 // zod exposes `origin: "string"` + the check's regex `pattern` on these formats
@@ -90,6 +91,7 @@ const FORMAT_PATTERNS: Record<string, string> = {
   emoji: "/^(?=[\\s\\S]*[\\p{Extended_Pictographic}\\p{Regional_Indicator}\\u20E3])[\\p{Extended_Pictographic}\\p{Emoji_Component}]+$/u",
   lowercase: "/^[^A-Z]*$/",
   uppercase: "/^[^a-z]*$/",
+  mac: "/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/",
 };
 
 // zod exposes `received` only when a guard reports a value-qualified name

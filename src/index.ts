@@ -7,6 +7,7 @@ import {
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec,
+  ZodAlgoFormat, luhnCheck, ibanCheck,
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
@@ -311,6 +312,260 @@ export const z = {
   // zod3 compatibility aliases
   /** Error subclass carrying the issues array. */
   ZodError: undefined as unknown as typeof import("./error.ts").ZodError,
+
+  // ---------- standalone parse/encode fns (zod 4 top-level) ----------
+  /** standalone safeParse: z.safeParse(schema, data, params?) */
+  safeParse: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
+  /** standalone parse */
+  parse: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parse(data, params),
+  safeParseAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
+  parseAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parseAsync(data),
+  validate: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
+  validateAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
+  /** codec decode — same as parse on codecs */
+  decode: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parse(data, params),
+  decodeAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parseAsync(data),
+  safeDecode: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
+  safeDecodeAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
+  /** codec encode — runs the codec's reverseTransform */
+  encode: <T extends ZodTypeAny>(s: T, data: unknown): unknown => {
+    if (typeof (s as any).encode === "function") return (s as any).encode(data);
+    throw new Error("asmzod: encode() requires a codec schema");
+  },
+  encodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown): Promise<unknown> => {
+    if (typeof (s as any).encode === "function") return (s as any).encode(data);
+    throw new Error("asmzod: encodeAsync() requires a codec schema");
+  },
+  safeEncode: <T extends ZodTypeAny>(s: T, data: unknown) => {
+    try {
+      if (typeof (s as any).encode === "function") return { success: true, data: (s as any).encode(data) };
+      return { success: false, error: new ZodError([{ code: "custom", path: [], message: "schema is not a codec" } as any]) };
+    } catch (e: any) { return { success: false, error: e instanceof ZodError ? e : new ZodError([{ code: "custom", path: [], message: String(e?.message ?? e) } as any]) }; }
+  },
+  safeEncodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown) => {
+    try {
+      if (typeof (s as any).encode === "function") return { success: true, data: await (s as any).encode(data) };
+      return { success: false, error: new ZodError([{ code: "custom", path: [], message: "schema is not a codec" } as any]) };
+    } catch (e: any) { return { success: false, error: e instanceof ZodError ? e : new ZodError([{ code: "custom", path: [], message: String(e?.message ?? e) } as any]) }; }
+  },
+  /** runtime _input accessor */
+  input: <T extends ZodTypeAny>(s: T) => s._input,
+  /** runtime _output accessor */
+  output: <T extends ZodTypeAny>(s: T) => s._output,
+  /** clone a schema instance (shares def internals) */
+  clone: <T extends ZodTypeAny>(s: T, def?: any): T =>
+    new (s as any).constructor({ ...(s as any)._def, ...(def ?? {}) }),
+  /** set .metadata on a schema def */
+  meta: <T extends ZodTypeAny>(s: T, m: Record<string, unknown>): T => {
+    (s as any)._def.metadata = { ...((s as any)._def.metadata ?? {}), ...m };
+    return s;
+  },
+  /** registry: id -> schema map */
+  registry: <M = ZodTypeAny>() => {
+    const m = new Map<string, M>();
+    return {
+      add: (id: string, v: M) => (m.set(id, v), undefined),
+      get: (id: string) => m.get(id),
+      has: (id: string) => m.has(id),
+      remove: (id: string) => m.delete(id),
+      clear: () => m.clear(),
+      count: () => m.size,
+      _map: m,
+    };
+  },
+
+  // ---------- numeric factories ----------
+  /** number int bounded to i32 */
+  int32: (params?: any) => new ZodNumber({ type: "number", checks: [{ kind: "int" }, { kind: "gte", value: -2147483648 }, { kind: "lte", value: 2147483647 }], error: params }),
+  /** number int bounded to u32 */
+  uint32: (params?: any) => new ZodNumber({ type: "number", checks: [{ kind: "int" }, { kind: "gte", value: 0 }, { kind: "lte", value: 4294967295 }], error: params }),
+  /** number (f64 slot named float64 in zod) */
+  float64: (params?: any) => new ZodNumber({ type: "number", checks: [], error: params }),
+  /** number (f32 semantics deferred — same range as float64 in JS) */
+  float32: (params?: any) => new ZodNumber({ type: "number", checks: [], error: params }),
+  /** bigint bounded to i64 */
+  int64: (params?: any) => new ZodBigInt({ type: "bigint", checks: [{ kind: "gte", value: BigInt("-9223372036854775808") }, { kind: "lte", value: BigInt("9223372036854775807") }], error: params }),
+
+  // ---------- check factories for .check(...) ----------
+  /** number check: value > n */
+  gt: (v: number | bigint, message?: string) => ({ kind: "gt", value: v, message }),
+  gte: (v: number | bigint, message?: string) => ({ kind: "gte", value: v, message }),
+  min: (v: number | bigint, message?: string) => ({ kind: "gte", value: v, message }),
+  lt: (v: number | bigint, message?: string) => ({ kind: "lt", value: v, message }),
+  lte: (v: number | bigint, message?: string) => ({ kind: "lte", value: v, message }),
+  max: (v: number | bigint, message?: string) => ({ kind: "lte", value: v, message }),
+  positive: (message?: string) => ({ kind: "gt", value: 0, message }),
+  nonnegative: (message?: string) => ({ kind: "gte", value: 0, message }),
+  negative: (message?: string) => ({ kind: "lt", value: 0, message }),
+  nonpositive: (message?: string) => ({ kind: "lte", value: 0, message }),
+  int: (message?: string) => ({ kind: "int", message }),
+  multipleOf: (v: number | bigint, message?: string) => ({ kind: "multipleOf", value: v, message }),
+  minLength: (v: number, message?: string) => ({ kind: "min", value: v, message }),
+  maxLength: (v: number, message?: string) => ({ kind: "max", value: v, message }),
+  length: (v: number, message?: string) => ({ kind: "length", value: v, message }),
+  minSize: (v: number, message?: string) => ({ kind: "min", value: v, message }),
+  maxSize: (v: number, message?: string) => ({ kind: "max", value: v, message }),
+  size: (v: number, message?: string) => ({ kind: "size", value: v, message }),
+  regex: (re: RegExp, message?: string) => ({ kind: "regex", regex: re, message }),
+  startsWith: (v: string, message?: string) => ({ kind: "startsWith", value: v, message }),
+  endsWith: (v: string, message?: string) => ({ kind: "endsWith", value: v, message }),
+  includes: (v: string, message?: string) => ({ kind: "includes", value: v, message }),
+  lowercase: (message?: string) => ({ kind: "lowercase", message }),
+  uppercase: (message?: string) => ({ kind: "uppercase", message }),
+  mime: (v: string[], message?: string) => ({ kind: "mime", value: v, message }),
+  /** overwrite-style checks: value transforms */
+  trim: () => ({ kind: "tx", tx: (v: unknown) => typeof v === "string" ? v.trim() : v }),
+  toLowerCase: () => ({ kind: "tx", tx: (v: unknown) => typeof v === "string" ? v.toLowerCase() : v }),
+  toUpperCase: () => ({ kind: "tx", tx: (v: unknown) => typeof v === "string" ? v.toUpperCase() : v }),
+  normalize: (form?: string) => ({ kind: "tx", tx: (v: unknown) => typeof v === "string" ? v.normalize(form as any) : v }),
+  overwrite: (fn: (v: unknown) => unknown) => ({ kind: "tx", tx: fn }),
+  slugify: () => ({ kind: "tx", tx: (v: unknown) => typeof v === "string" ? v.toLowerCase().trim().replace(/[^a-z0-9\s-]/g, "").replace(/[\s-]+/g, "-").replace(/^-+|-+$/g, "") : v }),
+  /** description/metadata checks */
+  describe: (msg: string) => ({ kind: "meta", description: msg }),
+  metaCheck: (m: Record<string, unknown>) => ({ kind: "meta", metadata: m }),
+
+  // ---------- error utilities ----------
+  /** {formErrors, fieldErrors} — errors grouped by top-level key */
+  flattenError: (err: ZodError) => {
+    const formErrors: string[] = [];
+    const fieldErrors: Record<string, string[]> = {};
+    for (const i of err.issues) {
+      if (!i.path?.length) formErrors.push(i.message);
+      else {
+        const k = String(i.path[0]);
+        (fieldErrors[k] ??= []).push(i.message);
+      }
+    }
+    return { formErrors, fieldErrors };
+  },
+  /** nested errors keyed by path: {name?/_errors/items/properties} */
+  formatError: (err: ZodError) => {
+    const walk = (issues: any[]): any => {
+      const node: any = { _errors: [] };
+      for (const i of issues) {
+        const [head, ...rest] = i.path ?? [];
+        if (head === undefined) { node._errors.push(i.message); continue; }
+        const key = typeof head === "number" ? "items" : "properties";
+        node[key] ??= {};
+        node[key][head] ??= { _errors: [] };
+        node[key][head]._errors.push === undefined && (node[key][head] = { _errors: [] });
+        if (!rest.length) node[key][head]._errors.push(i.message);
+        else {
+          const sub = walk([{ ...i, path: rest }]);
+          node[key][head] = { ...node[key][head], ...sub, _errors: node[key][head]._errors };
+        }
+      }
+      return node;
+    };
+    return walk(err.issues);
+  },
+  /** human-readable pretty print of an error */
+  prettifyError: (err: ZodError) =>
+    err.issues.map((i) => {
+      const p = (i.path ?? []).map((seg, j) => (typeof seg === "number" ? `[${seg}]` : j === 0 ? String(seg) : `.${seg}`)).join("");
+      return `✖ ${i.message}${p ? `\n  → at ${p}` : ""}`;
+    }).join("\n"),
+  /** tree-shaped error: {errors, properties, items} */
+  treeifyError: (err: ZodError) => {
+    const walk = (issues: any[]): any => {
+      const node: any = { errors: [] };
+      for (const i of issues) {
+        const [head, ...rest] = i.path ?? [];
+        if (head === undefined) { node.errors.push(i.message); continue; }
+        const key = typeof head === "number" ? "items" : "properties";
+        node[key] ??= typeof head === "number" ? [] : {};
+        if (typeof head === "number") node[key][head] ??= { errors: [] };
+        else node[key][head] ??= { errors: [] };
+        if (!rest.length) node[key][head].errors.push(i.message);
+        else {
+          const sub = walk([{ ...i, path: rest }]);
+          const cur = node[key][head];
+          node[key][head] = {
+            errors: cur.errors,
+            ...(sub.properties ? { properties: { ...(cur.properties ?? {}), ...sub.properties } } : {}),
+            ...(sub.items ? { items: sub.items } : {}),
+          };
+        }
+      }
+      return node;
+    };
+    return walk(err.issues);
+  },
+
+  // ---------- string-format factories not in the asm engine ----------
+  /** credit card (Luhn, spaces/dashes tolerated) */
+  creditCard: (params?: any) => new ZodAlgoFormat({
+    format: "credit_card", message: "Invalid credit card number", fn: luhnCheck,
+  }),
+  /** IBAN (ISO 13616 mod-97) */
+  iban: (params?: any) => new ZodAlgoFormat({
+    format: "iban", message: "Invalid IBAN", fn: ibanCheck,
+  }),
+  /** ISO 4217 currency code */
+  currencyCode: (params?: any) => new ZodAlgoFormat({
+    format: "currency_code", message: "Invalid currency code",
+    fn: (s: string) => /^[A-Z]{3}$/.test(s),
+  }),
+  /** MAC address — same regex as zod */
+  mac: (params?: any) => new ZodString({
+    type: "string",
+    checks: [{ kind: "regex", regex: /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/, format: "mac" }],
+    error: params,
+  }),
+  /** JSON Schema -> schema (covers the subset toJSONSchema emits + common constructs) */
+  fromJSONSchema: (js: any): ZodTypeAny => fromJSONSchema(js),
+
+  // ---------- remaining top-level utilities ----------
+  /** schema.pipe(target) as a factory */
+  pipe: <A extends ZodTypeAny, B extends ZodTypeAny>(inS: A, out: B) => inS.pipe(out),
+  /** schema.prefault(value) as a factory */
+  prefault: <T extends ZodTypeAny>(s: T, v: any) => (s as any).prefault(v),
+  /** optional wrapper preserving zod's exactOptional field semantics */
+  exactOptional: <T extends ZodTypeAny>(s: T) => s.optional(),
+  /** deepPartial on an object schema */
+  deepPartial: <T extends ZodTypeAny>(s: T) => (s as any).deepPartial(),
+  /** shape passthrough helper */
+  properties: <T extends ZodRawShape>(shape: T): T => shape,
+  /** single-property shape helper */
+  property: <T extends ZodTypeAny>(key: string, s: T): Record<string, T> => ({ [key]: s }),
+  /** compile a schema eagerly (returns the schema) */
+  compile: <T extends ZodTypeAny>(s: T): T => ((s as any)._compile(), s),
+  /** memoize a schema factory */
+  memoizer: <A extends any[], R>(fn: (...a: A) => R) => {
+    const c = new Map<string, R>();
+    return (...a: A): R => {
+      const k = JSON.stringify(a);
+      if (!c.has(k)) c.set(k, fn(...a));
+      return c.get(k)!;
+    };
+  },
+  /** swap a codec's in/out */
+  invertCodec: <T extends ZodTypeAny>(c: T): ZodCodec<any, any> => {
+    const d = (c as any)._def;
+    if (d?.type !== "codec") throw new Error("asmzod: invertCodec requires a codec");
+    return new ZodCodec({ ...d, in: d.out, out: d.in, transform: d.reverseTransform, reverseTransform: d.transform });
+  },
+  /** find the discriminated-union option matching a discriminator value */
+  getDiscriminatedOption: (options: ZodTypeAny[], disc: string, value: unknown): ZodTypeAny | undefined =>
+    options.find((o) => {
+      const lit = (o as any)._def?.shape?.[disc]?._def?.value;
+      return lit === value;
+    }),
+  /** wrap an arbitrary parse fn as a schema */
+  withParser: <T>(fn: (data: unknown) => T): ZodType<T, unknown> => {
+    const inner = z.custom<T>((v) => (fn(v), true));
+    return inner.transform(fn) as unknown as ZodType<T, unknown>;
+  },
+  /** named string format from a fn or regex */
+  stringFormat: (
+    format: string,
+    check: RegExp | ((v: string) => boolean),
+    opts?: { message?: string },
+  ) => check instanceof RegExp
+    ? new ZodString({ type: "string", checks: [{ kind: "regex", regex: check, format }], error: opts?.message })
+    : new ZodAlgoFormat({ format, message: opts?.message ?? `Invalid ${format}`, fn: check }),
+  /** schema -> zod-ish source string (subset of defs) */
+  toZod: (s: ZodTypeAny): string => toZod(s),
 };
 
 // attach the real class
@@ -336,4 +591,148 @@ export declare namespace z {
   export type infer<T extends ZodType<any, any>> = T["_output"];
   export type input<T extends ZodType<any, any>> = T["_input"];
   export type output<T extends ZodType<any, any>> = T["_output"];
+}
+
+// fromJSONSchema: inverse of toJSONSchema — covers the emitted subset
+// plus common draft-2020-12 constructs. Unsupported constructs throw.
+function fromJSONSchema(js: any): ZodTypeAny {
+  if (js === true || js === undefined) return z.any();
+  if (js === false) return z.never();
+  if (js.const !== undefined) return z.literal(js.const);
+  if (js.enum !== undefined) return z.enum(js.enum);
+  if (js.anyOf) return z.union(js.anyOf.map(fromJSONSchema));
+  if (js.oneOf) return z.union(js.oneOf.map(fromJSONSchema));
+  if (js.allOf && js.allOf.length === 2)
+    return z.intersection(fromJSONSchema(js.allOf[0]), fromJSONSchema(js.allOf[1]));
+  if (js.not) throw new Error("asmzod: fromJSONSchema does not support 'not'");
+  const types: string[] = Array.isArray(js.type) ? js.type : js.type ? [js.type] : [];
+  if (types.length > 1) {
+    // ["T","null"] -> nullable(T); other unions -> z.union
+    const nonNull = types.filter((t) => t !== "null");
+    if (nonNull.length === 1)
+      return (fromJSONSchema({ ...js, type: nonNull[0] }) as any).nullable();
+    return z.union(types.map((t) => fromJSONSchema({ ...js, type: t })));
+  }
+  let s: ZodTypeAny;
+  switch (types[0]) {
+    case "string": {
+      let str = z.string() as any;
+      const fmtMap: Record<string, string> = {
+        email: "email", uuid: "uuid", url: "url", uri: "url", emoji: "emoji",
+        base64: "base64", base64url: "base64url", nanoid: "nanoid", cuid: "cuid",
+        cuid2: "cuid2", ulid: "ulid", ipv4: "ipv4", ipv6: "ipv6",
+        cidrv4: "cidrv4", cidrv6: "cidrv6", date: "date", time: "time",
+        "date-time": "datetime", datetime: "datetime", duration: "duration",
+        e164: "e164", jwt: "jwt", hex: "hex",
+      };
+      const f = fmtMap[js.format ?? ""];
+      if (f && typeof str[f] === "function") str = str[f]();
+      if (typeof js.minLength === "number") str = str.min(js.minLength);
+      if (typeof js.maxLength === "number") str = str.max(js.maxLength);
+      if (typeof js.length === "number") str = str.length(js.length);
+      if (js.pattern) str = str.regex(new RegExp(js.pattern));
+      if (js.startsWith) str = str.startsWith(js.startsWith);
+      if (js.endsWith) str = str.endsWith(js.endsWith);
+      if (js.includes) str = str.includes(js.includes);
+      s = str; break;
+    }
+    case "number": case "integer": {
+      let n = z.number() as any;
+      if (types[0] === "integer") n = n.int();
+      if (typeof js.minimum === "number") n = n.gte(js.minimum);
+      if (typeof js.maximum === "number") n = n.lte(js.maximum);
+      if (typeof js.exclusiveMinimum === "number") n = n.gt(js.exclusiveMinimum);
+      if (typeof js.exclusiveMaximum === "number") n = n.lt(js.exclusiveMaximum);
+      if (typeof js.multipleOf === "number") n = n.multipleOf(js.multipleOf);
+      s = n; break;
+    }
+    case "boolean": s = z.boolean(); break;
+    case "null": s = z.null(); break;
+    case "array": {
+      let a = z.array(js.items ? fromJSONSchema(js.items) : z.any()) as any;
+      if (typeof js.minItems === "number") a = a.min(js.minItems);
+      if (typeof js.maxItems === "number") a = a.max(js.maxItems);
+      s = a; break;
+    }
+    case "object": {
+      if (js.properties) {
+        const shape: Record<string, ZodTypeAny> = {};
+        for (const [k, v] of Object.entries(js.properties)) {
+          let vs = fromJSONSchema(v);
+          if (!js.required?.includes(k)) vs = (vs as any).optional();
+          shape[k] = vs;
+        }
+        s = js.additionalProperties === false ? z.strictObject(shape)
+          : js.additionalProperties ? z.looseObject(shape) : z.object(shape);
+      } else if (js.additionalProperties && typeof js.additionalProperties === "object") {
+        s = z.record(z.string(), fromJSONSchema(js.additionalProperties));
+      } else s = z.record(z.string(), z.unknown());
+      break;
+    }
+    default:
+      if (js.$ref) throw new Error("asmzod: fromJSONSchema does not resolve $ref");
+      s = z.unknown();
+  }
+  return s;
+}
+
+// toZod: render a schema's def back to zod-ish source — subset matching
+// fromJSONSchema coverage; unknown defs degrade to z.unknown()
+function toZod(s: any, d = 0): string {
+  const ind = "  ".repeat(d);
+  const def = s?._def ?? {};
+  switch (def.type) {
+    case "string": {
+      let out = "z.string()";
+      for (const c of def.checks ?? []) {
+        if (c.kind === "min") out += `.min(${c.value})`;
+        else if (c.kind === "max") out += `.max(${c.value})`;
+        else if (c.kind === "length") out += `.length(${c.value})`;
+        else if (c.kind === "regex") out += ".regex(/" + c.regex.source + "/" + c.regex.flags + ")";
+        else if (typeof (ZodString.prototype as any)[c.kind] === "function") out += `.${c.kind}()`;
+        else if (["startsWith","endsWith","includes"].includes(c.kind)) out += `.${c.kind}(${JSON.stringify(c.value)})`;
+      }
+      return out;
+    }
+    case "number": {
+      let out = "z.number()";
+      for (const c of def.checks ?? []) {
+        if (c.kind === "int") out += ".int()";
+        else if (["gt","gte","lt","lte","multipleOf"].includes(c.kind)) out += `.${c.kind}(${c.value})`;
+      }
+      return out;
+    }
+    case "bigint": return "z.bigint()";
+    case "boolean": return "z.boolean()";
+    case "date": return "z.date()";
+    case "symbol": return "z.symbol()";
+    case "any": return "z.any()";
+    case "unknown": return "z.unknown()";
+    case "never": return "z.never()";
+    case "null": return "z.null()";
+    case "undefined": return "z.undefined()";
+    case "void": return "z.void()";
+    case "nan": return "z.nan()";
+    case "literal": return `z.literal(${JSON.stringify(def.value)})`;
+    case "enum": return `z.enum(${JSON.stringify(def.values)})`;
+    case "array": return `z.array(${toZod(def.element, d + 1)})`;
+    case "tuple": return `z.tuple([${(def.items ?? []).map((i: any) => toZod(i, d + 1)).join(", ")}])`;
+    case "record":
+      return def.keyType
+        ? `z.record(${toZod(def.keyType, d + 1)}, ${toZod(def.valueType, d + 1)})`
+        : `z.record(z.string(), ${toZod(def.valueType, d + 1)})`;
+    case "union": return `z.union([${def.options.map((o: any) => toZod(o, d + 1)).join(", ")}])`;
+    case "optional": return `${toZod(def.inner, d + 1)}.optional()`;
+    case "nullable": return `${toZod(def.inner, d + 1)}.nullable()`;
+    case "default": return `${toZod(def.inner, d + 1)}.default(${JSON.stringify(def.value)})`;
+    case "object": {
+      const parts = Object.entries(def.shape ?? {}).map(([k, v]) => `${JSON.stringify(k)}: ${toZod(v, d + 1)}`);
+      const mk = def.mode === "strict" ? "z.strictObject" : def.mode === "passthrough" ? "z.looseObject" : "z.object";
+      return `${mk}({ ${parts.join(", ")} })`;
+    }
+    case "lazy": return "z.lazy(() => /* recursive */)";
+    case "map": return `z.map(${toZod(def.keyType, d + 1)}, ${toZod(def.valueType, d + 1)})`;
+    case "set": return `z.set(${toZod(def.valueType, d + 1)})`;
+    default: return "z.unknown()";
+  }
 }
