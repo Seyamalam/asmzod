@@ -56,6 +56,34 @@ const optIn = Array.from({length:64},(_,i)=>({a:i%2?`s${i}`:undefined, b:i%3?i:n
 
 const failIn = Array.from({length:64},(_,i)=>({ name: i, age: `x${i}`, email: "nope" }));
 
+const fmtAZ = z.string().email();
+const fmtZZ = Z.string().email();
+const fmtIn = Array.from({length:64},(_,i)=>`user${i}@ex.co`);
+const fmtBadIn = Array.from({length:64},(_,i)=>`user${i}-nope`);
+
+const emojiAZ = z.string().emoji();
+const emojiZZ = (Z.string() as any).emoji();
+const emojiIn = Array.from({length:64},(_,i)=>`😀${i%7}`);
+
+const coerceAZ = z.coerce.number();
+const coerceZZ = Z.coerce.number();
+const coerceIn = Array.from({length:64},(_,i)=>`${i}.5`);
+
+const refAZ = z.string().refine(s => s.length > 2).transform(s => s.toUpperCase());
+const refZZ = Z.string().refine((s: string) => s.length > 2).transform((s: string) => s.toUpperCase());
+const refIn = Array.from({length:64},(_,i)=>`val_${i}`);
+
+const msgwAZ: any = z.string({ error: "schema-err" } as any);
+const msgwZZ: any = Z.string({ error: "schema-err" } as any);
+
+const intAZ = z.number().int();
+const intZZ = Z.number().int();
+const intIn = Array.from({length:64},(_,i)=>i*7);
+
+const dateAZ = z.date();
+const dateZZ = Z.date();
+const dateIn = Array.from({length:64},(_,i)=>new Date(1700000000000+i*1000));
+
 const cases: [string, any, any, unknown[], number][] = [
   ["small-obj     x50k", smallAZ, smallZZ, smallIn, 50000],
   ["array-2000     x40", arrAZ, arrZZ, arrIn, 40],
@@ -69,6 +97,15 @@ const cases: [string, any, any, unknown[], number][] = [
   ["lazy-rec     x30k", lazyAZ, lazyZZ, lazyIn, 30000],
   ["opt/null/def x30k", optAZ, optZZ, optIn, 30000],
   ["fail-issues  x10k", smallAZ, smallZZ, failIn, 10000],
+  ["str-email    x30k", fmtAZ, fmtZZ, fmtIn, 30000],
+  ["str-email-f  x10k", fmtAZ, fmtZZ, fmtBadIn, 10000],
+  ["emoji        x30k", emojiAZ, emojiZZ, emojiIn, 30000],
+  ["coerce-num   x30k", coerceAZ, coerceZZ, coerceIn, 30000],
+  ["refine+trans x30k", refAZ, refZZ, refIn, 30000],
+  ["msgwrap      x30k", msgwAZ, msgwZZ, ["x"], 30000],
+  ["msgwrap-fail x10k", msgwAZ, msgwZZ, [42], 10000],
+  ["int-safe     x30k", intAZ, intZZ, intIn, 30000],
+  ["date         x30k", dateAZ, dateZZ, dateIn, 30000],
 ];
 
 console.log("workload              asmzod        zod4         ratio");
