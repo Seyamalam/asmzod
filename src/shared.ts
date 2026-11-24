@@ -129,6 +129,9 @@ export const msgFns: ((i: any) => string)[] = [];
 // only defaulted (_dflt) issues get remapped.
 export type ErrorMap = (issue: any) => string | undefined;
 let globalErrorMap: ErrorMap | undefined;
+// issues whose message came from defaultMessage (not schema/engine custom)
+// — WeakSet so the marker can't leak into user-visible keys
+const defaultedIssues = new WeakSet<object>();
 export function setErrorMap(fn?: ErrorMap) { globalErrorMap = fn; }
 export function getErrorMap() { return globalErrorMap; }
 export function configure(opts: any) {
@@ -140,13 +143,17 @@ export function applyErrorMaps(issues: any[], perCall?: any) {
     typeof perCall === "string" ? () => perCall :
     perCall && typeof perCall === "object" && typeof perCall.message === "string" ? () => perCall.message :
     undefined;
-  if (!pc && !globalErrorMap) { for (const i of issues) delete i._dflt; return; }
-  for (const i of issues) {
-    const dflt = i._dflt; delete i._dflt;
-    if (!dflt) continue;
-    const m = pc?.(i) ?? globalErrorMap?.(i);
-    if (m !== undefined) i.message = m;
-  }
+  if (!pc && !globalErrorMap) return;
+  const walk = (i: any) => {
+    if (i == null || typeof i !== "object") return;
+    if (defaultedIssues.has(i)) {
+      const m = pc?.(i) ?? globalErrorMap?.(i);
+      if (m !== undefined) i.message = m;
+    }
+    // union issues carry per-option errors arrays — maps apply there too
+    if (Array.isArray(i.errors)) for (const e of i.errors) for (const j of e) walk(j);
+  };
+  for (const i of issues) walk(i);
 }
 
 export function paramMsg(p: any): string | undefined {
@@ -275,7 +282,7 @@ export function normalizeIssue(i: any): any {
   if (out.code === "invalid_type" && out.expected === "int") out.format = "safeint";
   if (out.message === undefined) {
     out.message = defaultMessage(out);
-    out._dflt = true;
+    defaultedIssues.add(out);
   } else if (typeof out.message === "string" && out.message.charCodeAt(0) === 0) {
     const fn = msgFns[+out.message.slice(2)];
     const { message: _m, ...rest } = out;
