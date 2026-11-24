@@ -52,6 +52,16 @@ export function encodeValue(v: unknown, hosts: HostTable): Uint8Array {
         }
         return cat(...parts);
       }
+      if (v instanceof Map) {
+        const parts = [u8(9), u64(v.size)];
+        for (const [k, vv] of v) parts.push(encodeValue(k, hosts), encodeValue(vv, hosts));
+        return cat(...parts);
+      }
+      if (v instanceof Set) {
+        const parts = [u8(10), u64(v.size)];
+        for (const vv of v) parts.push(encodeValue(vv, hosts));
+        return cat(...parts);
+      }
       return cat(u8(8), u64(hostIndex(hosts, v)));
     case "function":
     case "symbol":
@@ -139,6 +149,29 @@ function decAt(buf: Uint8Array, dv: DataView, off: number, hosts: HostTable): [u
       return [arr, cur];
     }
     case 8: return [hosts[u64(off + 1)], off + 9];
+    case 9: {
+      const n = u64(off + 1);
+      let cur = off + 9;
+      const m = new Map();
+      for (let i = 0; i < n; i++) {
+        const [k, kp] = decAt(buf, dv, cur, hosts);
+        const [v, vp] = decAt(buf, dv, kp, hosts);
+        m.set(k, v);
+        cur = vp;
+      }
+      return [m, cur];
+    }
+    case 10: {
+      const n = u64(off + 1);
+      let cur = off + 9;
+      const s = new Set();
+      for (let i = 0; i < n; i++) {
+        const [v, np] = decAt(buf, dv, cur, hosts);
+        s.add(v);
+        cur = np;
+      }
+      return [s, cur];
+    }
     default: throw new Error(`asmzod: corrupt value tag ${tag} at buf+${off}`);
   }
 }
@@ -182,6 +215,29 @@ export function decodeAt(p: number, hosts: HostTable): [unknown, number] {
       return [arr, cur];
     }
     case 8: return [hosts[Number(rd64u(p + 1))], p + 9];
+    case 9: {
+      const n = Number(rd64u(p + 1));
+      let cur = p + 9;
+      const m2 = new Map();
+      for (let i = 0; i < n; i++) {
+        const [k, kp] = decodeAt(cur, hosts);
+        const [v, vp] = decodeAt(kp, hosts);
+        m2.set(k, v);
+        cur = vp;
+      }
+      return [m2, cur];
+    }
+    case 10: {
+      const n = Number(rd64u(p + 1));
+      let cur = p + 9;
+      const s = new Set();
+      for (let i = 0; i < n; i++) {
+        const [v, np] = decodeAt(cur, hosts);
+        s.add(v);
+        cur = np;
+      }
+      return [s, cur];
+    }
     default: throw new Error(`asmzod: corrupt value tag ${tag} at ${p}`);
   }
 }

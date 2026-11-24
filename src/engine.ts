@@ -39,6 +39,16 @@ function decodeValue(r: R, hosts: HostTable): unknown {
     }
     case 7: { const n = Number(r.u64()); const a: unknown[] = []; for (let i = 0; i < n; i++) a.push(decodeValue(r, hosts)); return a; }
     case 8: return hosts[Number(r.u64())];
+    case 9: {
+      const n = Number(r.u64()); const m = new Map();
+      for (let i = 0; i < n; i++) m.set(decodeValue(r, hosts), decodeValue(r, hosts));
+      return m;
+    }
+    case 10: {
+      const n = Number(r.u64()); const s = new Set();
+      for (let i = 0; i < n; i++) s.add(decodeValue(r, hosts));
+      return s;
+    }
     default: throw new Error(`asmzod: bad value tag ${tag}`);
   }
 }
@@ -567,6 +577,32 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
     case 0x21: { // symbol
       if (typeof v !== "symbol") { pushIssue(c, "invalid_type", { expected: "symbol", received: typeName(v) }); throw FAILED; }
       return v;
+    }
+    case 0x24: { // map — [koff i64][voff i64]; issues at path [key]
+      const kp = r.pos; const kpos = kp + Number(r.i64());
+      const vp = r.pos; const vpos = vp + Number(r.i64());
+      if (!(v instanceof Map)) { pushIssue(c, "invalid_type", { expected: "map", received: typeName(v) }); throw FAILED; }
+      const out = new Map();
+      const before = c.issues.length;
+      for (const [k, vv] of v as Map<unknown, unknown>) {
+        const kr = atKey(c, k as string | number, () => tryValidate(new R(r.b, kpos), k, c));
+        const vr = atKey(c, k as string | number, () => tryValidate(new R(r.b, vpos), vv, c));
+        if (kr.ok && vr.ok) out.set(kr.value, vr.value);
+      }
+      if (c.issues.length !== before) throw FAILED;
+      return out;
+    }
+    case 0x25: { // set — [voff i64]; element issues at path []
+      const vp = r.pos; const vpos = vp + Number(r.i64());
+      if (!(v instanceof Set)) { pushIssue(c, "invalid_type", { expected: "set", received: typeName(v) }); throw FAILED; }
+      const out = new Set();
+      const before = c.issues.length;
+      for (const vv of v as Set<unknown>) {
+        const res = tryValidate(new R(r.b, vpos), vv, c);
+        if (res.ok) out.add(res.value);
+      }
+      if (c.issues.length !== before) throw FAILED;
+      return out;
     }
     case 0x22: { // custom
       const id = Number(r.u64()); const msg = msgOf(r);

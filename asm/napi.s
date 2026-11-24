@@ -1030,10 +1030,17 @@ _aznapi_run:
     b.eq .Ln_sym
     cmp w9, #0x23
     b.eq .Ln_nonopt
+    cmp w9, #0x24
+    b.eq .Ln_bail10            // map — napi bails; encode+FFI validates
+    cmp w9, #0x25
+    b.eq .Ln_bail10            // set — same
     cmp w9, #0x2A
     b.eq .Ln_msg
     mov x0, #-1000
     sub x0, x0, x9            // -1000-op reveals the unknown opcode
+    b .Ln_ret
+.Ln_bail10:
+    mov x0, #-10
     b .Ln_ret
 // 0x2A msgwrap: push (depth,msg) onto _az_msgstack, run inner, pop
 .Ln_msg:

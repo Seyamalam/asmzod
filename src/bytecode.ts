@@ -392,6 +392,27 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       return;
     }
 
+    case "map": {
+      w.u8(0x24);
+      const fk = w.field(), fv = w.field();
+      const kat = w.pos;
+      emit(w, d.keyType, hosts, unions);
+      w.patchField(fk, kat);
+      const vat = w.pos;
+      emit(w, d.valueType, hosts, unions);
+      w.patchField(fv, vat);
+      return;
+    }
+
+    case "set": {
+      w.u8(0x25);
+      const fv = w.field();
+      const at = w.pos;
+      emit(w, d.valueType, hosts, unions);
+      w.patchField(fv, at);
+      return;
+    }
+
     case "any": case "unknown": w.u8(0x15); return;
     case "never": w.u8(0x16); return;
     case "null": w.u8(0x17); return;

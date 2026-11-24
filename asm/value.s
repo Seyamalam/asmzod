@@ -16,6 +16,10 @@ _az_vsize:
     b.eq .Lvs_obj
     cmp w9, #7
     b.eq .Lvs_arr
+    cmp w9, #9
+    b.eq .Lvs_map
+    cmp w9, #10
+    b.eq .Lvs_arr           // set: n + n tagged values (same walk)
     cmp w9, #2
     b.eq .Lvs_two
     // undef null f64 bigint hostref => 1 or 9
@@ -79,6 +83,31 @@ _az_vsize:
     sub x20, x20, #1
     b .Lvs_arrloop
 .Lvs_arrdone:
+    mov x0, x21
+    ldp x19, x20, [sp, #16]
+    ldr x21, [sp, #32]
+    ldp x29, x30, [sp], #48
+    ret
+.Lvs_map:
+    // tag9: n pairs — count is 2n tagged values
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    str x21, [sp, #32]
+    mov x19, x0
+    ldr x20, [x19, #1]
+    add x20, x20, x20      // 2n values
+    add x19, x19, #9
+    mov x21, #9
+.Lvs_maploop:
+    cbz x20, .Lvs_mapdone
+    mov x0, x19
+    bl _az_vsize
+    add x19, x19, x0
+    add x21, x21, x0
+    sub x20, x20, #1
+    b .Lvs_maploop
+.Lvs_mapdone:
     mov x0, x21
     ldp x19, x20, [sp, #16]
     ldr x21, [sp, #32]

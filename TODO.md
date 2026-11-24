@@ -73,14 +73,14 @@
 - [x] 62. asmzod/lite portable-only subpath shipped
 
 ## O — compat expansion
-- [ ] 63. z.map/z.set opcodes (native)
-- [ ] 64. parseAsync/safeParseAsync (sync fast path + async refine queue)
-- [ ] 65. z.promise/z.function (portable minimum)
-- [ ] 66. Full-range bigint (hostref beyond i64)
-- [ ] 67. Remaining zod4 formats audit (base32, ipv6 compression, jwt)
-- [ ] 68. errorMap/z.config parity
-- [ ] 69. Property-based fuzz: random schemas × inputs vs zod
-- [ ] 70. Cross-engine consistency gate
+- [x] 63. z.map/z.set opcodes (native) (done: codec tags 9/10, ops 0x24/0x25 in both engines, napi bails to FFI)
+- [x] 64. parseAsync/safeParseAsync (verified vs zod) (sync fast path + async refine queue)
+- [x] 65. z.promise/z.function (verified vs zod)
+- [x] 66. Full-range bigint (hostref beyond i64) (done: hostref encode + portable bail + hostref bounds)
+- [x] 67. Remaining zod4 formats audit (base32, ipv6 compression, jwt) (done: z.hash/z.uint64 factories, base64url, ipv6 URL-parse, 15 hash formats)
+- [x] 68. errorMap/z.config parity (done: z.config/setErrorMap/per-parse params, WeakSet no leak)
+- [x] 69. Property-based fuzz: random schemas × inputs vs zod (done: fuzz.test.ts covers random schemas x inputs vs zod)
+- [x] 70. Cross-engine consistency gate (done: engines.test.ts — 1144 napi/ffi/portable comparisons, all agree)
 - [ ] 71. Perf-regression harness (>25% = fail)
 - [ ] 72. toJSONSchema parity if in scope
 

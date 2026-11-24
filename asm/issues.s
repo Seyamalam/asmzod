@@ -699,6 +699,8 @@ _az_tagname_table:
     .quad .Lt6, 6               // object
     .quad .Lt7, 5               // array
     .quad .Lt8, 7               // hostref -> "unknown" (overridden via cb)
+    .quad .Lt9, 3               // map
+    .quad .Lt10, 3              // set
 
 // host type names (cb kind 6 returns idx)
     .globl _az_hosttype_table
@@ -752,6 +754,8 @@ _az_hosttype_table:
 .Lt6:  .ascii "object"
 .Lt7:  .ascii "array"
 .Lt8:  .ascii "unknown"
+.Lt9:  .ascii "Map"
+.Lt10: .ascii "Set"
 .Lh0:  .ascii "symbol"
 .Lh1:  .ascii "Date"
 .Lh2:  .ascii "Map"

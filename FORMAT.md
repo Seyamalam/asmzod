@@ -16,6 +16,8 @@ tag 0x05 BIGINT    i64
 tag 0x06 OBJECT    u64 nfields + field*
                    field := u64 keylen + utf8 key + Value
 tag 0x07 ARRAY     u64 nelems + Value*
+tag 0x09 MAP       u64 npairs + [key:Value, val:Value]*  (JS Map)
+tag 0x0A SET       u64 nelems + Value*                   (JS Set)
 tag 0x08 HOSTREF   u64 index   (index into JS-side host value table;
                                 used for symbols, Dates, class instances,
                                 functions, anything not serializable)
@@ -52,6 +54,8 @@ Node := opcode:u8 fields...
 0x12 INTERSECT     u64 left + u64 right           (mergeable objects only v1)
 0x13 TUPLE         u64 n + u64 item_off* + u64 rest_off (0 = none)
 0x14 RECORD        u64 key_off + u64 val_off      (key_off 0 = unconstrained)
+0x24 MAP         i64 key_off + i64 val_off        (input tag 9; issues at path [key])
+0x25 SET         i64 val_off                      (input tag 10; issues at path [])
 0x15 ANY
 0x16 NEVER
 0x17 NULL_T

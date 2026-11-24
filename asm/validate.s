@@ -25,7 +25,7 @@ _az_validate:
     ldrb w9, [x27]
     cmp w9, #0x2A
     b.eq .Lv_msgnode
-    cmp w9, #0x23
+    cmp w9, #0x25
     b.hi .Lv_badop
     AZ_ADR x10, .Lv_jt
     ldr x11, [x10, x9, lsl #3]
@@ -98,7 +98,7 @@ _az_validate:
     ldrb w9, [x27]
     cmp w9, #0x2A
     b.eq .Lv_msgnode
-    cmp w9, #0x23
+    cmp w9, #0x25
     b.hi .Lv_badop
     AZ_ADR x10, .Lv_jt
     ldr x11, [x10, x9, lsl #3]
@@ -544,7 +544,13 @@ _az_vtype:
     cmp w9, #6
     b.eq .Ldu_obj
     cmp w9, #8
-    b.ne .Ldu_typefail
+    b.eq .Ldu_hr
+    cmp w9, #9
+    b.eq .Ldu_hrobj            // map — object-like
+    cmp w9, #10
+    b.eq .Ldu_hrobj            // set — object-like
+    b .Ldu_typefail
+.Ldu_hr:
     // hostref: object-like kinds (date/map/set/object/unknown/Invalid Date)
     // take the no-matching-discriminator path like zod; symbol/function/
     // bigint are invalid_type
@@ -559,6 +565,7 @@ _az_vtype:
     b.eq .Ldu_typefail         // function
     cmp x0, #8
     b.eq .Ldu_typefail         // bigint
+.Ldu_hrobj:
     ldr x13, [x27, #1]         // dnamelen
     add x14, x27, #9           // dname
     b .Ldu_fail
@@ -747,7 +754,25 @@ _az_vtype:
 .Lv_instof:
     ldrb w9, [x28]
     cmp w9, #8
+    b.eq .Lio_hr
+    cmp w9, #9
+    b.eq .Lio_tag
+    cmp w9, #10
     b.ne .Lio_fail
+.Lio_tag:
+    // tag9/10 values are real Map/Set by construction — cb kind9 compares
+    // the implied ctor to the schema's without a host slot
+    ldr x9, [x24, #24]         // cb_host
+    mov x0, #9
+    mov w1, w9
+    ldr x2, [x27, #1]          // cbid (ctor idx)
+    mov x3, #0
+    blr x9
+    cmp x0, #0
+    b.eq .Lio_fail
+    mov x9, #9
+    b .Lv_passn
+.Lio_hr:
     ldr x9, [x24, #24]         // cb_host
     mov x0, #1                 // instanceof
     ldr x1, [x27, #1]          // cbid
@@ -1334,6 +1359,8 @@ _az_strtoi:
     .quad .Lv_symbol
     .quad .Lv_custom
     .quad .Lv_nonopt
+    .quad .Lv_map
+    .quad .Lv_set
 
     AZ_RODATA
 .Lex_string:    .ascii "string"
@@ -1351,6 +1378,8 @@ _az_strtoi:
 .Lex_array:     .ascii "array"
 .Lex_tuple:     .ascii "tuple"
 .Lex_nonopt:    .ascii "nonoptional"
+.Lex_map:       .ascii "map"
+.Lex_set:       .ascii "set"
 .Lty_array:     .ascii "array"
 .Lk_expected2:  .ascii "expected"
 .Lk_received2:  .ascii "received"
@@ -1993,6 +2022,264 @@ _az_strtoi:
     mov x0, #-2
     b .Lv_ret
 
+// ---------- 0x24 MAP ----------
+// [op][koff i64 @+1][voff i64 @+9] — input tag9: u64 n | [kTagged,vTagged]*n
+// issues at path [key]; output = tag9 of validated pairs
+// slots: 40 n 48 cur 56 savedpr 64 i 72 failed 80 knode 88 vnode
+//        96 kptr 104 vptr 112 kst 120 kout 128 vst 136 vout
+.Lv_map:
+    ldrb w9, [x28]
+    cmp w9, #9
+    b.eq .Lmp_tok
+    AZ_ADR x0, .Lex_map
+    mov x1, #3
+    b _az_vtype
+.Lmp_tok:
+    ldr x9, [x28, #1]
+    str x9, [sp, #40]          // n
+    add x9, x28, #9
+    str x9, [sp, #48]          // cur pair ptr
+    str x20, [sp, #56]         // saved pair pos
+    str xzr, [sp, #64]         // i
+    str xzr, [sp, #72]         // failed
+    add x9, x27, #1
+    ldr x10, [x9]
+    add x9, x9, x10
+    str x9, [sp, #80]          // key node
+    add x9, x27, #9
+    ldr x10, [x9]
+    add x9, x9, x10
+    str x9, [sp, #88]          // val node
+.Lmp_loop:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #40]
+    cmp x9, x10
+    b.hs .Lmp_emit
+    ldr x11, [sp, #48]
+    str x11, [sp, #96]         // kptr
+    mov x0, x11
+    bl _az_vsize
+    ldr x9, [sp, #96]
+    add x9, x9, x0
+    str x9, [sp, #104]         // vptr
+    // path = key: str -> bytes, int-ish -> idx, else idx i
+    ldr x9, [sp, #96]
+    ldrb w10, [x9]
+    cmp w10, #4
+    b.ne .Lmp_knum
+    add x0, x9, #9
+    ldr x1, [x9, #1]
+    bl _az_path_push_key
+    b .Lmp_pk
+.Lmp_knum:
+    cmp w10, #3
+    b.ne .Lmp_kother
+    ldr d0, [x9, #1]
+    fcvtzs x0, d0
+    b .Lmp_ki
+.Lmp_kother:
+    cmp w10, #5
+    b.ne .Lmp_kidx
+    ldr x0, [x9, #1]
+    b .Lmp_ki
+.Lmp_kidx:
+    ldr x0, [sp, #64]
+.Lmp_ki:
+    bl _az_path_push_idx
+.Lmp_pk:
+    ldr x0, [sp, #80]
+    ldr x1, [sp, #96]
+    bl _az_validate
+    str x0, [sp, #112]
+    stp x1, x2, [sp, #120]     // kout
+    ldr x0, [sp, #88]
+    ldr x1, [sp, #104]
+    bl _az_validate
+    str x0, [sp, #152]
+    stp x1, x2, [sp, #136]     // vout
+    bl _az_path_pop
+    ldr x0, [sp, #112]
+    ldr x9, [sp, #152]
+    mov x10, #-2
+    cmp x0, x10
+    b.eq .Lmp_vchk
+    cbnz x0, .Lv_ret           // hard error
+.Lmp_vchk:
+    cmp x9, x10
+    b.eq .Lmp_soft
+    cbnz x9, .Lv_ret
+    orr x10, x0, x9
+    cbnz x10, .Lmp_soft
+    // both ok — stage (kout,vout)
+    ldp x0, x1, [sp, #120]
+    ldp x2, x3, [sp, #136]
+    mov x4, #0
+    bl _az_pair_push40
+    cbnz x0, .Lv_ret
+    b .Lmp_next
+.Lmp_soft:
+    mov x9, #1
+    str x9, [sp, #72]
+.Lmp_next:
+    ldr x0, [sp, #104]
+    bl _az_vsize
+    ldr x9, [sp, #104]
+    add x9, x9, x0
+    str x9, [sp, #48]
+    ldr x9, [sp, #64]
+    add x9, x9, #1
+    str x9, [sp, #64]
+    b .Lmp_loop
+.Lmp_emit:
+    ldr x9, [sp, #72]
+    cbnz x9, .Lmp_fail_pop
+    str x19, [sp, #88]         // emit start S
+    mov w0, #9
+    bl _az_vw1
+    cbnz x0, .Lv_ret
+    ldr x0, [sp, #40]
+    bl _az_vw8
+    cbnz x0, .Lv_ret
+    str xzr, [sp, #64]
+.Lmp_eloop:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #40]
+    cmp x9, x10
+    b.hs .Lmp_edone
+    sub x11, x10, x9
+    sub x11, x11, #1
+    mov x12, #40
+    mul x11, x11, x12
+    add x11, x20, x11
+    str x11, [sp, #120]
+    ldp x0, x1, [x11]
+    bl _az_vw                  // key tagged bytes
+    cbnz x0, .Lv_ret
+    ldr x11, [sp, #120]
+    ldp x0, x1, [x11, #16]
+    bl _az_vw                  // val tagged bytes
+    cbnz x0, .Lv_ret
+    ldr x9, [sp, #64]
+    add x9, x9, #1
+    str x9, [sp, #64]
+    b .Lmp_eloop
+.Lmp_edone:
+    ldr x9, [sp, #88]
+    sub x2, x19, x9
+    mov x1, x9
+    mov x0, #0
+    ldr x9, [sp, #40]
+    mov x10, #40
+    mul x9, x9, x10
+    add x20, x20, x9           // consume staged pairs
+    b .Lv_ret
+.Lmp_fail_pop:
+    ldr x20, [sp, #56]         // drop everything this map staged
+    mov x0, #-2
+    b .Lv_ret
+
+// ---------- 0x25 SET ----------
+// [op][voff i64 @+1] — input tag10: u64 n | [vTagged]*n
+// element issues at path [] (no path push, matches zod)
+// slots: 40 n 48 cur 56 savedpr 64 i 72 failed 88 vnode 104 vptr 136 vout
+.Lv_set:
+    ldrb w9, [x28]
+    cmp w9, #10
+    b.eq .Lst_tok
+    AZ_ADR x0, .Lex_set
+    mov x1, #3
+    b _az_vtype
+.Lst_tok:
+    ldr x9, [x28, #1]
+    str x9, [sp, #40]
+    add x9, x28, #9
+    str x9, [sp, #48]
+    str x20, [sp, #56]
+    str xzr, [sp, #64]
+    str xzr, [sp, #72]
+    add x9, x27, #1
+    ldr x10, [x9]
+    add x9, x9, x10
+    str x9, [sp, #88]          // val node
+.Lst_loop:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #40]
+    cmp x9, x10
+    b.hs .Lst_emit
+    ldr x9, [sp, #48]
+    str x9, [sp, #104]         // vptr
+    ldr x0, [sp, #88]
+    mov x1, x9
+    bl _az_validate
+    str x0, [sp, #128]
+    stp x1, x2, [sp, #136]     // vout
+    ldr x0, [sp, #128]
+    cmp x0, #-2
+    b.eq .Lst_soft
+    cbnz x0, .Lv_ret
+    mov x0, #0
+    mov x1, #0
+    ldp x2, x3, [sp, #136]
+    mov x4, #0
+    bl _az_pair_push40
+    cbnz x0, .Lv_ret
+    b .Lst_next
+.Lst_soft:
+    mov x9, #1
+    str x9, [sp, #72]
+.Lst_next:
+    ldr x0, [sp, #104]
+    bl _az_vsize
+    ldr x9, [sp, #104]
+    add x9, x9, x0
+    str x9, [sp, #48]
+    ldr x9, [sp, #64]
+    add x9, x9, #1
+    str x9, [sp, #64]
+    b .Lst_loop
+.Lst_emit:
+    ldr x9, [sp, #72]
+    cbnz x9, .Lst_fail_pop
+    str x19, [sp, #88]
+    mov w0, #10
+    bl _az_vw1
+    cbnz x0, .Lv_ret
+    ldr x0, [sp, #40]
+    bl _az_vw8
+    cbnz x0, .Lv_ret
+    str xzr, [sp, #64]
+.Lst_eloop:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #40]
+    cmp x9, x10
+    b.hs .Lst_edone
+    sub x11, x10, x9
+    sub x11, x11, #1
+    mov x12, #40
+    mul x11, x11, x12
+    add x11, x20, x11
+    ldp x0, x1, [x11, #16]     // vptr,vlen half
+    bl _az_vw
+    cbnz x0, .Lv_ret
+    ldr x9, [sp, #64]
+    add x9, x9, #1
+    str x9, [sp, #64]
+    b .Lst_eloop
+.Lst_edone:
+    ldr x9, [sp, #88]
+    sub x2, x19, x9
+    mov x1, x9
+    mov x0, #0
+    ldr x9, [sp, #40]
+    mov x10, #40
+    mul x9, x9, x10
+    add x20, x20, x9
+    b .Lv_ret
+.Lst_fail_pop:
+    ldr x20, [sp, #56]
+    mov x0, #-2
+    b .Lv_ret
+
 // ---------- 0x05 OBJECT ----------
 // [op][mode u8][catchall i64 @+2][nfields u64 @+10][fields @+18]
 // field: u64 namelen + name + i64 off. pair40: {kptr,klen,vptr,vlen,flags}
@@ -2004,7 +2291,13 @@ _az_strtoi:
     cmp w9, #6
     b.eq .Lob_tok
     cmp w9, #8
-    b.ne .Lob_tfail
+    b.eq .Lob_hr
+    cmp w9, #9
+    b.eq .Lob_empty            // map — object-like, no own keys
+    cmp w9, #10
+    b.eq .Lob_empty            // set — same
+    b .Lob_tfail
+.Lob_hr:
     // hostref: zod treats Date/Map/Set/class instances as {} —
     // but functions and symbols are not objects
     ldr x9, [x24, #24]
@@ -2016,6 +2309,7 @@ _az_strtoi:
     cbz x0, .Lob_tfail         // symbol
     cmp x0, #4
     b.eq .Lob_tfail            // function
+.Lob_empty:
     // materialize empty object in arena, validate normally
     mov x0, #9
     bl _az_val_reserve

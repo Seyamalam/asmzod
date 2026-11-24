@@ -18,6 +18,7 @@ const OPS: Record<number, string> = {
   0x15: "ANY", 0x16: "NEVER", 0x17: "NULL_T", 0x18: "UNDEF_T",
   0x19: "NAN", 0x1a: "LAZY", 0x1b: "INSTANCEOF", 0x1c: "COERCE_STR",
   0x1d: "COERCE_NUM", 0x1e: "COERCE_BOOL", 0x1f: "COERCE_BIGINT",
+  0x24: "MAP", 0x25: "SET",
   0x20: "DATE", 0x21: "SYMBOL", 0x22: "CUSTOM", 0x2a: "MSGWRAP",
 };
 const STRCHK: Record<number, string> = {
@@ -98,6 +99,8 @@ function node(off: number, depth: number) {
     case 0x13: { const n = u64(); for (let i = 0; i < n; i++) kids.push(rel()); const r = rel(); if (r) kids.push(r);
       info = ` n=${n}${r ? ` rest->@${r}` : ""}`; break; }
     case 0x14: { const k = rel(); const v = rel(); info = ` key->@${k} val->@${v}`; if (k) kids.push(k); kids.push(v); break; }
+    case 0x24: { const k = rel(); const v = rel(); info = ` key->@${k} val->@${v}`; kids.push(k, v); break; }
+    case 0x25: { const v = rel(); info = ` val->@${v}`; kids.push(v); break; }
     case 0x1a: { const cb = u64(); info = ` cb=${cb}`; break; }
     case 0x1b: { const cb = u64(); info = ` cb=${cb} name=${JSON.stringify(str())}`; break; }
     case 0x20: { const n = u8(); for (let i = 0; i < n; i++) info += "\n" + ind + "  " + check(NUMCHK, NUM_PARAM); break; }

@@ -117,6 +117,10 @@ const cbHost = new JSCallback(
           new DataView(buf).setFloat64(0, t, true);
           return new DataView(buf).getBigInt64(0, true);
         }
+        case 9: { // tag->ctor for map/set tags: a=tag b=ctoridx
+          const T = Number(a) === 9 ? Map : Number(a) === 10 ? Set : null;
+          return T !== null && reg.ctor[Number(b)] === T ? 1n : 0n;
+        }
         case 4: { // custom: a=cbid b=valptr
           const [v] = decodeAt(Number(b), curHosts);
           return reg.custom[Number(a)](v) ? 1n : 0n;

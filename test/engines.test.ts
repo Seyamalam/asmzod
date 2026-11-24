@@ -43,6 +43,9 @@ test("cross-engine consistency: napi vs ffi vs portable", () => {
     ["hash", z.hash("sha256")],
     ["ipv6", z.string().ipv6()],
     ["date-iso", z.string().date()],
+    ["map", z.map(z.string(), z.number())],
+    ["set", z.set(z.number())],
+    ["map-nested", z.object({ m: z.map(z.string(), z.number()) })],
   ];
   const values: unknown[] = [
     "hi", "", "toolongstringvalue", 3, -5, 3.5, NaN, 0, 100,
