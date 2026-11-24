@@ -207,10 +207,16 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       w.u64(keys.length);
       const fps: number[] = [];
       for (const k of keys) {
-        // absent key: 0 -> nonoptional issue; 1 -> run inner on undefined;
-        // 2 (exactOptional) -> skip the field entirely
-        const fd = (d.shape[k] as any)._def;
-        w.u8(fd?.type === "exactOptional" ? 2 : (d.shape[k] as any)._zod?.optin !== undefined ? 1 : 0);
+        // absent key handling, mirroring zod's handlePropertyResult rungs:
+        // 0 -> required (nonoptional issue when inner accepts undefined);
+        // 1 -> defaulted-in + optional-out (run, swallow failure);
+        // 2 -> optin==="optional" + optional-out (contributes nothing);
+        // 3 -> omittable-in but non-optional-out (run, failures surface)
+        const fo = (d.shape[k] as any)._zod;
+        const opt = fo?.optin === undefined ? 0
+          : fo.optout === "optional" ? (fo.optin === "optional" ? 2 : 1)
+          : 3;
+        w.u8(opt);
         const kb = enc.encode(k);
         w.u64(kb.length); w.raw(kb);
         fps.push(w.field());
@@ -331,8 +337,20 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       emit(w, d.inner, hosts, unions);
       return;
 
-    case "optional": case "nullable": case "nonoptional": {
-      w.u8(d.type === "optional" ? 0x0b : d.type === "nullable" ? 0x0c : 0x23);
+    case "optional":
+      // a defaulted inner substitutes its own value for undefined, making
+      // the optional wrapper semantically transparent — emit it directly
+      if (d.inner?._zod?.optin === "defaulted") { emit(w, d.inner, hosts, unions); return; }
+      w.u8(0x0b);
+      {
+        const fp = w.field();
+        const at = w.pos;
+        emit(w, d.inner, hosts, unions);
+        w.patchField(fp, at);
+        return;
+      }
+    case "nullable": case "nonoptional": {
+      w.u8(d.type === "nullable" ? 0x0c : 0x23);
       const f = w.field();
       const at = w.pos;
       emit(w, d.inner, hosts, unions);

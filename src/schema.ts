@@ -842,7 +842,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   /** optional in objects but rejects explicit undefined */
   exactOptional(): ZodOptional<this> {
-    return new ZodOptional({ type: "exactOptional", inner: this });
+    return new ZodExactOptional({ type: "exactOptional", inner: this });
   }
   nullable(): ZodNullable<this> {
     return new ZodNullable({ type: "nullable", inner: this });
@@ -1416,13 +1416,24 @@ export class ZodOptional<T extends ZodTypeAny> extends ZodType<T["_output"] | un
   constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
-    if (this._isRec()) {
-      if (data === undefined) return { ok: true as const, value: undefined };
+    const defaulted = (this._def.inner as any)?._zod?.optin === "defaulted";
+    if (this._isRec() || defaulted) {
+      if (data === undefined) {
+        if (!defaulted) return { ok: true as const, value: undefined };
+        // zod: the defaulted inner substitutes for absence; its failure
+        // yields undefined with the issues dropped (handleOptionalResult)
+        const r = (this._def.inner as any)._run(data);
+        return { ok: true as const, value: r.ok ? r.value : undefined };
+      }
       return (this._def.inner as any)._run(data);
     }
     return super._runImpl(data);
   }
 }
+// exactOptional is optional minus the undefined short-circuit: absent keys
+// pass, explicit undefined falls through to the inner schema's own check
+export class ZodExactOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodOptional<T> {}
+
 export class ZodNullable<T extends ZodTypeAny> extends ZodType<T["_output"] | null, T["_input"] | null> {
   constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
@@ -1559,6 +1570,14 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
     while (s instanceof ZodEffects && (s._def.kind === "refine" || s._def.kind === "superrefine")) s = s._def.inner;
     if (s instanceof ZodTuple) throw new Error(".partial() cannot be used on tuple schemas containing refinements");
     throw new Error("Invalid input to partial: expected an object schema");
+  }
+  exactPartial(): any {
+    if (this._refinedObj()) throw new Error(".exactPartial() cannot be used on object schemas containing refinements");
+    throw new Error("Invalid input to exactPartial: expected an object schema");
+  }
+  required(mask?: Record<string, true>): any {
+    if (this._refinedObj()) return this._mapRefinedObj((o: any) => o.required(mask));
+    throw new Error("Invalid input to required: expected an object schema");
   }
 
   // effects always run at the TS level — the compiled engine can't host them
@@ -1916,25 +1935,35 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
       const f = shape[k];
       if (!_isSchema(f)) throw new Error(`Invalid element at key "${String(k)}"`);
       const present = k in view;
-      if (!present && f._def?.type === "exactOptional") continue;
+      const foptin = f._zod.optin;
+      const isOptionalOut = f._zod.optout === "optional";
       const mark = pendingAsync.length;
       const res = (f as any)._run(view[k]);
       for (let i = mark; i < pendingAsync.length; i++)
         (pendingAsync[i] as any).path = [k, ...((pendingAsync[i] as any).path ?? [])];
-      if (!present && res.ok && f._zod.optin === undefined) {
-        issues.push({ code: "invalid_type", expected: "nonoptional",
-          path: [k], message: "Invalid input: expected nonoptional, received undefined" });
+      // handlePropertyResult: absent + optin==="optional" + optional-out
+      // contributes nothing — the invented value is dropped, never substituted
+      if (!present && isOptionalOut && foptin === "optional") { pendingAsync.length = mark; continue; }
+      if (!res.ok) {
+        // absent + omittable + optional-out swallows the failure outright
+        if (!present && foptin !== undefined && isOptionalOut) { pendingAsync.length = mark; continue; }
+        for (const i of res.issues) issues.push({ ...i, path: [k, ...(i.path ?? [])] });
+      }
+      // absent + required contributes the nonoptional issue, never a value
+      if (!present && foptin === undefined) {
+        if (res.ok)
+          issues.push({ code: "invalid_type", expected: "nonoptional",
+            path: [k], message: "Invalid input: expected nonoptional, received undefined" });
         continue;
       }
-      // absent + omittable -> best-effort run; zod swallows its failure
-      if (!present && !res.ok && f._zod.optin !== undefined) { pendingAsync.length = mark; continue; }
-      if (res.ok) {
-        if (present || res.value !== undefined) out[k] = res.value;
+      // a failed field still supplies its payload value (checks see the
+      // partial object); absent + defaulted + non-optional-out materializes
+      // undefined, anything else absent contributes nothing
+      const val = res.ok ? res.value : ("value" in (res as any) ? res.value : view[k]);
+      if (val === undefined) {
+        if (present || (foptin === "defaulted" && !isOptionalOut)) out[k] = undefined;
       } else {
-        for (const i of res.issues) issues.push({ ...i, path: [k, ...(i.path ?? [])] });
-        // best-effort: keep the field's last-known value so downstream
-        // checks see the same partial object zod's payload carries
-        out[k] = "value" in (res as any) ? res.value : view[k];
+        out[k] = val;
       }
     }
     const extra = Object.keys(view).filter((k) => !consumed.has(k));
@@ -1987,11 +2016,18 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     return new ZodObject({ ...this._def, shape, checks: [] }) as ZodObject<Omit<T, K>>;
   }
   partial(mask?: Record<string, true>) {
-    if (this._def.checks?.length) throw new Error(".partial() cannot be used on object schemas containing refinements");
+    return this._partial(ZodOptional, mask, "partial");
+  }
+  exactPartial(mask?: Record<string, true>) {
+    return this._partial(ZodExactOptional, mask, "exactPartial");
+  }
+  private _partial(Cls: any, mask: Record<string, true> | undefined, name: string) {
+    if (this._def.checks?.length) throw new Error(`.${name}() cannot be used on object schemas containing refinements`);
     const sel = mask ? new Set(_maskedKeys(this._def.shape, mask)) : undefined;
+    const type = Cls === ZodExactOptional ? "exactOptional" : "optional";
     const shape: any = {};
     _mirrorShape(shape, this, _shapeKeys(this._def.shape),
-      (v, k) => (sel && !sel.has(k) ? v : new ZodOptional({ type: "optional", inner: v })));
+      (v, k) => (sel && !sel.has(k) ? v : new Cls({ type, inner: v })));
     return new ZodObject({ ...this._def, shape, checks: [] });
   }
   required(mask?: Record<string, true>) {
@@ -2030,7 +2066,6 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     if (!_isPlainObject(s)) throw new Error("Invalid input to safeExtend: expected a plain object");
     return this._extend(s);
   }
-  exactPartial() { return this.partial(); }
   private _extend<S extends ZodRawShape>(s: S) {
     const shape: any = {};
     _mirrorShape(shape, this, _shapeKeys(this._def.shape));

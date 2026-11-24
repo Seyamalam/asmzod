@@ -324,20 +324,28 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
         // strips it everywhere; it only counts as a known key below
         if (f.name === "__proto__") continue;
         const present = Object.prototype.hasOwnProperty.call(obj, f.name);
-        // absent: exactOptional skips the field entirely
+        // opt 2: absent optin==="optional"+optional-out contributes nothing
         if (!present && f.opt === 2) continue;
         const raw = obj[f.name];
         const mark = c.issues.length;
         const res = atKey(c, f.name, () => tryValidate(new R(r.b, f.pos), raw, c));
-        // absent + optin -> the inner run is best-effort: zod swallows its
-        // failure (issues and value alike) and drops the key
+        // opt 1: absent + omittable + optional-out swallows its failure whole
         if (!present && f.opt === 1 && !res.ok) { c.issues.length = mark; continue; }
         // absent + required but inner accepted undefined -> nonoptional issue
         if (!present && f.opt === 0 && res.ok) {
           atKey(c, f.name, () => pushIssue(c, "invalid_type", { expected: "nonoptional", received: "undefined" }));
           continue;
         }
-        if (res.ok && (present || res.value !== undefined)) out[f.name] = res.value;
+        // absent + opt 0 -> no value lands regardless of the run
+        if (!present && f.opt === 0) continue;
+        // zod writes the field's payload value even on failure; absent fields
+        // only write defined values unless they are defaulted non-optional-out
+        const val = res.ok ? res.value : raw;
+        if (val === undefined) {
+          if (present || f.opt === 3) out[f.name] = undefined;
+        } else {
+          out[f.name] = val;
+        }
       }
       const extra = Object.keys(obj).filter((k) => !consumed.has(k));
       if (mode === 1 && extra.length) {

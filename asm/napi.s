@@ -3142,11 +3142,13 @@ _azn_encval:
     ldr x0, [sp, #LN_H]
     cmp x0, #-2
     b.ne .Ln_obj_st           // 0 ok / hard error
-    // absent + optin flag -> best-effort run: swallow issues + drop the field
+    // absent + opt 1 -> best-effort run: swallow issues + drop the field;
+    // opt 3 failures surface, same as a required field's
     ldrb w9, [sp, #LN_O]
     cbnz w9, .Ln_obj_fmark
     ldr x9, [sp, #LN_M]
-    cbz x9, .Ln_obj_fmark
+    cmp x9, #1
+    b.ne .Ln_obj_fmark
     ldr x21, [sp, #LN_S]      // restore issue cursor
     ldr x9, [sp, #LN_T]
     str x9, [x22]             // restore issue count
@@ -3154,11 +3156,23 @@ _azn_encval:
 .Ln_obj_fmark:
     mov x9, #1
     str x9, [sp, #LN_I]
-    b .Ln_obj_adv
+    // absent opt-3 (defaulted non-optional-out) still lands as key: undefined
+    ldrb w9, [sp, #LN_O]
+    cbnz w9, .Ln_obj_adv
+    ldr x9, [sp, #LN_M]
+    cmp x9, #3
+    b.ne .Ln_obj_adv
+    AZ_ADR x9, _azn_undef
+    ldr x9, [x9]
+    str x9, [sp, #LN_G]
+    b .Ln_obj_wk
 .Ln_obj_st:
     cbnz x0, .Ln_ret
     ldrb w9, [sp, #LN_O]      // present -> always write the key
     cbnz w9, .Ln_obj_wk
+    ldr x9, [sp, #LN_M]       // opt 3 -> write even undefined outputs
+    cmp x9, #3
+    b.eq .Ln_obj_wk
     ldr x0, [sp, #LN_G]       // absent -> write only real outputs (defaults)
     bl _azn_typeof
     cmp w0, #NAPI_UNDEF

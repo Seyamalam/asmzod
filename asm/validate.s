@@ -2487,7 +2487,12 @@ _az_strtoi:
     ldr x0, [sp, #96]
     ldr x1, [sp, #88]
     ldr x4, [sp, #120]
-    cbz x4, .Lob_nf
+    cbnz x4, .Lob_gf1
+    // opt 3 (omittable-in, non-optional-out) materializes absent keys too
+    ldr x4, [sp, #176]
+    cmp x4, #3
+    b.ne .Lob_nf
+.Lob_gf1:
     mov x4, #1
 .Lob_nf:
     bl _az_pair_push40
@@ -2496,11 +2501,13 @@ _az_strtoi:
 .Lob_fbad:
     cmp x0, #-2
     b.ne .Lv_ret
-    // absent + optin flag -> best-effort run: swallow issues + drop the field
+    // absent + opt 1 -> best-effort run: swallow issues + drop the field;
+    // opt 3 failures surface, same as a required field's
     ldr x9, [sp, #120]
     cbnz x9, .Lob_fmark
     ldr x9, [sp, #176]
-    cbz x9, .Lob_fmark
+    cmp x9, #1
+    b.ne .Lob_fmark
     ldr x21, [sp, #208]        // restore issue cursor
     ldr x9, [sp, #216]
     str x9, [x22]              // restore issue count
@@ -2508,10 +2515,22 @@ _az_strtoi:
 .Lob_fmark:
     mov x9, #1
     str x9, [sp, #56]
-    ldp x2, x3, [sp, #152]
     ldr x0, [sp, #96]
     ldr x1, [sp, #88]
+    ldr x2, [sp, #120]
+    cbnz x2, .Lob_fm0           // present-fail: keep existing no-write
+    ldr x9, [sp, #176]
+    cmp x9, #3
+    b.ne .Lob_fm0
+    // absent opt-3 defaulted field still lands as `key: undefined`
+    AZ_ADR x2, .Lundef_val
+    mov x3, #0
+    mov x4, #1
+    b .Lob_fmp
+.Lob_fm0:
+    mov x3, #0
     mov x4, #0
+.Lob_fmp:
     bl _az_pair_push40
     cbnz x0, .Lv_ret
 .Lob_fnext:
