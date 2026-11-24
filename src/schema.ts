@@ -2,7 +2,7 @@
 import { compile, type Compiled } from "./bytecode.ts";
 import { engineParse, portableEngineParse, reg, regId } from "./ffi.ts";
 import * as napiBackend from "./native/napi.ts";
-import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, globalConfig, defaultedIssues } from "./shared.ts";
+import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, stripInternalFrames, globalConfig, defaultedIssues } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, ZodRealError, type ZodIssue } from "./error.ts";
 import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx, FORMAT_PATTERNS } from "./shared.ts";
@@ -628,7 +628,7 @@ export const _parse = (Err: any) => {
     const r = _runScoped(schema, value, ctx);
     if (!r.ok) {
       const e = new (_params?.Err ?? Err)(r.issues.map((i: any) => finalizeIssueTree(i, ctx, globalConfig)));
-      captureStackTrace(e, _params?.callee ?? fn);
+      captureStackTrace(e, _params?.callee ?? fn); stripInternalFrames(e);
       throw e;
     }
     return r.value;
@@ -649,7 +649,7 @@ export const _parseAsync = (Err: any) => {
     if (r instanceof Promise) r = await r;
     if (!r.ok) {
       const e = new (_params?.Err ?? Err)(r.issues.map((i: any) => finalizeIssueTree(i, ctx, globalConfig)));
-      captureStackTrace(e, _params?.callee ?? fn);
+      captureStackTrace(e, _params?.callee ?? fn); stripInternalFrames(e);
       throw e;
     }
     return r.value;
@@ -669,9 +669,11 @@ export const _safeParseAsync = (Err: any) => async (schema: any, value: unknown,
 export const _mkEncode = (Err: any) => {
   const fn = (schema: any, value: unknown, _ctx?: any, _params?: any) => {
     try {
-      return _encodeScoped(schema, value);
+      const r = _encodeScoped(schema, value);
+      if (isThenable(r)) throw new AsyncCheckError();
+      return r;
     } catch (e: any) {
-      if (e instanceof Error) captureStackTrace(e, _params?.callee ?? fn);
+      if (e instanceof Error) captureStackTrace(e, _params?.callee ?? fn); stripInternalFrames(e);
       throw e;
     }
   };
@@ -685,7 +687,7 @@ export const _mkEncodeAsync = (Err: any) => {
       if (r instanceof Promise) r = await r;
       return r;
     } catch (e: any) {
-      if (e instanceof Error) captureStackTrace(e, _params?.callee ?? fn);
+      if (e instanceof Error) captureStackTrace(e, _params?.callee ?? fn); stripInternalFrames(e);
       throw e;
     }
   };
@@ -718,6 +720,16 @@ export const _safeDecodeAsync = _safeParseAsync;
 export abstract class ZodType<Output = unknown, Input = Output> {
   readonly _output!: Output;
   readonly _input!: Input;
+  // $ZodType.init — installs the _zod internals a $constructor-built class
+  // needs; the TS-level _run shim drives custom parses through it
+  static init(inst: any, def: any) {
+    inst._zod = {
+      def,
+      traits: new Set([inst.constructor]),
+      run: (payload: any, ctx: any) => inst._zod.parse(payload, ctx),
+      parse: (payload: any) => payload,
+    };
+  }
   __def: any;
   // inner/innerType alias the same child — zod's clone writes innerType, our
   // builders write inner; whichever side arrives wins and the other syncs
@@ -920,23 +932,30 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   // fns) can't compile — zod runs checks positionally on the payload, so the
   // TS path walks them in order: compilable records through a single-check
   // sibling, tx rewriting the value in place, fns pushing issues
-  private _runChecksTS(data: unknown, checks: any[]): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
-    const Base = this.constructor as any;
-    const base = new Base({ ...this._def, checks: [] });
-    const r = base._run(data);
-    // zod still walks the check records on a failed base — their issues
-    // surface alongside invalid_type (min_length on a number, etc.)
+  protected _runChecksTS(data: unknown, checks: any[], baseResult?: any, carrier?: any): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
+    const Base = (carrier?.constructor ?? this.constructor) as any;
+    const carrierDef = carrier?._def ?? this._def;
+    const r = baseResult ?? new Base({ ...carrierDef, checks: [] })._run(data);
+    // zod: a failed base implicitly aborts the payload — only `when`-gated
+    // checks still evaluate (length/size bounds on values carrying the field)
     let v = r.ok ? r.value : data;
     const issues: ZodIssue[] = r.ok ? [] : [...r.issues];
+    const whenOK = (c: any): boolean => {
+      if (c?.kind === "min" || c?.kind === "max" || c?.kind === "length")
+        return v != null && (v as any).length !== undefined;
+      if (c?.kind === "size") return v != null && (v as any).size !== undefined;
+      return false;
+    };
     for (let i = 0; i < checks.length; i++) {
       const c = checks[i];
+      if (!r.ok && !whenOK(c)) continue;
       if (typeof c === "function" || c.kind === "checkfn") {
         const fn = typeof c === "function" ? c : c.fn;
         const payload = { value: v, issues: [] as any[] };
         const pr = fn(payload);
         if (isThenable(pr)) {
           if (!asyncMode) throw new AsyncCheckError();
-          pendingAsync.push({ type: "checkchain", checks: checks.slice(i + 1), ctor: Base, def: this._def, tx: pr, pre: issues.splice(0), inst: this } as any);
+          pendingAsync.push({ type: "checkchain", checks: checks.slice(i + 1), ctor: Base, def: carrierDef, tx: pr, pre: issues.splice(0), inst: this } as any);
           return { ok: true as const, value: v };
         }
         issues.push(...payload.issues);
@@ -946,7 +965,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         const nv = c.tx(v);
         if (isThenable(nv)) {
           if (!asyncMode) throw new AsyncCheckError();
-          pendingAsync.push({ type: "checkchain", checks: checks.slice(i + 1), ctor: Base, def: this._def, tx: nv, pre: issues.splice(0), inst: this } as any);
+          pendingAsync.push({ type: "checkchain", checks: checks.slice(i + 1), ctor: Base, def: carrierDef, tx: nv, pre: issues.splice(0), inst: this } as any);
           return { ok: true as const, value: v };
         }
         v = nv;
@@ -978,7 +997,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
                         includes: c.value, input: v, path: [], message: c.message } as any);
         continue;
       }
-      const rr = new Base({ ...this._def, checks: [c] })._run(v);
+      const rr = new Base({ ...carrierDef, checks: [c] })._run(v);
+      // a failed base already emitted invalid_type — the check run repeats it
       // a failed base already emitted invalid_type — the check run repeats it
       if (!rr.ok) issues.push(...(r.ok ? rr.issues : rr.issues.filter((i: any) => i.code !== "invalid_type")));
       else v = rr.value;
@@ -1262,6 +1282,23 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         if (!or.ok)
           return { value: root, issues: or.issues.map((i: any) => ({ ...i, path: [...(p ?? []), ...(i.path ?? [])] })) };
         return { value: setPath(root, p, or.value), issues: [] };
+      }
+      if (st.type === "codecout") {
+        // async codec transform resolved — run `out`, then codec checks
+        const cv = await st.tx;
+        const mark = pendingAsync.length;
+        const or = (st.out as any)._run(cv);
+        for (let i = mark; i < pendingAsync.length; i++)
+          (pendingAsync[i] as any).path = [...(p ?? []), ...((pendingAsync[i] as any).path ?? [])];
+        let res = or;
+        if (or.ok && st.inst?._def?.checks?.length) {
+          res = (st.inst as any)._runChecksTS(cv, st.inst._def.checks, or, st.inst._def.out);
+          for (let i = mark; i < pendingAsync.length; i++)
+            (pendingAsync[i] as any).path = [...(p ?? []), ...((pendingAsync[i] as any).path ?? [])];
+        }
+        if (!res.ok)
+          return { value: root, issues: res.issues.map((i: any) => ({ ...i, path: [...(p ?? []), ...(i.path ?? [])] })) };
+        return { value: setPath(root, p, res.value), issues: [] };
       }
       if (st.type === "transform") {
         const out = await st.fn(cur);
@@ -2602,9 +2639,18 @@ export function _encode(s: any, v: any): any {
   const d = s?._def;
   if (!d) throw new Error("asmzod: encode() requires a schema");
   switch (d.type) {
-    case "codec": return s.encode(v);
+    case "codec": return (s as any)._enc(v);
     case "pipe": return _encode(d.in, _encode(d.out, v));
-    case "transform": case "refine": case "superrefine": return s.parse(v);
+    case "transform": case "refine": case "superrefine": {
+      v = _encChecks(v, d.checks);
+      if (typeof d.fn === "function") {
+        const p = { value: v, issues: [] as any[] };
+        const rv = d.fn.length >= 2 ? d.fn(v, _addIssueCtx(p.issues)) : d.fn(v);
+        if (rv === false || p.issues.length)
+          throw new ZodError(p.issues.length ? p.issues : [{ code: "custom", input: v, path: [], message: "Invalid input" } as any]);
+      }
+      return _encode(d.inner ?? d.innerType, v);
+    }
     case "lazy": return _encode(s.schema, v);
     case "union": case "discunion": case "discriminatedUnion": case "xor": {
       // map construction surfaces schema errors (duplicate tags) even in the
@@ -3190,23 +3236,71 @@ export class ZodFile extends ZodType<File, File> {
   }
 }
 
+// codec-side check application for the encode direction — tx/fn/checkfn
+// plus single-check runs against a plain string base
+function _encChecks(v: any, checks: any[] | undefined): any {
+  for (const c of checks ?? []) {
+    if (c?.kind === "tx") v = c.tx(v);
+    else if (typeof c?.fn === "function") {
+      const nv = c.fn(v);
+      if (nv === false) throw new ZodError([{ code: "invalid_format", format: c.fmt ?? c.kind, input: v, path: [], message: c.message } as any]);
+      else if (typeof nv === "string") v = nv;
+      else if (Array.isArray(nv)) throw new ZodError(nv);
+    } else if (typeof c === "function" || c?.kind === "checkfn") {
+      const p = { value: v, issues: [] as any[] };
+      (c.fn ?? c)(p);
+      if (p.issues.length) throw new ZodError(p.issues);
+    } else {
+      const rr = new ZodString({ type: "string", checks: [c] }).safeParse(v);
+      if (!rr.success) throw new ZodError(rr.error.issues);
+    }
+  }
+  return v;
+}
+
 export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
-  extends ZodType<B["_output"], A["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  extends ZodPipe<A, B> {
+  constructor(_def: any) { super(_def); }
   protected override _runImpl(data: unknown) {
     const ir = (this._def.in as any)._run(data);
-    if (!ir.ok) return ir;
+    if (!ir.ok) {
+      // same truncation contract as pipes — a blocking `in` failure aborts
+      // before the transform and any upstream refinements
+      if (ir.issues.some((i: any) => i.code !== "unrecognized_keys"))
+        return { ...ir, aborted: true, _hardAbort: true };
+      return ir;
+    }
     const decoded = this._def.transform(ir.value);
-    return (this._def.out as any)._run(decoded);
+    if (isThenable(decoded)) {
+      if (!asyncMode) throw new AsyncCheckError();
+      pendingAsync.push({ type: "codecout", out: this._def.out, inst: this, tx: decoded } as any);
+      return { ok: true as const, value: ir.value };
+    }
+    const or = (this._def.out as any)._run(decoded);
+    // a failed `out` aborts the payload — upstream refinements must not run
+    if (!or.ok) return { ...or, aborted: true, _hardAbort: true };
+    if (!this._def.checks?.length) return or;
+    // codec checks sit on the decoded (out-side) value — the single-check
+    // carrier must be the out schema, never the codec itself
+    return this._runChecksTS(decoded, this._def.checks, or, this._def.out);
+  }
+  _enc(v: any): any {
+    const r = (this._def.out as any).safeParse(v);
+    if (!r.success) throw new ZodError(r.error.issues);
+    const checked = _encChecks(r.data, this._def.checks);
+    const enc = this._def.reverseTransform(checked);
+    const tail = (x: any) => {
+      const er = (this._def.in as any).safeParse(x);
+      if (!er.success) throw new ZodError(er.error.issues);
+      return er.data;
+    };
+    return isThenable(enc) ? enc.then(tail) : tail(enc);
   }
   // encode: validate against B, reverse-transform, validate against A
   encode(value: B["_output"]): A["_output"] {
-    const r = (this._def.out as any).safeParse(value);
-    if (!r.success) throw new ZodError(r.error.issues);
-    const enc = this._def.reverseTransform(r.data);
-    const er = (this._def.in as any).safeParse(enc);
-    if (!er.success) throw new ZodError(er.error.issues);
-    return er.data as A["_output"];
+    const r = this._enc(value);
+    if (isThenable(r)) throw new AsyncCheckError();
+    return r as A["_output"];
   }
   decode(value: A["_input"]): B["_output"] { return this.parse(value); }
 }

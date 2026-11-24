@@ -428,6 +428,18 @@ export function newError(make: () => any): any {
 export const captureStackTrace: (t: object, fn?: Function) => void =
   "captureStackTrace" in Error ? (Error as any).captureStackTrace : () => {};
 
+// V8's reconstructed async stack can put the resumption trampoline
+// (`processTicksAndRejections`) where the callee frame was, leaving internal
+// frames above the callsite — strip leading node-internal frames
+export function stripInternalFrames(e: any): void {
+  const s: string = e?.stack ?? "";
+  const at = s.indexOf("\n    at ");
+  if (at === -1) return;
+  const frames = s.slice(at + 1).split("\n");
+  while (frames.length && /^\s+at .*node:internal|^\s+at \(node:|^\s+at node:/.test(frames[0])) frames.shift();
+  e.stack = s.slice(0, at) + (frames.length ? "\n" + frames.join("\n") : "");
+}
+
 // exact port of zod's util.finalizeIssue — map ladder: check's own error
 // (iss.inst) > owning schema's error (iss.schema) > contextual > customError >
 // localeError > "Invalid input"; own-string-key copy minus internal slots

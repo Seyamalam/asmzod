@@ -673,16 +673,6 @@ const _config = _sharedConfig;
 // $constructor builds user-defined schema classes; $ZodType.init installs
 // the _zod internals a custom parse needs. Our engines drive these through
 // the TS-level _run shim, so memoized cycles close through them too.
-const $ZodType = {
-  init(inst: any, def: any) {
-    inst._zod = {
-      def,
-      traits: new Set([inst.constructor]),
-      run: (payload: any, ctx: any) => inst._zod.parse(payload, ctx),
-      parse: (payload: any) => payload,
-    };
-  },
-};
 function $constructor(name: string, init: (inst: any, def: any) => void) {
   const cls = class {
     _zod: any;
@@ -702,6 +692,7 @@ function $constructor(name: string, init: (inst: any, def: any) => void) {
 // z.core — the v4/core namespace: error classes + error walkers
 export const core = {
   $ZodError, $ZodRealError: ZodRealError, ZodError, ZodRealError,
+  $ZodType: ZodType, $ZodPipe: ZodPipe, $ZodCodec: ZodCodec, $ZodTransform: ZodTransform,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _encode: _encodeFn, _encodeAsync: _encodeAsyncFn,
   _safeEncode: _safeEncodeFn, _safeEncodeAsync: _safeEncodeAsyncFn,
@@ -713,7 +704,7 @@ export const core = {
   isRecursiveSchema: (s: any) => isRecursiveSchema(s),
   config: _config, globalConfig, memoizer: _memoizerFactory,
   util: { isPlainObject: _azIsPlainObject, shallowClone: _azShallowClone },
-  $constructor, $ZodType,
+  $constructor,
 };
 (z as any).core = core;
 
