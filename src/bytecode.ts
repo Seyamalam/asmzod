@@ -506,7 +506,7 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       return;
     }
 
-    case "instof": {
+    case "instof": case "promise": case "function": {
       w.u8(0x1b);
       w.u64(regId(reg.ctor, d.ctor));
       const nb = enc.encode(d.name);

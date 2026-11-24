@@ -129,7 +129,7 @@ const FORMAT_ORIGIN = new Set([
 
 // zod hides `pattern`/`origin` on these formats even when a regex carries
 // the actual match pattern — strip the embedded pattern field on normalize
-export const FORMAT_NOPAT = new Set(["base64url", "jwt", "cidrv6", "hostname", "httpurl"]);
+export const FORMAT_NOPAT = new Set(["base64url", "jwt", "cidrv6", "hostname", "httpurl", "ipv6", "url"]);
 
 // formats whose issues carry an extra `note` field
 const FORMAT_NOTES: Record<string, string> = {

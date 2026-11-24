@@ -790,15 +790,32 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   get _zod(): any {
     let z = this.__zod;
     if (z) return z;
-    const inner = _inner(this);
     const t = this;
     z = {
-      get def() { return t._def; },
-      set def(v: any) { t._def = v; },
+      // _def normalized into zod's public def vocabulary: coerce_* reports
+      // as the base type and default/prefault expose defaultValue
+      get def() {
+        const d = t._def;
+        if (z.__zdef && z.__zdef.__src === d) return z.__zdef;
+        const tname = (d?.type ?? "").startsWith("coerce_")
+          ? ({ coerce_str: "string", coerce_num: "number", coerce_bool: "boolean", coerce_bigint: "bigint" } as any)[d.type]
+          : d?.type;
+        const out = (tname === d?.type && d?.type !== "default" && d?.type !== "prefault")
+          ? d
+          : { ...d, type: tname,
+              get defaultValue() {
+                const raw = d.defaultValue !== undefined ? d.defaultValue : d.value;
+                return typeof raw === "function" ? raw() : raw;
+              } };
+        Object.defineProperty(out, "__src", { value: d, enumerable: false });
+        z.__zdef = out;
+        return out;
+      },
+      set def(v: any) { t._def = v; z.__zdef = undefined; },
       constr: (this as any).constructor,
       traits: new Set([(this as any).constructor]),
       parent: this._def.parent,
-      innerType: inner,
+      get innerType() { return _inner(t); },
       bag: { ...(this._def.bag ?? {}) },
       deferred: this._def.deferred,
       // payload-shaped like zod's internals: {value, issues} in, mutated back
@@ -810,7 +827,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         return payload;
       },
       parse: (payload: any, ctx?: any) => this._zod.run(payload, ctx),
-      toJSONSchema: () => (this as any).toJSONSchema?.(),
+      toJSONSchema: undefined,
       check: (...args: any[]) => (this as any).check(...args),
     };
     // lazy like zod's defineLazyInternal — recursive schemas resolve these on
@@ -1035,7 +1052,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         else if (nv === false)
           issues.push({ ...(FORMAT_NOPAT.has(c.fmt ?? c.kind) ? {} : { origin: "string" }),
                         code: "invalid_format", format: c.fmt ?? c.kind,
-                        ...(FORMAT_PATTERNS[c.fmt ?? c.kind] ? { pattern: FORMAT_PATTERNS[c.fmt ?? c.kind] } : {}),
+                        ...(!FORMAT_NOPAT.has(c.fmt ?? c.kind) && FORMAT_PATTERNS[c.fmt ?? c.kind] ? { pattern: FORMAT_PATTERNS[c.fmt ?? c.kind] } : {}),
                         input: v, path: [], message: c.message } as any);
         else if (typeof nv === "string") v = nv;
         continue;
@@ -1069,8 +1086,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         if (!c.regex.test(v)) {
           const i: any = c.format === "template_literal"
             ? { code: "invalid_format", format: c.format, pattern: c.regex.source }
-            : { origin: "string", code: "invalid_format", format: c.format,
-                pattern: `/${c.regex.source}/${c.regex.flags}` };
+            : (c.customFmt === true || FORMAT_NOPAT.has(c.format))
+              ? { code: "invalid_format", format: c.format }
+              : { origin: "string", code: "invalid_format", format: c.format,
+                  pattern: `/${c.regex.source}/${c.regex.flags}` };
           i.input = v;
           i.path = [];
           const e = c.error ?? c.message;
@@ -1147,6 +1166,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   nullish(): ZodOptional<ZodNullable<this>> {
     return this.nullable().optional();
   }
+  apply(fn: (s: this, ...args: any[]) => any, ...args: any[]) { return fn(this, ...args); }
   default<V extends Input>(value: V | (() => V)): ZodDefault<this> {
     return new ZodDefault({ type: "default", inner: this, value });
   }
@@ -1200,24 +1220,24 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return new ZodPipe({ type: "pipe", in: this, out: target });
   }
   brand<B extends string>(): ZodBranded<this, B> {
-    return new ZodBranded({ type: "brand", inner: this });
+    return this as any;
   }
   nonoptional(): ZodNonOptional<this> {
     return new ZodNonOptional({ inner: this });
   }
   clone(): this {
-    return new (this.constructor as any)({ ...this._def });
+    const c = new (this.constructor as any)({ ...this._def });
+    (c as any)._zod.parent = this;
+    return c;
   }
   describe(d: string): this {
     const c = this.clone();
-    (c as any)._zod.parent = this;
     globalRegistry.add(c, { description: d });
     return c;
   }
   meta(m?: any): any {
     if (m === undefined) return globalRegistry.get(this);
     const c = this.clone();
-    (c as any)._zod.parent = this;
     globalRegistry.add(c, m);
     return c;
   }
@@ -1236,6 +1256,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         // a schema passed to .check runs as a check — its whole validation
         // applies to the payload (zod: schemas carry _zod.check too). this
         // covers z.refine()/z.superRefine()/z.iso.* args
+        // zod check objects: def is the record, check is the predicate,
+        // onattach callbacks write _zod.bag contributions on the clone
+        if (o._zod && typeof o._zod === "object" && o._zod.def && o._zod.def.type === undefined) {
+          const rec: any = { ...(o._zod.def ?? {}), fn: o._zod.check, _onattach: o._zod.onattach };
+          checks.push(rec);
+          continue;
+        }
         if (_isSchema(o)) {
           checks.push({ kind: "schemacheck", schema: o });
           continue;
@@ -1246,6 +1273,9 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         else checks.push(c);
       }
       s = new (this as any).constructor(def);
+      (s as any)._zod.parent = this;
+      for (const rec of checks)
+        if (rec?._onattach) for (const f of rec._onattach) f(s);
       if (def._metaCheck) {
         (s as any)._zod.parent = this;
         const meta: any = {};
@@ -1408,6 +1438,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       if (st.type === "codecout") {
         // async codec transform resolved — run `out`, then codec checks
         const cv = await st.tx;
+        if ((cv as any) === NEVER || st.cctx?.issues.length)
+          return { value: root,
+            issues: (st.cctx?.issues.length ? st.cctx.issues : [{ code: "custom", path: [], message: "Invalid input" }])
+              .map((i: any) => ({ ...i, path: [...(p ?? []), ...(i.path ?? [])] })) };
         const mark = pendingAsync.length;
         const or = (st.out as any)._run(cv);
         for (let i = mark; i < pendingAsync.length; i++)
@@ -1570,8 +1604,8 @@ export class ZodString extends ZodType<string> {
   toLowerCase() { return this._check({ kind: "tx", tx: (s: string) => s.toLowerCase() }); }
   toUpperCase() { return this._check({ kind: "tx", tx: (s: string) => s.toUpperCase() }); }
 
-  private _fmtcheck(format: string, regex: RegExp, message?: string) {
-    return this._check({ kind: "regex", regex, format, message });
+  private _fmtcheck(format: string, regex: RegExp, message?: string, extra?: any) {
+    return this._check({ kind: "regex", regex, format, message, ...extra });
   }
   emoji(message?: string) {
     return this._fmtcheck("emoji",
@@ -1621,7 +1655,10 @@ export class ZodString extends ZodType<string> {
   }
   mac(params?: any) {
     const p = typeof params === "object" && params !== null ? params : {};
-    return this._check({ kind: "mac", delimiter: p.delimiter, message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
+    const d = (p.delimiter ?? ":").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return this._check({ kind: "mac", delimiter: p.delimiter,
+      pat: new RegExp(`^(?:[0-9A-F]{2}${d}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${d}){5}[0-9a-f]{2}$`),
+      message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
   }
   normalize(form: "NFC" | "NFD" | "NFKC" | "NFKD" = "NFC") {
     return this._check({ kind: "tx", tx: (s: string) => s.normalize(form) });
@@ -3370,7 +3407,7 @@ export class ZodInstanceof<T> extends ZodType<T> {
 }
 
 export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output"]>, Promise<T["_input"]>> {
-  constructor(_def: any = { type: "instof", ctor: Promise, name: "promise", inner: null }) {
+  constructor(_def: any = { type: "promise", ctor: Promise, name: "promise", inner: null }) {
     super(); this._def = _def;
   }
   // zod: Promise.resolve(payload).then(inner) — any input resolves through
@@ -3385,7 +3422,7 @@ export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output
 
 export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = ZodAny>
   extends ZodType<(...args: any[]) => any, (...args: any[]) => any> {
-  constructor(_def: any = { type: "instof", ctor: Function, name: "function", args: null, ret: null }) {
+  constructor(_def: any = { type: "function", ctor: Function, name: "function", args: null, ret: null }) {
     super(); this._def = _def;
   }
   implement(fn: (...args: any[]) => any): (...args: any[]) => any {
@@ -3589,12 +3626,20 @@ export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
         return { ...ir, aborted: true, _hardAbort: true };
       return ir;
     }
-    const decoded = this._def.transform(ir.value);
+    // codec transforms get zod's payload ctx — `ctx.issues` collects
+    // decoder-reported failures like `invalid_format` on bad json
+    const cctx = { value: ir.value, issues: [] as any[] };
+    const decoded = this._def.transform(ir.value, cctx);
     if (isThenable(decoded)) {
       if (!asyncMode) throw new AsyncCheckError();
-      pendingAsync.push({ type: "codecout", out: this._def.out, inst: this, tx: decoded } as any);
+      pendingAsync.push({ type: "codecout", out: this._def.out, inst: this, tx: decoded, cctx } as any);
       return { ok: true as const, value: ir.value };
     }
+    // `z.NEVER` returned from a decoder aborts with the ctx issues it pushed
+    if ((decoded as any) === NEVER || cctx.issues.length)
+      return { ok: false as const,
+        issues: cctx.issues.length ? cctx.issues : [{ code: "custom", path: [], message: "Invalid input" }],
+        aborted: true, _hardAbort: true };
     const or = (this._def.out as any)._run(decoded);
     // a failed `out` aborts the payload — upstream refinements must not run
     if (!or.ok) return { ...or, aborted: true, _hardAbort: true };
@@ -3627,7 +3672,7 @@ export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
 // ---------- algorithmic string formats (can't be regexes) ----------
 // emitted as invalid_format issues exactly like zod's ZodStringFormat defs
 export class ZodAlgoFormat extends ZodType<string, string> {
-  constructor(_def: { format: string; message: string; fn: (s: string) => boolean; abort?: boolean }) {
+  constructor(_def: { format: string; message: string; fn: (s: string) => boolean; abort?: boolean; pattern?: RegExp }) {
     super(); this._def = { ..._def, type: "algoformat" };
   }
   protected override _runImpl(data: unknown) {
@@ -3643,10 +3688,15 @@ export class ZodAlgoFormat extends ZodType<string, string> {
   }
 }
 
-// Luhn, tolerating spaces/dashes like zod's credit card check
+// zod's credit-card shape regex — single space/dash separators, 12-19 digits
+export const CREDITCARD_RE = /^\d(?:[ -]?\d){11,18}$/;
+// zod's iban shape: 2-letter country, check digits 02-98, 11-30 bban chars
+export const IBAN_RE = /^[A-Z]{2}(?!00|01|99)\d{2}[A-Z0-9]{11,30}$/;
+
+// Luhn behind the shape regex, like zod's credit card check
 export function luhnCheck(s: string): boolean {
+  if (!CREDITCARD_RE.test(s)) return false;
   const digits = s.replace(/[ -]/g, "");
-  if (!/^\d{13,19}$/.test(digits)) return false;
   let sum = 0, dbl = false;
   for (let i = digits.length - 1; i >= 0; i--) {
     let d = digits.charCodeAt(i) - 48;
@@ -3656,10 +3706,10 @@ export function luhnCheck(s: string): boolean {
   return sum % 10 === 0;
 }
 
-// IBAN: 2 letters + 2 digits + up to 30 alnum; mod-97 of rearranged digits == 1
+// IBAN: shape regex then mod-97 of rearranged digits == 1
 export function ibanCheck(s: string): boolean {
-  const ib = s.replace(/\s+/g, "").toUpperCase();
-  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(ib)) return false;
+  if (!IBAN_RE.test(s)) return false;
+  const ib = s;
   let rem = 0;
   const moved = ib.slice(4) + ib.slice(0, 4);
   for (const ch of moved) {
@@ -3765,7 +3815,7 @@ export function visit(schema: any, fnOrHandlers: any): any {
         const m = run(old);
         return m === old ? s : clone(s, { ...d, innerType: m });
       }
-      case "instof": {
+      case "instof": case "promise": case "function": {
         const old = d.innerType ?? d.inner;
         if (old === undefined) return s;
         const m = run(old);

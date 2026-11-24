@@ -7,7 +7,7 @@ import {
   ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess, ZodPrefault, STRINGBOOL_TRUE, STRINGBOOL_FALSE,
-  ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema, _zodPattern, AsyncCheckError,
+  ZodAlgoFormat, luhnCheck, ibanCheck, CREDITCARD_RE, IBAN_RE, _encode, _encodeScoped, isRecursiveSchema, _zodPattern, AsyncCheckError,
   deepPartial as _deepPartial,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
@@ -49,7 +49,8 @@ const _isoCheck = (fmt: "datetime" | "date" | "time" | "duration", p: any) => {
   const opts = p && typeof p === "object" ? p : {};
   const re = fmt === "date" ? _isoRe.date : fmt === "duration" ? _isoRe.duration
     : fmt === "time" ? _isoRe.time(opts) : _isoRe.datetime(opts);
-  return (new ZodString() as any)._fmtcheck(fmt, re, typeof p === "string" ? p : opts.message ?? opts.error);
+  return (new ZodString() as any)._fmtcheck(fmt, re, typeof p === "string" ? p : opts.message ?? opts.error,
+    { local: opts.local, precision: opts.precision });
 };
 
 // zod's util.isPlainObject/shallowClone — constructor-based, not proto-based
@@ -155,11 +156,11 @@ export const z = {
     new ZodObject<T>({ type: "object", shape, mode: "passthrough", catchall: new ZodUnknown({ type: "unknown" }), error: params }),
   /** Schema for Promise instances. */
   promise: <T extends ZodTypeAny>(inner: T) =>
-    new ZodPromise<T>({ type: "instof", ctor: Promise, name: "promise", inner }),
+    new ZodPromise<T>({ type: "promise", ctor: Promise, name: "promise", inner }),
   /** Schema for functions, optionally validating args/return. */
   function: (opts?: { input?: ZodTypeAny[]; output?: ZodTypeAny }) =>
     new ZodFunction({
-      type: "instof", ctor: Function, name: "function",
+      type: "function", ctor: Function, name: "function",
       args: opts?.input ?? null, ret: opts?.output ?? null,
     }),
   /** Run a transform on the input before validating with the given schema. */
@@ -208,7 +209,7 @@ export const z = {
   keyof: <T extends ZodTypeAny>(schema: T) => (schema as any).keyof(),
   /** Exactly one option must match. */
   xor: <T extends ZodTypeAny[]>(options: [...T], params?: any) =>
-    new ZodXor<T>({ type: "union", options, error: params }),
+    new ZodXor<T>({ type: "union", inclusive: false, options, error: params }),
   /** Parses boolean-ish strings ("true"/"yes"/"on"/"0"/"off"/...) to booleans. */
   stringbool: (params?: any) => {
     const cs = params?.case ?? "insensitive";
@@ -247,7 +248,7 @@ export const z = {
         throw new Error(`Invalid discriminated union option at index "${i}"`);
     }
     return new ZodDiscriminatedUnion<T>({
-      type: "discunion", discriminator: disc, options,
+      type: "discunion", inclusive: false, discriminator: disc, options,
       unionFallback: params?.unionFallback === true, error: params,
     });
   },
@@ -412,6 +413,9 @@ export const z = {
     hex: /^[0-9a-fA-F]*$/,
     emoji: /^(?=[\s\S]*[\p{Extended_Pictographic}\p{Regional_Indicator}⃝])[\p{Extended_Pictographic}\p{Emoji_Component}]+$/u,
     httpProtocol: /^https?$/,
+    creditCard: CREDITCARD_RE,
+    iban: IBAN_RE,
+    currencyCode: /^(?:AED|AFN|ALL|AMD|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BHD|BIF|BMD|BND|BOB|BOV|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHE|CHF|CHW|CLF|CLP|CNY|COP|COU|CRC|CUP|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GEL|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MAD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MXV|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PEN|PGK|PHP|PKR|PLN|PYG|QAR|RON|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLE|SOS|SRD|SSP|STN|SVC|SYP|SZL|THB|TJS|TMT|TND|TOP|TRY|TTD|TWD|TZS|UAH|UGX|USD|USN|UYI|UYU|UYW|UZS|VED|VES|VND|VUV|WST|XAD|XAF|XAG|XAU|XBA|XBB|XBC|XBD|XCD|XCG|XDR|XOF|XPD|XPF|XPT|XSU|XTS|XUA|XXX|YER|ZAR|ZMW|ZWG)$/,
   },
 
   iso: {
@@ -574,14 +578,17 @@ export const z = {
   /** credit card (Luhn, spaces/dashes tolerated) */
   creditCard: (params?: any) => new ZodAlgoFormat({
     format: "credit_card", message: "Invalid credit card number", fn: luhnCheck,
+    pattern: CREDITCARD_RE,
   }),
   /** IBAN (ISO 13616 mod-97) */
   iban: (params?: any) => new ZodAlgoFormat({
     format: "iban", message: "Invalid IBAN", fn: ibanCheck,
+    pattern: IBAN_RE,
   }),
   /** ISO 4217 currency code */
   currencyCode: (params?: any) => new ZodAlgoFormat({
     format: "currency_code", message: "Invalid currency code",
+    pattern: /^(?:AED|AFN|ALL|AMD|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BHD|BIF|BMD|BND|BOB|BOV|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHE|CHF|CHW|CLF|CLP|CNY|COP|COU|CRC|CUP|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GEL|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MAD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MXV|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PEN|PGK|PHP|PKR|PLN|PYG|QAR|RON|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLE|SOS|SRD|SSP|STN|SVC|SYP|SZL|THB|TJS|TMT|TND|TOP|TRY|TTD|TWD|TZS|UAH|UGX|USD|USN|UYI|UYU|UYW|UZS|VED|VES|VND|VUV|WST|XAD|XAF|XAG|XAU|XBA|XBB|XBC|XBD|XCD|XCG|XDR|XOF|XPD|XPF|XPT|XSU|XTS|XUA|XXX|YER|ZAR|ZMW|ZWG)$/,
     fn: (s: string) => /^(?:AED|AFN|ALL|AMD|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BHD|BIF|BMD|BND|BOB|BOV|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHE|CHF|CHW|CLF|CLP|CNY|COP|COU|CRC|CUP|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GEL|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MAD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MXV|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PEN|PGK|PHP|PKR|PLN|PYG|QAR|RON|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLE|SOS|SRD|SSP|STN|SVC|SYP|SZL|THB|TJS|TMT|TND|TOP|TRY|TTD|TWD|TZS|UAH|UGX|USD|USN|UYI|UYU|UYW|UZS|VED|VES|VND|VUV|WST|XAD|XAF|XAG|XAU|XBA|XBB|XBC|XBD|XCD|XCG|XDR|XOF|XPD|XPF|XPT|XSU|XTS|XUA|XXX|YER|ZAR|ZMW|ZWG)$/.test(s),
   }),
   /** MAC address — same regex as zod */
@@ -668,7 +675,7 @@ export const z = {
     opts?: { message?: string; error?: string | ((i: any) => string); abort?: boolean },
   ) => check instanceof RegExp
     ? new ZodString({ type: "string", pattern: check,
-        checks: [{ kind: "regex", regex: check, format,
+        checks: [{ kind: "regex", regex: check, format, customFmt: true,
                    error: opts?.error ?? opts?.message, abort: opts?.abort }] })
     : new ZodAlgoFormat({ format,
         message: typeof (opts?.error ?? opts?.message) === "string"
@@ -719,7 +726,7 @@ const HASH_LENS = {
 } as const;
 (z as any).ZodError = ZodError;
 (z as any).ZodRealError = ZodRealError;
-import { toJSONSchema } from "./jsonschema.ts";
+import { toJSONSchema, JSONSchemaGenerator } from "./jsonschema.ts";
 (z as any).toJSONSchema = toJSONSchema;
 (ZodType.prototype as any).toJSONSchema = function (this: any, params?: any) {
   return toJSONSchema(this, params);
@@ -751,6 +758,45 @@ function $constructor(name: string, init: (inst: any, def: any) => void) {
   return cls;
 }
 
+// z.util — byte codec helpers ported verbatim from zod's core/util.ts
+export const util = {
+  base64ToUint8Array(base64: string): Uint8Array {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  },
+  uint8ArrayToBase64(bytes: Uint8Array): string {
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  },
+  base64urlToUint8Array(base64url: string): Uint8Array {
+    const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+    return util.base64ToUint8Array(base64 + "=".repeat((4 - (base64.length % 4)) % 4));
+  },
+  uint8ArrayToBase64url(bytes: Uint8Array): string {
+    return util.uint8ArrayToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  },
+  hexToUint8Array(hex: string): Uint8Array {
+    const h = hex.replace(/^0x/, "");
+    if (h.length % 2 !== 0) throw new Error("Invalid hex string length");
+    const bytes = new Uint8Array(h.length / 2);
+    for (let i = 0; i < h.length; i += 2) bytes[i / 2] = Number.parseInt(h.slice(i, i + 2), 16);
+    return bytes;
+  },
+  uint8ArrayToHex(bytes: Uint8Array): string {
+    return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  },
+  // jitless short-circuits the `new Function` probe — strict CSPs report it
+  allowsEval: {
+    get value() {
+      if (globalConfig.jitless) return false;
+      try { new Function(""); return true; } catch { return false; }
+    },
+  },
+};
+
 // z.core — the v4/core namespace: error classes + error walkers
 export const core = {
   $ZodError, $ZodRealError: ZodRealError, ZodError, ZodRealError,
@@ -766,12 +812,22 @@ export const core = {
   toDotPath: _toDotPath,
   isRecursiveSchema: (s: any) => isRecursiveSchema(s),
   config: _config, globalConfig, memoizer: _memoizerFactory,
-  util: { isPlainObject: _azIsPlainObject, shallowClone: _azShallowClone, toZod: (<T>() => (s: ZodTypeAny) => s) as any },
+  util: { isPlainObject: _azIsPlainObject, shallowClone: _azShallowClone, toZod: (<T>() => (s: ZodTypeAny) => s) as any, ...util,
+    // jitless short-circuits the `new Function` probe — strict CSPs report it
+    allowsEval: {
+      get value() {
+        if (globalConfig.jitless) return false;
+        try { new Function(""); return true; } catch { return false; }
+      },
+    } },
   toZod: (<T>() => (s: ZodTypeAny) => s) as any,
   globalRegistry,
+  compileFn: (schema: any) => (data: unknown) => schema.parse(data),
+  JSONSchemaGenerator,
   $constructor,
 };
 (z as any).core = core;
+(z as any).util = util;
 
 export default z;
 export type { ZodType } from "./schema.ts";
@@ -818,10 +874,13 @@ function fromJSONSchema(js: any): ZodTypeAny {
       };
       const f = fmtMap[js.format ?? ""];
       if (f && typeof str[f] === "function") str = str[f]();
+      else if (js.format === "credit_card") str = z.creditCard();
+      else if (js.format === "iban") str = z.iban();
+      else if (js.format === "currency_code") str = z.currencyCode();
       if (typeof js.minLength === "number") str = str.min(js.minLength);
       if (typeof js.maxLength === "number") str = str.max(js.maxLength);
       if (typeof js.length === "number") str = str.length(js.length);
-      if (js.pattern) str = str.regex(new RegExp(js.pattern));
+      if (js.pattern && typeof str.regex === "function") str = str.regex(new RegExp(js.pattern));
       if (js.startsWith) str = str.startsWith(js.startsWith);
       if (js.endsWith) str = str.endsWith(js.endsWith);
       if (js.includes) str = str.includes(js.includes);
