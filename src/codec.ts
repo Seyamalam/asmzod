@@ -87,6 +87,52 @@ export function rd64u(p: number): bigint {
   return need().u64(p);
 }
 
+// decode tagged value inside a byte buffer -> [value, nextOffset]
+// used by the N-API backend, which gets its issue region as an ArrayBuffer
+// rather than a pointer into pooled memory.
+export function decodeValueAt(buf: Uint8Array, off: number, hosts: HostTable): [unknown, number] {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const u64 = (o: number) => dv.getBigUint64(o, true);
+  const tag = buf[off];
+  switch (tag) {
+    case 0: return [undefined, off + 1];
+    case 1: return [null, off + 1];
+    case 2: return [buf[off + 1] !== 0, off + 2];
+    case 3: return [dv.getFloat64(off + 1, true), off + 9];
+    case 4: {
+      const n = Number(u64(off + 1));
+      return [dec.decode(buf.subarray(off + 9, off + 9 + n)), off + 9 + n];
+    }
+    case 5: return [dv.getBigInt64(off + 1, true), off + 9];
+    case 6: {
+      const nf = Number(u64(off + 1));
+      let cur = off + 9;
+      const obj: Record<string, unknown> = {};
+      for (let i = 0; i < nf; i++) {
+        const kl = Number(u64(cur));
+        const k = dec.decode(buf.subarray(cur + 8, cur + 8 + kl));
+        const [v, np] = decodeValueAt(buf, cur + 8 + kl, hosts);
+        obj[k] = v;
+        cur = np;
+      }
+      return [obj, cur];
+    }
+    case 7: {
+      const n = Number(u64(off + 1));
+      let cur = off + 9;
+      const arr: unknown[] = [];
+      for (let i = 0; i < n; i++) {
+        const [v, np] = decodeValueAt(buf, cur, hosts);
+        arr.push(v);
+        cur = np;
+      }
+      return [arr, cur];
+    }
+    case 8: return [hosts[Number(u64(off + 1))], off + 9];
+    default: throw new Error(`asmzod: corrupt value tag ${tag} at buf+${off}`);
+  }
+}
+
 // decode tagged value at absolute ptr -> [value, nextPtr]
 export function decodeAt(p: number, hosts: HostTable): [unknown, number] {
   const m = need();

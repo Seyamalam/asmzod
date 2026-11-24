@@ -1,6 +1,7 @@
 // schema.ts — schema classes + chaining API (zod3-compatible surface)
 import { compile, type Compiled } from "./bytecode.ts";
 import { engineParse, reg, regId } from "./ffi.ts";
+import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, type ZodIssue } from "./error.ts";
@@ -28,8 +29,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   protected _run(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const c = this._compile();
     const hosts: HostTable = [...c.hosts];
-    const input = encodeValue(data, hosts);
-    const r = engineParse(c.blob, input, hosts);
+    // direct N-API validation walks the JS value natively (no encode/decode);
+    // null -> schema needs the encoded engine path (callbacks, unions, ...)
+    const nr = napiBackend.parse(c.blob, data, hosts, c.cbUnsafe);
+    const r = nr ?? engineParse(c.blob, encodeValue(data, hosts), hosts);
     // `_u`-tagged invalid_union issues (union nodes reached inside containers)
     // get their per-option errors by re-running the registered options on the
     // value at the issue's path

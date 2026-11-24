@@ -3,6 +3,7 @@ import { BW, u64, str, encodeValue, type HostTable } from "./codec.ts";
 import { reg, regId } from "./ffi.ts";
 
 export interface Compiled {
+  cbUnsafe: boolean;
   blob: Uint8Array;
   hosts: HostTable; // seed values for embedded hostrefs (literal/default/catch)
   unions: SchemaLike[]; // union defs in emission order — issues carry `_u` index
@@ -27,12 +28,21 @@ const NUM_CHECK: Record<string, number> = {
   int: 0x05, finite: 0x06, multipleOf: 0x07, safeInt: 0x08,
 };
 
+// true while emit produces a node that reaches a JS callback (regex checks
+// are the only ones reachable through the N-API handler set — refine/lazy/
+// coerce/custom opcodes fall back at dispatch anyway)
+let cbUnsafe = false;
+
 export function compile(schema: SchemaLike): Compiled {
   const w = new BW();
   const hosts: HostTable = [];
   const unions: SchemaLike[] = [];
+  const outer = cbUnsafe;
+  cbUnsafe = false;
   emit(w, schema, hosts, unions);
-  return { blob: w.out(), hosts, unions };
+  const unsafe = cbUnsafe;
+  cbUnsafe = outer;
+  return { cbUnsafe: unsafe, blob: w.out(), hosts, unions };
 }
 
 function checkMsg(w: BW, msg: string | undefined) {
@@ -58,6 +68,7 @@ function emitStrChecks(w: BW, checks: any[]) {
         w.u64(b.length); w.raw(b); break;
       }
       case "regex": {
+        cbUnsafe = true;
         w.u64(regId(reg.regex, c.regex));
         // embed /src/flags so the engine can emit zod's `pattern` issue field
         const src = enc.encode(`/${c.regex.source}/${c.regex.flags}`);

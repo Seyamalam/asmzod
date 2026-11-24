@@ -21,10 +21,24 @@ endif
 $(OUT): $(OBJ)
 	clang $(LDFLAGS) -o $@ $(OBJ)
 
+# N-API addon: same objects; napi_* symbols resolve from the host process
+# at load time (dynamic_lookup on Mach-O; undefined allowed by default on ELF).
+NODE := asmzod.node
+ifeq ($(UNAME),Darwin)
+NLDFLAGS := -shared -arch arm64 -undefined dynamic_lookup
+else
+NLDFLAGS := -shared -Bsymbolic
+endif
+
+$(NODE): $(OBJ)
+	clang $(NLDFLAGS) -o $@ $(OBJ)
+
+napi: $(NODE)
+
 %.o: %.s port.h
 	clang $(ASFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) $(OUT)
+	rm -f $(OBJ) $(OUT) $(NODE)
 
-.PHONY: clean
+.PHONY: clean napi
