@@ -30,40 +30,41 @@ call and `z.infer` is TypeScript types. What *can* be assembly is everything
 underneath: the actual validation. So AsmZod is two layers:
 
 ```
-your code ──► TS shim (src/)              ──► ARM64 engine (asm/*.s)
-              z.* schema builders               recursive bytecode interpreter
-              schema ──► binary bytecode        validates tagged input values
-              value  ──► tagged binary          writes result + issues to arenas
-              issues ──► ZodError               pure machine code, zero JS
+your code ──► TS shim (src/)                ──► ARM64 engine (asm/*.s)
+              z.* schema builders                bytecode interpreter, N-API
+              schema ──► binary bytecode         addon or bun:ffi dylib —
+              output ◄── native values           walks JS values in place
+              issues ◄── ZodError                or tagged arenas on FFI
 ```
 
-- The TS layer lowers a schema tree into a compact bytecode and serializes
-  the input into a tagged binary format (see [`FORMAT.md`](FORMAT.md)).
-- The engine (`libasmzod.dylib`, loaded via `bun:ffi`) is a recursive-descent
-  validator over that bytecode. String checks (email, uuid, min/max counted
-  in UTF-16 units like real Zod, …) and number checks (f64 compares,
-  multipleOf, int) run in assembly.
-- Results and validation issues are written to caller-provided arenas;
-  the JS side decodes them into real `ZodError`s with proper `path`s.
-- `.refine()`, `.transform()`, `.regex()`, `.lazy()`, `.instanceof()` and
-  `.custom()` call **back into JavaScript from the assembly** through FFI
-  callbacks — user functions are JS no matter what, even in real Zod.
-  Non-serializable values (`Date`, class instances, symbols, `Map`, `Set`)
-  flow through the engine as `HOSTREF` handles.
+- The TS layer lowers a schema tree into compact bytecode (`FORMAT.md`).
+- On Node/Bun the **N-API addon** (`asmzod.node`) walks `napi_value`s
+  directly — success returns the value untouched, failure returns a
+  natively-built issue array. No serialization on the hot path.
+- Under `bun:ffi` (`libasmzod.dylib`/`.so`) the same engine validates a
+  tagged-binary encoding; arenas are pooled across calls.
+- `.refine()`, `.transform()`, `.regex()`, `.lazy()`, `.instanceof()`,
+  `.coerce()` and `.custom()` call back into JavaScript *from inside
+  the assembly* — user functions are JS no matter what, even in Zod.
+- With no native backend (Workers, browsers, Deno today) a portable TS
+  interpreter runs the identical bytecode — same issues, same suite.
 
 ## Requirements
 
-- macOS on Apple Silicon (arm64)
-- [Bun](https://bun.sh) (uses `bun:ffi` to load the dylib)
-- Xcode CLT (`clang`, for assembling the engine)
+- ARM64 (Apple Silicon, or Linux arm64)
+- One of: [Bun](https://bun.sh), Node ≥ 18, Deno — or any JS runtime at
+  all for the portable fallback
+- `clang` (Xcode CLT on macOS) to assemble the engine
 
 ## Build & test
 
 ```sh
 bun install
-bun run build     # assembles asm/*.s -> asm/libasmzod.dylib
-bun test          # unit + differential tests against real zod
-bun run bench     # asm vs zod
+make ci             # assemble + full suite (Bun + portable + Node + Deno)
+bun test            # unit + differential tests against real zod
+bun run bench       # asm vs zod
+bun scripts/doctor.ts   # which backend am I on?
+bun scripts/dump.ts 'z.string().email()'   # disassemble a schema
 ```
 
 ## API coverage
@@ -90,63 +91,62 @@ codes+paths — currently **50/50 cases green**, plus 15 API tests.
 
 ## Runtime support
 
-Two engines, one API:
+Three engines, one API — picked at load time (`src/ffi.ts`):
 
 | runtime | backend | notes |
 |---|---|---|
-| **Bun** (macOS arm64) | ARM64 dylib via `bun:ffi` | the real deal — machine code does the validating |
-| **Bun** (Linux arm64) | ARM64 `.so` via `bun:ffi` | same engine — `make -C asm` emits `libasmzod.so`; verified via `bun run test:linux` (colima/Docker, 117/117) |
-| **Node ≥ 22.6** | portable interpreter | `node test.ts` — type-stripping runs the TS sources directly (no param-props/namespaces, `.ts` extensions everywhere) |
-| **Deno** | portable interpreter | `deno test --no-check` — works today |
-| **Cloudflare Workers / browsers** | portable interpreter | see `examples/worker/` — zero FFI, zero native deps |
-| any bundler | portable interpreter | everything in `src/` is dependency-free TS |
+| **Node ≥ 18** (macOS/Linux arm64) | `asmzod.node` N-API addon | validates `napi_value`s in place — no encode/decode |
+| **Bun** (macOS/Linux arm64) | N-API addon, or `bun:ffi` + dylib | both verified; N-API is the fast path |
+| **Bun** (Linux arm64) | same | `bun run test:linux` runs the suite in Docker |
+| **Deno** | portable interpreter | `deno test --no-check` |
+| **Cloudflare Workers / browsers / bundlers** | portable interpreter | module never statically imports `node:*`/`bun:*` — natives are probed lazily |
 
-The portable engine (`src/engine.ts`) interprets the **same bytecode and
-tagged-value format** the ARM64 engine uses — and passes the identical
-117-case differential suite (`AZ_ENGINE=portable bun test`). `engineBackend`
-exports which one you're on. `AZ_ENGINE=portable` forces it anywhere.
+The portable engine (`src/engine.ts`) interprets the **same bytecode**
+the ARM64 engines use and passes the identical 121-case differential
+suite (`AZ_ENGINE=portable bun test`). `engineBackend` exports which
+backend is live; `bun scripts/doctor.ts` tells you.
 
 ## Performance
 
-Honest answer: **slower than Zod on everything we've measured.** Zod 4
-JIT-compiles validators into tight JS; AsmZod pays a fixed toll per parse
-(encode JS value → FFI call → asm validate → decode result). Measured on
-an M-series Mac, Bun 1.4:
+Honest answer: **within ~1–3× of Zod on success paths, sometimes
+faster, still slower on failures.** See [`RESULTS.md`](RESULTS.md) for
+the full table and [`PERF.md`](PERF.md) for how it got here. Highlights
+(M-series Mac, Bun):
 
-| workload | asmzod | zod@4.6.7 | ratio |
-|---|---|---|---|
-| small object | 2.1µs | 0.13µs | ~17× slower |
-| union dispatch | 0.62µs | 0.17µs | ~3.8× slower |
-| failure + issues | 6.9µs | 0.41µs | ~17× slower |
-| array of 2000 objects | 3.35ms | 98µs | ~34× slower |
-| deep nested + 500-elem array | 81µs | 20µs | ~4.0× slower |
+| workload | ratio vs zod4 |
+|---|---|
+| deep nested + 500-elem array | **0.30× — faster** |
+| record of 200 entries | **0.90× — faster** |
+| tuple | **0.97× — faster** |
+| small object | 2.7× |
+| union dispatch | 1.75× |
+| failure + issues | 6.3× — the gap that remains |
 
-The ratio shrinks as inputs grow (17× → 4×) — the marshaling, not the
-engine, is the bottleneck. Buffer pooling took small-input parses from
-11.8µs to 2.1µs (encode→FFI→decode arenas are reused across calls).
-This project was never about speed; it's about answering the question
-"can you make `z.object()` run on raw ARM64" with "yes, and here's a
-117-case differential suite to prove it."
+Failures are slow because real issue objects cost ~1µs each to build +
+normalize; success paths often beat zod because the asm walker
+allocates nothing when nothing changed.
 
 ## Honest limitations
 
-- **Bun only.** `bun:ffi` is the bridge; Node support would need a N-API
-  loader (which is C glue — doable, not yet done).
-- **arm64 macOS only.** The engine is hand-written AArch64.
+- **arm64 only for the native engines.** Other architectures fall back
+  to the portable interpreter.
 - `.parseAsync` and async `.refine` are rejected at runtime.
-- `.regex()` patterns execute in JS (via callback); every *built-in* string
-  format check runs in assembly.
+- `.regex()` and callback checks execute in JS (via `napi_call_function`
+  inside the addon); built-in formats run in assembly.
 - Error `message` strings match Zod's defaults; custom `errorMap`s are
   applied JS-side.
+- See [`COMPAT.md`](COMPAT.md) for the full issue-shape contract.
 
 ## Layout
 
 ```
 asm/        the engine — AArch64 assembly, one concern per file
-src/        TypeScript API layer — schema classes, codec, FFI, ZodError
-test/       bun:test — unit tests + differential tests vs real zod
-bench/      benchmarks
-FORMAT.md   the binary contract (bytecode + value encoding + FFI ABI)
+src/        TypeScript API layer — schema classes, codec, engines, ZodError
+test/       bun:test — unit + differential + fuzz tests vs real zod
+bench/      benchmarks                  scripts/  dump + doctor CLIs
+docker-test.sh   Linux arm64 suite      justfile  task aliases
+FORMAT.md   the binary contract         ARCHITECTURE.md  how it fits together
+COMPAT.md   the zod-compat contract     PERF.md  perf notes   RESULTS.md  numbers
 ```
 
 Built for fun. Ship at your own risk.
