@@ -190,7 +190,10 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
         w.u64(kb.length); w.raw(kb);
         fps.push(w.field());
       }
-      if (d.catchall) {
+      // convention catchalls (strict->never, passthrough->unknown) are kept in
+      // _def for API compat but the engine's mode byte already covers them —
+      // compiling them would change strict into per-key never failures
+      if (d.catchall && d.mode !== "strict" && d.mode !== "passthrough") {
         const at = w.pos;
         emit(w, d.catchall, hosts, unions);
         w.patchField(cf, at);
@@ -251,8 +254,19 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
     }
 
     case "literal":
+      if (Array.isArray(d.value) && d.value.length > 1) {
+        // multi-value literal = a closed union of single literals
+        const opts = d.value.map((v: any) => ({
+          _def: { type: "literal", value: v },
+          _run: (x: any) => x === v
+            ? { ok: true as const, value: x }
+            : { ok: false as const, issues: [{ code: "invalid_value", values: [v], path: [], message: `Invalid input: expected ${v}` }] },
+        }));
+        emit(w, { _def: { type: "union", options: opts } } as any, hosts, unions);
+        return;
+      }
       w.u8(0x09);
-      w.raw(encodeValue(d.value, hosts));
+      w.raw(encodeValue(Array.isArray(d.value) ? d.value[0] : d.value, hosts));
       return;
 
     case "enum":

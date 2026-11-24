@@ -301,8 +301,30 @@ export function normalizeIssue(i: any): any {
     if (!keep) delete out.received;
   }
   delete out._keepReceived;
+  // zod's issue objects carry fields in creation order — snapshots serialize
+  // that order, so normalize to it (expected-first for invalid_type etc)
+  const ord = ISSUE_ORDER[out.code as string];
+  if (ord) {
+    const ordOut: any = {};
+    for (const k of ord) if (k in out) ordOut[k] = out[k];
+    for (const k of Object.keys(out)) if (!(k in ordOut)) ordOut[k] = out[k];
+    if (defaultedIssues.has(out)) { defaultedIssues.delete(out); defaultedIssues.add(ordOut); }
+    return ordOut;
+  }
   return out;
 }
+
+// field order of zod issue objects (their finalizeIssue copies creation order)
+const ISSUE_ORDER: Record<string, string[]> = {
+  invalid_type: ["expected", "format", "code", "input", "path", "message", "received"],
+  invalid_value: ["code", "values", "path", "message", "input"],
+  invalid_key: ["code", "origin", "issues", "input", "path", "message"],
+  unrecognized_keys: ["code", "keys", "path", "message"],
+  too_small: ["origin", "code", "minimum", "inclusive", "path", "message", "exact"],
+  too_big: ["origin", "code", "maximum", "inclusive", "path", "message", "exact"],
+  invalid_format: ["origin", "code", "format", "pattern", "path", "message", "note"],
+  not_multiple_of: ["code", "divisor", "path", "message"],
+};
 
 // engines emit record-key failures as a flat stream: inner key-schema issues
 // followed by an `invalid_key` wrapper carrying `_k` = child count. Fold the

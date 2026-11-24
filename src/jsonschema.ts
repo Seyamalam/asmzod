@@ -99,6 +99,10 @@ function toSchema(d: any): JSONSchema {
     case "object": {
       const js: JSONSchema = { type: "object" };
       const shape = (d.shape ?? {}) as Record<string, any>;
+      if (Object.getOwnPropertySymbols(shape).length) {
+        if (ctx.unrepresentable !== "any")
+          throw new Error("Symbol keys cannot be represented in JSON Schema");
+      }
       const props: Record<string, JSONSchema> = {};
       const req: string[] = [];
       for (const [k, s] of Object.entries(shape)) {
@@ -185,6 +189,10 @@ function toSchema(d: any): JSONSchema {
   }
 }
 
-export function toJSONSchema(schema: { _def: any }): JSONSchema {
-  return { $schema: DRAFT, ...toSchema(schema._def) };
+export function toJSONSchema(schema: { _def: any }, params?: { unrepresentable?: string }): JSONSchema {
+  const prev = ctx.unrepresentable;
+  ctx.unrepresentable = params?.unrepresentable;
+  try { return { $schema: DRAFT, ...toSchema(schema._def) }; }
+  finally { ctx.unrepresentable = prev; }
 }
+const ctx: { unrepresentable?: string } = {};

@@ -312,6 +312,9 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const consumed = new Set<string>();
       for (const f of fields) {
         consumed.add(f.name);
+        // a declared "__proto__" field is never validated or written — zod
+        // strips it everywhere; it only counts as a known key below
+        if (f.name === "__proto__") continue;
         const present = Object.prototype.hasOwnProperty.call(obj, f.name);
         // absent: exactOptional skips the field entirely
         if (!present && f.opt === 2) continue;
@@ -328,10 +331,11 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       if (mode === 1 && extra.length) {
         pushIssue(c, "unrecognized_keys", { keys: extra });
       } else if (mode === 2) {
-        for (const k of extra) out[k] = obj[k];
+        for (const k of extra) if (k !== "__proto__") out[k] = obj[k];
       } else if (catchallOff !== 0n) {
         const cpos = catchallPos + Number(catchallOff);
         for (const k of extra) {
+          if (k === "__proto__") continue;
           const res = atKey(c, k, () => tryValidate(new R(r.b, cpos), obj[k], c));
           if (res.ok) out[k] = res.value;
         }

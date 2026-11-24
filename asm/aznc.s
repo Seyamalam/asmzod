@@ -63,6 +63,7 @@ CTR(\name): .quad 0
     AZNC napi_get_value_string_utf8
     AZNC napi_get_value_uint32
     AZNC napi_has_named_property
+    AZNC napi_has_own_property
     AZNC napi_instanceof
     AZNC napi_is_array
     AZNC napi_is_date
@@ -150,6 +151,8 @@ SYM(aznct_names):
     .zero 19
     .ascii "napi_has_named_property"
     .zero 17
+    .ascii "napi_has_own_property"
+    .zero 19
     .ascii "napi_instanceof"
     .zero 25
     .ascii "napi_is_array"
@@ -214,6 +217,7 @@ SYM(aznct_base):
     .quad CTR(napi_get_value_string_utf8)
     .quad CTR(napi_get_value_uint32)
     .quad CTR(napi_has_named_property)
+    .quad CTR(napi_has_own_property)
     .quad CTR(napi_instanceof)
     .quad CTR(napi_is_array)
     .quad CTR(napi_is_date)

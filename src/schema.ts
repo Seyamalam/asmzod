@@ -282,11 +282,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   and<T extends ZodTypeAny>(right: T): ZodIntersection<this, T> {
     return new ZodIntersection({ type: "intersect", left: this, right });
   }
-  refine(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
+  refine(fn: (v: Output) => boolean, message?: any): ZodEffects<this, Output> {
     return new ZodEffects({
       type: "refine", inner: this,
       cbid: regId(reg.refine, guardAsync(fn as (v: unknown) => unknown)),
-      fn, kind: "refine", message,
+      fn, kind: "refine", message: paramMsg(message),
     });
   }
   refinement(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
@@ -406,25 +406,38 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); return { success: false, error: new ZodError(r.issues) }; }
     if (!pendingAsync.length) return { success: true, data: r.value as Output };
     let value = r.value;
+    // stages can carry a path (record/object children queue nested async
+    // checks) — apply them to that position, not the root
+    const atPath = (v: any, p: any[] | undefined) => (p?.length ? p.reduce((o, k) => o?.[k], v) : v);
+    const setPath = (v: any, p: any[] | undefined, nv: any) => {
+      if (!p?.length) return nv;
+      let o = v;
+      for (let i = 0; i < p.length - 1; i++) o = o[p[i]];
+      o[p[p.length - 1]] = nv;
+      return v;
+    };
+    // zod collects every failed check's issue — refinements at sibling
+    // positions and root-level checks all land in one error
+    const allIssues: ZodIssue[] = [];
     for (const st of pendingAsync) {
+      const pp = (st as any).path as any[] | undefined;
+      const cur = atPath(value, pp);
       if (st.type === "transform") {
-        value = await st.fn(value);
+        value = setPath(value, pp, await st.fn(cur));
       } else if (st.type === "superrefine") {
         const pushed: any[] = [];
-        await st.fn(value, { addIssue: (i: any) => pushed.push(i) });
-        if (pushed.length) {
-          const issues = pushed.map(({ path, ...rest }: any) => ({ ...rest, path: path ?? [] }));
-          applyErrorMaps(issues as ZodIssue[], params?.error ?? params);
-          return { success: false, error: new ZodError(issues as ZodIssue[]) };
-        }
+        await st.fn(cur, { addIssue: (i: any) => pushed.push(i) });
+        for (const { path, ...rest } of pushed)
+          allIssues.push({ ...rest, path: [...(pp ?? []), ...(path ?? [])] });
       } else {
-        const res = await st.fn(value);
-        if (!res) {
-          const issues = [{ code: "custom", path: [], message: st.msg ?? "Invalid input" }] as ZodIssue[];
-          applyErrorMaps(issues, params?.error ?? params);
-          return { success: false, error: new ZodError(issues) };
-        }
+        const res = await st.fn(cur);
+        if (!res)
+          allIssues.push({ code: "custom", path: pp ?? [], message: st.msg ?? "Invalid input" } as ZodIssue);
       }
+    }
+    if (allIssues.length) {
+      applyErrorMaps(allIssues, params?.error ?? params);
+      return { success: false, error: new ZodError(allIssues) };
     }
     return { success: true, data: value as Output };
   }
@@ -712,13 +725,85 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   innerType() { return this._def.inner as T; }
   sourceType() { return this._def.inner as T; }
 
-  // async mode: queue the effect instead of running it — safeParseAsync
-  // replays stages innermost-first so transforms feed outer refinements.
+  // refine/superRefine wrap an object — object helpers delegate to the
+  // inner object the way zod's checks-in-def model exposes them
+  private _refinedObj(): any {
+    let s: any = this;
+    while (s instanceof ZodEffects && (s._def.kind === "refine" || s._def.kind === "superrefine")) s = s._def.inner;
+    return s instanceof ZodObject ? s : undefined;
+  }
+  private _mapRefinedObj(fn: (o: any) => any): any {
+    const inner: any = this._def.inner;
+    const ni = inner instanceof ZodEffects ? inner._mapRefinedObj(fn) : fn(inner);
+    return new ZodEffects({ ...this._def, inner: ni });
+  }
+  merge(): any {
+    if (this._refinedObj())
+      throw new Error(".merge() cannot be used on object schemas containing refinements. Use .safeExtend() instead.");
+    throw new Error("Invalid input to merge: expected an object schema. To merge a plain shape, use `.extend()`.");
+  }
+  extend(s: any): any {
+    const t = this._refinedObj();
+    if (!_isPlainObject(s)) throw new Error("Invalid input to extend: expected a plain object");
+    if (!t) throw new Error("Invalid input to extend: expected a plain object");
+    for (const k of Reflect.ownKeys(s)) {
+      if (Object.getOwnPropertyDescriptor(t._def.shape, k) !== undefined)
+        throw new Error("Cannot overwrite keys on object schemas containing refinements. Use `.safeExtend()` instead.");
+    }
+    return this._mapRefinedObj((o: any) => o.extend(s));
+  }
+  safeExtend(s: any): any {
+    const t = this._refinedObj();
+    if (!_isPlainObject(s)) throw new Error("Invalid input to safeExtend: expected a plain object");
+    if (!t) throw new Error("Invalid input to safeExtend: expected a plain object");
+    return this._mapRefinedObj((o: any) => o.extend(s));
+  }
+  pick(): any {
+    if (this._refinedObj()) throw new Error(".pick() cannot be used on object schemas containing refinements");
+    throw new Error("Invalid input to pick: expected an object schema");
+  }
+  omit(): any {
+    if (this._refinedObj()) throw new Error(".omit() cannot be used on object schemas containing refinements");
+    throw new Error("Invalid input to omit: expected an object schema");
+  }
+  partial(): any {
+    if (this._refinedObj()) throw new Error(".partial() cannot be used on object schemas containing refinements");
+    throw new Error("Invalid input to partial: expected an object schema");
+  }
+
+  // effects always run at the TS level — the compiled engine can't host them
+  // in nested positions (record keys etc). only thenable results queue for
+  // safeParseAsync's replay; sync effects stay transparent in async mode too.
   protected override _run(data: unknown) {
-    if (!asyncMode) return super._run(data);
+    const kind = this._def.kind ?? this._def.type;
+    // coerce_* and check-record wrappers compile to engine ops — only
+    // JS-callback effects (transform/refine/superrefine) run here
+    if (kind !== "transform" && kind !== "superrefine" && kind !== "refine")
+      return super._run(data);
     const ir = (this._def.inner as any)._run(data);
     if (!ir.ok) return ir;
-    pendingAsync.push({ type: this._def.kind ?? this._def.type, fn: this._def.fn, msg: this._def.message });
+    const fn = this._def.fn as (v: unknown, ctx?: any) => unknown;
+    const queue = () => {
+      if (!asyncMode) throw new AsyncCheckError();
+      pendingAsync.push({ type: kind, fn, msg: this._def.message });
+      return ir;
+    };
+    if (kind === "transform") {
+      const r = fn(ir.value);
+      if (isThenable(r)) return queue();
+      return { ok: true as const, value: r };
+    }
+    if (kind === "superrefine") {
+      const pushed: any[] = [];
+      const r = fn(ir.value, { addIssue: (i: any) => pushed.push(i) });
+      if (isThenable(r)) return queue();
+      if (pushed.length)
+        return { ok: false as const, issues: pushed.map(({ path, ...rest }: any) => ({ ...rest, path: path ?? [] })) };
+      return ir;
+    }
+    const r = fn(ir.value);
+    if (isThenable(r)) return queue();
+    if (!r) return { ok: false as const, issues: [{ code: "custom", path: [], message: this._def.message ?? "Invalid input" }] as any };
     return ir;
   }
 }
@@ -732,49 +817,173 @@ export class ZodBranded<T extends ZodTypeAny, B extends string> extends ZodType<
 // ---------- composites ----------
 export type ZodRawShape = { [k: string]: ZodTypeAny };
 
+// own-property write — plain `t[k]=` sets the prototype for "__proto__" and
+// can run inherited setters; defineProperty does neither (zod's putProp)
+const _putProp = (t: any, k: PropertyKey, v: any) =>
+  Object.defineProperty(t, k, { value: v, enumerable: true, writable: true, configurable: true });
+const _shapeKeys = (shape: any): PropertyKey[] =>
+  Reflect.ownKeys(shape).filter((k) => Object.getOwnPropertyDescriptor(shape, k)?.enumerable);
+const _maskedKeys = (shape: any, mask: any): PropertyKey[] => {
+  const keys: PropertyKey[] = [];
+  for (const k of Reflect.ownKeys(mask ?? {})) {
+    if (!Object.getOwnPropertyDescriptor(shape, k)?.enumerable)
+      throw new Error(`Unrecognized key: "${String(k)}"`);
+    if ((mask as any)[k]) keys.push(k);
+  }
+  return keys;
+};
+const _isPlainObject = (v: any) =>
+  v !== null && typeof v === "object" &&
+  (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+
 export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T>, objectInputType<T>> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) {
+    super();
+    // shape resolves by object spread — non-enumerable entries drop here and
+    // can never be promoted into a derived shape
+    const shape = _def.shape;
+    if (shape && _shapeKeys(shape).length !== Reflect.ownKeys(shape).length) {
+      const next: any = {};
+      for (const k of _shapeKeys(shape)) _putProp(next, k, shape[k]);
+      _def = { ..._def, shape: next };
+    }
+    this._def = _def;
+  }
   get shape(): T { return this._def.shape; }
-  strict() { return new ZodObject({ ...this._def, mode: "strict" }); }
-  strip() { return new ZodObject({ ...this._def, mode: "strip" }); }
-  passthrough() { return new ZodObject({ ...this._def, mode: "passthrough" }); }
-  catchall<C extends ZodTypeAny>(c: C) { return new ZodObject({ ...this._def, catchall: c }); }
+
+  // symbol keys can't be tagged into bytecode — the compiled engine handles
+  // the string keys and symbol fields are validated here at TS level.
+  // undeclared input symbols are intentionally invisible to every engine,
+  // matching zod's deliberate ignore-don't-flag behavior.
+  protected override _run(data: unknown) {
+    const shape = this._def.shape;
+    // zod reads declared keys through the prototype chain and validates exotic
+    // objects the same as plain ones — engines only see own enumerable props,
+    // so materialize the effective view for non-plain inputs first
+    let input = data;
+    if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+      const proto = Object.getPrototypeOf(input);
+      if (proto !== null && proto !== Object.prototype) {
+        const merged: any = { ...(input as object) };
+        let cur: object | null = proto;
+        while (cur !== null && cur !== Object.prototype) {
+          for (const k of Object.keys(cur))
+            if (k in shape && !(k in merged)) merged[k] = (input as any)[k];
+          cur = Object.getPrototypeOf(cur);
+        }
+        input = merged;
+      }
+    }
+    const syms = Reflect.ownKeys(shape).filter((k): k is symbol => typeof k === "symbol");
+    if (!syms.length) return super._run(input);
+    const r = super._run(input);
+    const out: any = r.ok ? { ...(r.value as object) } : {};
+    const symIssues: any[] = [];
+    if (input !== null && typeof input === "object") {
+      for (const k of syms) {
+        const fd: any = shape[k];
+        if (!(fd instanceof ZodType))
+          throw new Error(`Invalid element at key "${String(k)}"`);
+        const present = k in (input as any);
+        if (!present && fd._def?.type === "exactOptional") continue;
+        const res = (fd as any)._run((input as any)[k]);
+        if (!present && fd._zod.optin === undefined && res.ok) {
+          symIssues.push({ expected: "nonoptional", code: "invalid_type",
+            path: [k], message: "Invalid input: expected nonoptional, received undefined" });
+        } else if (res.ok) {
+          if (present || res.value !== undefined) out[k] = res.value;
+        } else {
+          for (const i of res.issues) symIssues.push({ ...i, path: [k, ...(i.path ?? [])] });
+        }
+      }
+    }
+    const issues = [...(r.ok ? [] : r.issues), ...symIssues];
+    if (issues.length) return { ok: false as const, issues };
+    return { ok: true as const, value: out };
+  }
+  strict() { return new ZodObject({ ...this._def, mode: "strict", catchall: new ZodNever({ type: "never" }) }); }
+  strip() { return new ZodObject({ ...this._def, mode: "strip", catchall: undefined }); }
+  passthrough() { return new ZodObject({ ...this._def, mode: "passthrough", catchall: new ZodUnknown({ type: "unknown" }) }); }
+  catchall<C extends ZodTypeAny>(c: C) { return new ZodObject({ ...this._def, mode: "strip", catchall: c }); }
   extend<S extends ZodRawShape>(s: S) {
-    return new ZodObject({ ...this._def, shape: { ...this._def.shape, ...s } }) as ZodObject<T & S>;
+    if (!_isPlainObject(s)) throw new Error("Invalid input to extend: expected a plain object");
+    if (this._def.checks?.length) {
+      for (const k of Reflect.ownKeys(s)) {
+        if (Object.getOwnPropertyDescriptor(this._def.shape, k) !== undefined)
+          throw new Error("Cannot overwrite keys on object schemas containing refinements. Use `.safeExtend()` instead.");
+      }
+    }
+    return this._extend(s) as ZodObject<T & S>;
   }
   pick<K extends keyof T>(mask: Record<K, true>) {
+    if (this._def.checks?.length) throw new Error(".pick() cannot be used on object schemas containing refinements");
     const shape: any = {};
-    for (const k of Object.keys(mask)) if (mask[k as K]) shape[k] = this._def.shape[k];
-    return new ZodObject({ ...this._def, shape }) as ZodObject<Pick<T, K>>;
+    for (const k of _maskedKeys(this._def.shape, mask)) _putProp(shape, k, this._def.shape[k]);
+    return new ZodObject({ ...this._def, shape, checks: [] }) as ZodObject<Pick<T, K>>;
   }
   omit<K extends keyof T>(mask: Record<K, true>) {
-    const shape: any = { ...this._def.shape };
-    for (const k of Object.keys(mask)) if (mask[k as K]) delete shape[k];
-    return new ZodObject({ ...this._def, shape }) as ZodObject<Omit<T, K>>;
-  }
-  partial() {
+    if (this._def.checks?.length) throw new Error(".omit() cannot be used on object schemas containing refinements");
+    const omitted = new Set(_maskedKeys(this._def.shape, mask));
     const shape: any = {};
-    for (const k of Object.keys(this._def.shape)) shape[k] = this._def.shape[k].optional();
-    return new ZodObject({ ...this._def, shape });
+    for (const k of _shapeKeys(this._def.shape)) if (!omitted.has(k)) _putProp(shape, k, this._def.shape[k]);
+    return new ZodObject({ ...this._def, shape, checks: [] }) as ZodObject<Omit<T, K>>;
   }
-  required() {
+  partial(mask?: Record<string, true>) {
+    if (this._def.checks?.length) throw new Error(".partial() cannot be used on object schemas containing refinements");
+    const sel = mask ? new Set(_maskedKeys(this._def.shape, mask)) : undefined;
     const shape: any = {};
-    for (const k of Object.keys(this._def.shape)) {
-      let s = this._def.shape[k];
-      let wasOpt = false;
-      while (s instanceof ZodOptional) { wasOpt = true; s = s.unwrap(); }
-      shape[k] = wasOpt ? new ZodNonOptional({ inner: s }) : s;
+    for (const k of _shapeKeys(this._def.shape))
+      _putProp(shape, k, sel && !sel.has(k) ? this._def.shape[k] : this._def.shape[k].optional());
+    return new ZodObject({ ...this._def, shape, checks: [] });
+  }
+  required(mask?: Record<string, true>) {
+    const sel = mask ? new Set(_maskedKeys(this._def.shape, mask)) : undefined;
+    const shape: any = {};
+    for (const k of _shapeKeys(this._def.shape)) {
+      const s = this._def.shape[k];
+      _putProp(shape, k, sel && !sel.has(k) ? s : new ZodNonOptional({ inner: s }));
     }
     return new ZodObject({ ...this._def, shape });
   }
-  keyof() { return new ZodEnum({ type: "enum", values: Object.keys(this._def.shape) }); }
+  keyof() { return new ZodEnum({ type: "enum", values: _shapeKeys(this._def.shape) }); }
   deepPartial() { return this.partial(); }
   loose() { return this.passthrough(); }
   merge<O extends ZodObject<any>>(o: O) {
-    return this.extend(o.shape) as ZodObject<T & any>;
+    if (!(o as any)?._zod?.def)
+      throw new Error("Invalid input to merge: expected an object schema. To merge a plain shape, use `.extend()`.");
+    if (this._def.checks?.length)
+      throw new Error(".merge() cannot be used on object schemas containing refinements. Use .safeExtend() instead.");
+    // a refined b contributes its inner shape plus its effect layers
+    const wraps: ((s: any) => any)[] = [];
+    let b: any = o;
+    while (b instanceof ZodEffects && (b._def.kind === "refine" || b._def.kind === "superrefine")) {
+      const e = b;
+      wraps.unshift((s: any) => new ZodEffects({ ...e._def, inner: s }));
+      b = e._def.inner;
+    }
+    if (!(b instanceof ZodObject))
+      throw new Error("Invalid input to merge: expected an object schema. To merge a plain shape, use `.extend()`.");
+    const shape: any = {};
+    for (const k of _shapeKeys(this._def.shape)) _putProp(shape, k, this._def.shape[k]);
+    for (const k of _shapeKeys(b._def.shape)) _putProp(shape, k, b._def.shape[k]);
+    let res: any = new ZodObject({ ...this._def, shape, catchall: b._def.catchall, checks: [] });
+    for (const w of wraps) res = w(res);
+    return res as ZodObject<T & any>;
   }
-  safeExtend<S extends ZodRawShape>(s: S) { return this.extend(s); }
+  safeExtend<S extends ZodRawShape>(s: S) {
+    if (!_isPlainObject(s)) throw new Error("Invalid input to safeExtend: expected a plain object");
+    return this._extend(s);
+  }
   exactPartial() { return this.partial(); }
+  private _extend<S extends ZodRawShape>(s: S) {
+    const shape: any = {};
+    for (const k of _shapeKeys(this._def.shape)) _putProp(shape, k, this._def.shape[k]);
+    for (const k of Reflect.ownKeys(s)) {
+      const d = Object.getOwnPropertyDescriptor(s, k);
+      if (d?.enumerable) _putProp(shape, k, (s as any)[k]);
+    }
+    return new ZodObject({ ...this._def, shape });
+  }
 }
 
 export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_input"][]> {
@@ -794,45 +1003,140 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
   }
 }
 
+// the raw value universe for closed record key sets — mirrors zod's
+// `_zod.values`: enum values, literal elements, flattened literal unions,
+// resolving through transparent wrappers (refine/transform/pipe/...)
+const _keyUniverse = (kt: any): any[] | undefined => {
+  const t = kt?._def?.type;
+  switch (t) {
+    case "enum": {
+      const v = kt._def.values;
+      if (Array.isArray(v)) return v;
+      if (v && typeof v === "object")
+        // native/TS enum object — drop the numeric reverse-mapped entries
+        return Object.keys(v).filter((k) => isNaN(Number(k))).map((k) => v[k]);
+      return [];
+    }
+    case "literal": {
+      const v = kt._def.value ?? kt._def.values;
+      return Array.isArray(v) ? v : [v];
+    }
+    case "union": {
+      const out: any[] = [];
+      for (const o of kt._def.options ?? []) {
+        const ks = _keyUniverse(o);
+        if (!ks) return undefined;
+        out.push(...ks);
+      }
+      return out;
+    }
+    case "pipe": case "codec": return _keyUniverse(kt._def.in);
+    case "optional": case "nullable": case "default": case "prefault":
+    case "catch": case "readonly": case "brand": case "refine":
+    case "superrefine": case "transform": case "nonoptional":
+      return _keyUniverse(kt._def.inner ?? kt._def.innerType ?? kt._def.schema);
+    default: return undefined;
+  }
+};
+
+const _numKeyRe = /^-?\d+(\.\d+)?$/;
+const _unrecMsg = (ks: string[]) =>
+  ks.length === 1 ? `Unrecognized key: "${ks[0]}"` : `Unrecognized keys: ${ks.map((k) => `"${k}"`).join(", ")}`;
+
 export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodType<Record<string, V["_output"]>> {
   constructor(_def: any) { super(); this._def = _def; }
+  get keyType(): K { return this._def.keyType; }
+  get valueType(): V { return this._def.valueType; }
 
-  // enum keyType: zod treats the key set as closed. modes —
-  //   "strict":  all enum keys required, unknown keys -> unrecognized_keys
-  //   "partial": enum keys optional, unknown keys -> unrecognized_keys
-  //   "loose":   all enum keys required, unknown keys pass through raw
+  // closed key sets own every universe key; open keyTypes constrain each
+  // input key (numeric-string retry covers number keyTypes). "__proto__" is
+  // never read, validated, or written — in or out.
   protected override _run(data: unknown) {
     const kt = this._def.keyType as any;
-    const mode: string = this._def.recordMode ?? "strict";
-    if (kt?._def?.type !== "enum" || kt === null) return super._run(data);
+    const vt = this._def.valueType as any;
+    const mode: string = this._def.mode ?? "strict";
+    const partial = this._def.partial === true;
+    const values = _keyUniverse(kt);
     if (data === null || typeof data !== "object" || Array.isArray(data) ||
         data instanceof Map || data instanceof Set || data instanceof Date)
       return { ok: false as const, issues: [typeIssue("record", data)], aborted: true };
-    const keys: string[] = kt._def.values;
-    const vt = this._def.valueType as any;
+    const input = data as any;
     const issues: ZodIssue[] = [];
-    const out: Record<string, unknown> = {};
-    const unk: string[] = [];
-    for (const k of keys) {
-      if (k in (data as object)) {
-        const r = vt._run((data as any)[k]);
-        if (r.ok) out[k] = r.value;
-        else issues.push(...r.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
-      } else if (mode !== "partial") {
-        const r = vt._run(undefined);
-        if (!r.ok) issues.push(...r.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+    const out: any = {};
+    let childAborted = false;
+    const runV = (key: PropertyKey, v: any) => {
+      const mark = pendingAsync.length;
+      const r = vt._run(v);
+      // the child judged aborted on its raw issues before _nc was stripped —
+      // keep that verdict (tuple-arity too_small etc abort the union option)
+      if (!r.ok && ((r as any).aborted ?? isAborted(r.issues))) childAborted = true;
+      for (let i = mark; i < pendingAsync.length; i++)
+        (pendingAsync[i] as any).path = [key, ...((pendingAsync[i] as any).path ?? [])];
+      return r;
+    };
+    const vIssue = (key: PropertyKey, r: any) => {
+      if (!r.ok) issues.push(...r.issues.map((i: any) => ({ ...i, path: [key, ...(i.path ?? [])] })));
+    };
+    const keyIssue = (key: PropertyKey, kr: any) =>
+      issues.push({ code: "invalid_key", origin: "record", issues: kr.issues, path: [key], message: "Invalid key in record" } as any);
+    // zod: "Async schemas not supported in object keys currently"
+    const runK = (key: any): any => {
+      const mark = pendingAsync.length;
+      const kr: any = kt._run(key);
+      if (pendingAsync.length > mark) throw new Error("Async schemas not supported in object keys currently");
+      return kr;
+    };
+
+    if (values && !partial) {
+      const recordKeys = new Set<any>(values.map((v) => typeof v === "number" ? String(v) : v));
+      for (const key of values) {
+        if (typeof key !== "string" && typeof key !== "number" && typeof key !== "symbol") continue;
+        if (key === "__proto__") continue;
+        const kr = runK(key);
+        if (!kr.ok) { keyIssue(key, kr); continue; }
+        const outKey: any = kr.value;
+        if (outKey === "__proto__") continue;
+        const r = runV(key, input[key]);
+        vIssue(key, r);
+        out[outKey] = r.ok ? r.value : undefined;
       }
+      let unrecognized: string[] | undefined;
+      for (const key in input) {
+        if (!recordKeys.has(key)) {
+          if (mode === "loose") {
+            if (key === "__proto__") continue;
+            out[key] = input[key];
+          } else (unrecognized ??= []).push(key);
+        }
+      }
+      if (unrecognized?.length)
+        issues.push({ code: "unrecognized_keys", keys: unrecognized, path: [], message: _unrecMsg(unrecognized) } as any);
+    } else {
+      let unrecognized: string[] | undefined;
+      for (const key of Reflect.ownKeys(input)) {
+        if (key === "__proto__") continue;
+        if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
+        let kr = runK(key);
+        if (!kr.ok && typeof key === "string" && _numKeyRe.test(key)) {
+          const rr = runK(Number(key));
+          if (rr.ok) kr = rr;
+        }
+        if (!kr.ok) {
+          if (mode === "loose") out[key] = input[key];
+          else if (values) (unrecognized ??= []).push(key as string);
+          else keyIssue(key, kr);
+          continue;
+        }
+        const outKey: any = kr.value;
+        if (outKey === "__proto__") continue;
+        const r = runV(key, input[key]);
+        vIssue(key, r);
+        out[outKey] = r.ok ? r.value : undefined;
+      }
+      if (unrecognized?.length)
+        issues.push({ code: "unrecognized_keys", keys: unrecognized, path: [], message: _unrecMsg(unrecognized) } as any);
     }
-    for (const k of Object.keys(data as object)) {
-      if (keys.includes(k)) continue;
-      if (mode === "loose") out[k] = (data as any)[k];
-      else unk.push(k);
-    }
-    if (unk.length) issues.push({
-      code: "unrecognized_keys", keys: unk, path: [],
-      message: unk.length === 1 ? `Unrecognized key: "${unk[0]}"` : `Unrecognized keys: ${unk.map((k) => `"${k}"`).join(", ")}`,
-    } as any);
-    return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
+    return issues.length ? { ok: false as const, issues, aborted: childAborted || isAborted(issues) } : { ok: true as const, value: out };
   }
 }
 
@@ -859,10 +1163,11 @@ function isAborted(issues: any[]): boolean {
 
 function typeIssue(expected: string, received: unknown): ZodIssue {
   const recvd = parsedTypeName(received);
+  // zod field order: expected first (their issues are built that way)
   return {
+    expected,
     code: "invalid_type",
     path: [],
-    expected,
     message: `Invalid input: expected ${expected === "nan" ? "NaN" : expected}, received ${recvd}`,
   } as ZodIssue;
 }
@@ -945,8 +1250,81 @@ export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[num
   }
 }
 
+// zod's mergeValues: shared object keys merge recursively, arrays zip,
+// identical primitives pass — everything else is unmergable
+function _mergeValues(a: any, b: any): { valid: true; data: any } | { valid: false; mergeErrorPath: (string | number)[] } {
+  if (a === b) return { valid: true, data: a };
+  if (a instanceof Date && b instanceof Date && +a === +b) return { valid: true, data: a };
+  if (_isPlainObject(a) && _isPlainObject(b)) {
+    const bKeys = Object.keys(b);
+    const sharedKeys = Object.keys(a).filter((k) => bKeys.indexOf(k) !== -1);
+    const newObj: any = { ...a, ...b };
+    if (Object.prototype.hasOwnProperty.call(newObj, "__proto__")) delete newObj.__proto__;
+    for (const key of sharedKeys) {
+      if (key === "__proto__") continue;
+      const sv = _mergeValues(a[key], b[key]);
+      if (!sv.valid) return { valid: false, mergeErrorPath: [key, ...sv.mergeErrorPath] };
+      newObj[key] = sv.data;
+    }
+    return { valid: true, data: newObj };
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return { valid: false, mergeErrorPath: [] };
+    const arr: unknown[] = [];
+    for (let i = 0; i < a.length; i++) {
+      const sv = _mergeValues(a[i], b[i]);
+      if (!sv.valid) return { valid: false, mergeErrorPath: [i, ...sv.mergeErrorPath] };
+      arr.push(sv.data);
+    }
+    return { valid: true, data: arr };
+  }
+  return { valid: false, mergeErrorPath: [] };
+}
+
 export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<A["_output"] & B["_output"], A["_input"] & B["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
+
+  // both sides run independently; a key rejection is reported only when BOTH
+  // sides reject it (strict objects: unrecognized_keys; open records:
+  // invalid_key) — a key owned by one branch survives the other's key schema
+  protected override _run(data: unknown) {
+    const l = (this._def.left as any)._run(data);
+    const r = (this._def.right as any)._run(data);
+    const issues: ZodIssue[] = [];
+    const unrecKeys = new Map<string, { l?: true; r?: true }>();
+    let unrecIssue: any;
+    const keyIssues = new Map<string, any>();
+    const collect = (iss: any, side: "l" | "r"): boolean => {
+      let keys: string[] | undefined;
+      if (iss.code === "unrecognized_keys" && !iss.path?.length) {
+        unrecIssue ??= iss;
+        keys = iss.keys;
+      } else if (iss.code === "invalid_key" && iss.origin === "record" && iss.path?.length === 1) {
+        const k = String(iss.path[0]);
+        if (!keyIssues.has(k)) keyIssues.set(k, iss);
+        keys = [k];
+      } else return false;
+      for (const k of keys!) {
+        const e = unrecKeys.get(k) ?? {};
+        e[side] = true;
+        unrecKeys.set(k, e);
+      }
+      return true;
+    };
+    for (const i of (l.ok ? [] : l.issues)) if (!collect(i, "l")) issues.push(i);
+    for (const i of (r.ok ? [] : r.issues)) if (!collect(i, "r")) issues.push(i);
+    const both = [...unrecKeys].filter(([, f]) => f.l && f.r).map(([k]) => k);
+    if (both.length) {
+      const aggregated = unrecIssue ? both.filter((k) => (unrecIssue.keys as string[]).includes(k)) : [];
+      if (aggregated.length) issues.push({ ...unrecIssue, keys: aggregated });
+      for (const k of both) if (!aggregated.includes(k) && keyIssues.has(k)) issues.push(keyIssues.get(k));
+    }
+    if (issues.length) return { ok: false as const, issues, aborted: isAborted(issues) };
+    const merged = _mergeValues((l as any).value, (r as any).value);
+    if (!merged.valid)
+      throw new Error(`Unmergable intersection. Error path: ${JSON.stringify(merged.mergeErrorPath)}`);
+    return { ok: true as const, value: merged.data };
+  }
 }
 
 export class ZodLiteral<T> extends ZodType<T> {
@@ -955,7 +1333,20 @@ export class ZodLiteral<T> extends ZodType<T> {
 }
 
 export class ZodEnum<T extends string = string> extends ZodType<T> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) {
+    super(); this._def = _def;
+    if (!_def.entries && Array.isArray(_def.values))
+      _def.entries = Object.fromEntries(_def.values.map((v: string) => [v, v]));
+  }
+  // the bytecode enum node is string-members-only — native enums with
+  // numeric members check at the TS level
+  protected override _run(data: unknown) {
+    const vals: any[] = this._def.values;
+    if (vals.every((v) => typeof v === "string")) return super._run(data);
+    return vals.includes(data)
+      ? { ok: true as const, value: data }
+      : { ok: false as const, issues: [{ code: "invalid_value", values: vals, path: [], message: `Invalid option: expected one of ${vals.map((v) => JSON.stringify(v)).join("|")}` }] as any };
+  }
   get options(): T[] { return this._def.values; }
   get enum(): Record<T, T> {
     return Object.fromEntries(this._def.values.map((v: string) => [v, v])) as Record<T, T>;

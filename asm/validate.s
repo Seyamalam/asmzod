@@ -1400,6 +1400,8 @@ _az_strtoi:
 
     AZ_RODATA
 .Lundef_val:    .byte 0
+    .p2align 3
+.Lproto__:      .ascii "__proto__"
     .text
 
 // ==================== part 2: composites ====================
@@ -2357,6 +2359,19 @@ _az_strtoi:
     str x16, [sp, #176]
     ldr x12, [x11, #1]          // namelen
     add x13, x11, #9            // name
+    // a declared "__proto__" field is never validated or written — zod
+    // strips it everywhere; it only counts as a known key in pass-2
+    cmp x12, #9
+    b.ne .Lob_nproto
+    ldr x14, [x13]
+    AZ_ADR x15, .Lproto__
+    ldr x15, [x15]
+    cmp x14, x15
+    b.ne .Lob_nproto
+    ldrb w14, [x13, #8]
+    cmp w14, #0x5F              // '_'
+    b.eq .Lob_fnext
+.Lob_nproto:
     add x14, x13, x12           // off addr
     stp x12, x13, [sp, #88]     // 88=len 96=ptr? store len@88 ptr@96
     add x15, x14, #8
@@ -2526,7 +2541,23 @@ _az_strtoi:
 .Lob_known:
     b .Lob_unext
 .Lob_unk2:
-    // unknown key
+    // unknown key — "__proto__" is dropped in loose/passthrough/catchall
+    // but still reported by strict as unrecognized
+    ldr x9, [sp, #48]
+    cmp x9, #1
+    b.eq .Lob_unk2c
+    ldp x9, x10, [sp, #168]    // klen, kptr
+    cmp x9, #9
+    b.ne .Lob_unk2c
+    ldr x9, [x10]
+    AZ_ADR x11, .Lproto__
+    ldr x11, [x11]
+    cmp x9, x11
+    b.ne .Lob_unk2c
+    ldrb w9, [x10, #8]
+    cmp w9, #0x5F
+    b.eq .Lob_unext            // drop it
+.Lob_unk2c:
     ldr x9, [sp, #104]
     add x9, x9, #1
     str x9, [sp, #104]

@@ -62,13 +62,13 @@ export const z = {
 
   /** Create an object schema; unknown keys are stripped. */
   object: <T extends ZodRawShape>(shape: T, params?: any) =>
-    new ZodObject<T>({ type: "object", shape, mode: "strip", catchall: null, error: params }),
+    new ZodObject<T>({ type: "object", shape, mode: "strip", catchall: undefined, error: params }),
   /** Create an object schema that fails on unknown keys. */
   strictObject: <T extends ZodRawShape>(shape: T, params?: any) =>
-    new ZodObject<T>({ type: "object", shape, mode: "strict", catchall: null, error: params }),
+    new ZodObject<T>({ type: "object", shape, mode: "strict", catchall: new ZodNever({ type: "never" }), error: params }),
   /** Create an object schema that passes unknown keys through. */
   looseObject: <T extends ZodRawShape>(shape: T, params?: any) =>
-    new ZodObject<T>({ type: "object", shape, mode: "passthrough", catchall: null, error: params }),
+    new ZodObject<T>({ type: "object", shape, mode: "passthrough", catchall: new ZodUnknown({ type: "unknown" }), error: params }),
   /** Schema for Promise instances. */
   promise: <T extends ZodTypeAny>(inner: T) =>
     new ZodPromise<T>({ type: "instof", ctor: Promise, name: "promise", inner }),
@@ -93,9 +93,9 @@ export const z = {
   tuple: <T extends ZodTypeAny[]>(items: [...T], params?: any) =>
     new ZodTuple<T>({ type: "tuple", items, rest: null, error: params }),
   /** Create a record schema: record(valueType) or record(keyType, valueType). */
-  record: ((keyOrVal: ZodTypeAny, val?: ZodTypeAny) =>
-    val === undefined
-      ? new ZodRecord({ type: "record", keyType: null, valueType: keyOrVal })
+  record: ((keyOrVal: ZodTypeAny, val?: any) =>
+    !(val instanceof ZodType)
+      ? new ZodRecord({ type: "record", keyType: new ZodString({ type: "string", checks: [] }), valueType: keyOrVal, error: val })
       : new ZodRecord({ type: "record", keyType: keyOrVal, valueType: val })) as {
     <V extends ZodTypeAny>(value: V): ZodRecord<ZodString, V>;
     <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V): ZodRecord<K, V>;
@@ -106,12 +106,12 @@ export const z = {
   /** Create a Set schema. */
   set: <V extends ZodTypeAny>(value: V) =>
     new ZodSet<V>({ type: "set", valueType: value }),
-  /** Record where the enum key set is optional; other keys rejected. */
-  partialRecord: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V) =>
-    new ZodRecord<K, V>({ type: "record", keyType: key, valueType: value, recordMode: "partial" }),
-  /** Record where all enum keys are required and other keys pass through. */
+  /** Record where the closed key set is optional; other keys rejected (or loose). */
+  partialRecord: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V, params?: any) =>
+    new ZodRecord<K, V>({ type: "record", keyType: key, valueType: value, partial: true, mode: params?.mode ?? "strict" }),
+  /** Record where all closed keys are required and other keys pass through. */
   looseRecord: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V) =>
-    new ZodRecord<K, V>({ type: "record", keyType: key, valueType: value, recordMode: "loose" }),
+    new ZodRecord<K, V>({ type: "record", keyType: key, valueType: value, mode: "loose" }),
   /** Enum of an object schema's keys. */
   keyof: <T extends ZodTypeAny>(schema: T) => (schema as any).keyof(),
   /** Exactly one option must match. */
@@ -154,13 +154,16 @@ export const z = {
   literal: <T extends string | number | boolean | bigint | null | undefined>(v: T, params?: any) =>
     new ZodLiteral<T>({ type: "literal", value: v, error: params }),
   /** Schema for a fixed set of string values (or a TS enum). */
-  enum: <T extends string>(values: [T, ...T[]], params?: any) =>
-    new ZodEnum<T>({ type: "enum", values, error: params }),
+  enum: ((values: any, params?: any) => {
+    if (!Array.isArray(values)) {
+      // native/TS enum object — numeric reverse-mapped keys are not members
+      const entries = Object.fromEntries(Object.entries(values).filter(([k]) => isNaN(Number(k))));
+      return new ZodEnum({ type: "enum", values: Object.values(entries), entries, error: params });
+    }
+    return new ZodEnum({ type: "enum", values, error: params });
+  }) as { <T extends string>(values: [T, ...T[]], params?: any): ZodEnum<T>; (values: object, params?: any): ZodEnum<any> },
   /** Schema for a TS enum object (alias of enum). */
-  nativeEnum: (e: object) => {
-    const vals = Object.values(e).filter((v) => typeof v === "string");
-    return new ZodEnum({ type: "enum", values: vals });
-  },
+  nativeEnum: (e: object) => z.enum(e as any),
 
   /** Defer schema resolution for recursive types. */
   lazy: <T extends ZodTypeAny>(getter: () => T) =>
@@ -548,7 +551,27 @@ export const z = {
   /** single-property shape helper */
   property: <T extends ZodTypeAny>(key: string, s: T): Record<string, T> => ({ [key]: s }),
   /** compile a schema eagerly (returns the schema) */
-  compile: <T extends ZodTypeAny>(s: T): T => ((s as any)._compile(), s),
+  compile: <T extends ZodTypeAny>(s: T, opts?: { strict?: boolean }): T => {
+    if (opts?.strict) {
+      // strict precompilation walks the whole graph — symbol-keyed fields and
+      // cyclic structures can't be resolved eagerly
+      const seen = new Set<any>();
+      const walk = (sc: any): void => {
+        if (!sc || typeof sc !== "object" || seen.has(sc)) return;
+        seen.add(sc);
+        const d = sc._def;
+        if (!d) return;
+        if (d.type === "lazy") throw new Error("z.compile does not support cyclic schemas; this schema must use the runtime parser");
+        if (d.shape && Object.getOwnPropertySymbols(d.shape).length)
+          throw new Error("z.compile does not support symbol-keyed object fields; this schema must use the runtime parser");
+        for (const k of ["shape", "inner", "in", "out", "element", "keyType", "valueType", "catchall", "options", "items", "getter"])
+          if (d[k]) { const v = d[k]; if (v instanceof ZodType) walk(v); else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") Object.values(v).forEach(walk); }
+      };
+      walk(s);
+    }
+    (s as any)._compile();
+    return s;
+  },
   /** memoize a schema factory */
   memoizer: <A extends any[], R>(fn: (...a: A) => R) => {
     const c = new Map<string, R>();
@@ -796,3 +819,24 @@ export {
   _function as function, _enum as enum, _instanceof as instanceof,
   _catch as catch,
 };
+
+// $Zod* aliases so zod/v4/core imports resolve to the same classes
+export {
+  ZodType as $ZodType, ZodString as $ZodString, ZodNumber as $ZodNumber,
+  ZodBigInt as $ZodBigInt, ZodBoolean as $ZodBoolean, ZodAny as $ZodAny,
+  ZodUnknown as $ZodUnknown, ZodNever as $ZodNever, ZodNull as $ZodNull,
+  ZodUndefined as $ZodUndefined, ZodVoid as $ZodVoid, ZodNaN as $ZodNaN,
+  ZodSymbol as $ZodSymbol, ZodDate as $ZodDate, ZodOptional as $ZodOptional,
+  ZodNullable as $ZodNullable, ZodDefault as $ZodDefault, ZodCatch as $ZodCatch,
+  ZodEffects as $ZodEffects, ZodPipe as $ZodPipe, ZodBranded as $ZodBranded,
+  ZodObject as $ZodObject, ZodArray as $ZodArray, ZodTuple as $ZodTuple,
+  ZodRecord as $ZodRecord, ZodNonOptional as $ZodNonOptional, ZodMap as $ZodMap,
+  ZodSet as $ZodSet, ZodUnion as $ZodUnion,
+  ZodDiscriminatedUnion as $ZodDiscriminatedUnion,
+  ZodIntersection as $ZodIntersection, ZodLiteral as $ZodLiteral,
+  ZodEnum as $ZodEnum, ZodLazy as $ZodLazy, ZodPromise as $ZodPromise,
+  ZodCustom as $ZodCustom, ZodStringbool as $ZodStringbool, ZodFile as $ZodFile,
+  ZodCodec as $ZodCodec, ZodInstanceof as $ZodInstanceof,
+  ZodFunction as $ZodFunction,
+} from "./schema.ts";
+export { ZodError as $ZodError } from "./error.ts";

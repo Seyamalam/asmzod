@@ -3022,6 +3022,22 @@ _azn_encval:
     str x13, [sp, #LN_E]      // klen
     add x14, x10, #9
     str x14, [sp, #LN_F]      // kptr
+    // declared "__proto__" fields are never validated or written — and the
+    // input may carry the key, so strip-mode return-input is unsafe
+    cmp x13, #9
+    b.ne .Ln_obj_nproto
+    ldr x9, [x14]
+    AZ_ADR x11, .Lproto__
+    ldr x11, [x11]
+    cmp x9, x11
+    b.ne .Ln_obj_nproto
+    ldrb w9, [x14, #8]
+    cmp w9, #0x5F
+    b.ne .Ln_obj_nproto
+    mov x9, #1
+    str x9, [sp, #LN_Q]
+    b .Ln_obj_adv
+.Ln_obj_nproto:
     add x15, x14, x13
     str x15, [sp, #LN_C]      // field addr (right after key bytes)
     // copy key bytes + NUL into the path ring (indexed by path depth — safe
@@ -3111,6 +3127,13 @@ _azn_encval:
     b .Ln_obj_adv
 .Ln_obj_st:
     cbnz x0, .Ln_ret
+    ldrb w9, [sp, #LN_O]      // present -> always write the key
+    cbnz w9, .Ln_obj_wk
+    ldr x0, [sp, #LN_G]       // absent -> write only real outputs (defaults)
+    bl _azn_typeof
+    cmp w0, #NAPI_UNDEF
+    b.eq .Ln_obj_adv          // absent + undefined out -> drop the key
+.Ln_obj_wk:
     ldr x9, [sp, #LN_G]       // child out
     ldr x10, [sp, #LN_K]      // child in
     cmp x9, x10
@@ -3124,6 +3147,7 @@ _azn_encval:
     ldr x2, [sp, #LN_J]
     ldr x3, [sp, #LN_G]
     bl AZ_NAPI(napi_set_named_property)
+    cbnz x0, .Ln_ret           // pending exception / bad arg -> hard bail
 .Ln_obj_adv:
     // advance: record = optin(1) + klen(8) + key + field(8)
     ldr x10, [sp, #LN_B]
@@ -3178,6 +3202,22 @@ _azn_encval:
     ldr x2, [sp, #LN_E]
     bl _azn_haskey
     cbnz w0, .Ln_obj_p2next   // schema key -> skip
+    // "__proto__" is dropped in loose/passthrough/catchall, reported by strict
+    ldr x9, [sp, #LN_E]
+    cmp x9, #9
+    b.ne .Ln_obj_p2mode
+    ldr x9, [x20]
+    AZ_ADR x11, .Lproto__
+    ldr x11, [x11]
+    cmp x9, x11
+    b.ne .Ln_obj_p2mode
+    ldrb w9, [x20, #8]
+    cmp w9, #0x5F
+    b.ne .Ln_obj_p2mode
+    ldrb w9, [x27, #1]
+    cmp w9, #1
+    b.ne .Ln_obj_p2next       // non-strict: drop it
+.Ln_obj_p2mode:
     ldr x9, [x27, #2]
     cbnz x9, .Ln_obj_p2ca     // catchall
     ldrb w9, [x27, #1]
@@ -3308,6 +3348,34 @@ _azn_encval:
     ldr x10, [x27, #10]
     cmp x9, x10
     b.ne .Ln_obj_retout
+    // property_names includes enumerable PROTOTYPE keys — a declared key read
+    // from the proto must be written as an own key, so return-input needs
+    // every name to be an own property
+    str xzr, [sp, #LN_M]      // i
+.Ln_obj_richk:
+    ldr w9, [sp, #LN_L]
+    ldr x10, [sp, #LN_M]
+    cmp x10, x9
+    b.hs .Ln_obj_retin
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    ldr x2, [sp, #LN_M]
+    add x3, sp, #LN_J
+    bl AZ_NAPI(napi_get_element)
+    cbnz x0, .Ln_obj_retout
+    mov x0, x26
+    mov x1, x28
+    ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_P
+    bl AZ_NAPI(napi_has_own_property)
+    cbnz x0, .Ln_obj_retout
+    ldrb w9, [sp, #LN_P]
+    cbz w9, .Ln_obj_retout
+    ldr x9, [sp, #LN_M]
+    add x9, x9, #1
+    str x9, [sp, #LN_M]
+    b .Ln_obj_richk
+.Ln_obj_retin:
     str x28, [x19]
     mov x0, #0
     b .Ln_ret
@@ -4705,6 +4773,7 @@ _azn_is_proto:
 .Lex_object:     .ascii "object\0"
 .Lex_tuple:      .ascii "tuple\0"
 .Lex_nonoptional:.ascii "nonoptional\0"
+.Lproto__:      .ascii "__proto__\0"
 .Ls_record:    .ascii "record\0"
 .Ls_Date:      .ascii "Date\0"
 .Ls_getTime:   .ascii "getTime\0"
