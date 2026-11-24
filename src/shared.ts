@@ -34,6 +34,27 @@ export function regId<T>(arr: T[], v: T): number {
   return arr.length - 1;
 }
 
+// zod's abort sentinel — a transform/preprocess returns it to kill the chain
+export const NEVER: never = Object.freeze({ status: "aborted" }) as never;
+
+// the payload ctx zod hands transform/preprocess callbacks — issues pushed
+// here ride along in the run's issue list (fatal by default downstream)
+export const _addIssueCtx = (pushed: any[], inst?: any, value?: any): any => ({
+  value,
+  issues: pushed,
+  addIssue: (issue: any) => {
+    if (typeof issue === "string") {
+      pushed.push({ message: issue, code: "custom", input: value, inst });
+      return;
+    }
+    if (issue.fatal) issue.continue = false;
+    issue.code ??= "custom";
+    if (!("input" in issue)) issue.input = value;
+    issue.inst ??= inst;
+    pushed.push(issue);
+  },
+});
+
 // ---- zod4 issue normalization ----
 // engines emit structured low-level issues; translate to zod@4 shapes
 const FORMAT_NAMES: Record<string, string> = {

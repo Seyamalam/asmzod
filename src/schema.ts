@@ -5,7 +5,7 @@ import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, globalConfig, defaultedIssues } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, ZodRealError, type ZodIssue } from "./error.ts";
-import { msgFns, paramMsg, ensureDefaultMemoizer } from "./shared.ts";
+import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx } from "./shared.ts";
 
 // issues added via ctx.addIssue inside superRefine callbacks during the
 // in-flight engine run; _run splices them over the engine's `custom` slots
@@ -234,7 +234,7 @@ function _zodOptin(s: any): any {
     case "optional": case "exactOptional": case "catch":
       return inner?._zod?.optin === "defaulted" ? "defaulted" : "optional";
     case "default": case "prefault": return "defaulted";
-    case "transform": return s._def.node ? "optional" : inner?._zod?.optin;
+    case "transform": return s instanceof ZodTransform ? "optional" : inner?._zod?.optin;
     case "refine": case "superrefine": case "custom": return inner?._zod?.optin;
     case "pipe": return s._def.prefault ? "defaulted" : s._def.in?._zod?.optin;
     case "codec": return s._def.in?._zod?.optin;
@@ -1073,8 +1073,24 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         }
         return { value: setPath(root, p, cv), issues: cIssues };
       }
-      if (st.type === "transform")
-        return { value: setPath(root, p, await st.fn(cur)), issues: [] };
+      if (st.type === "pipetail") {
+        // `in`'s stages resolved — run the pipe's `out` on the settled value
+        const mark = pendingAsync.length;
+        const or = (st.out as any)._run(cur);
+        for (let i = mark; i < pendingAsync.length; i++)
+          (pendingAsync[i] as any).path = [...(p ?? []), ...((pendingAsync[i] as any).path ?? [])];
+        if (!or.ok)
+          return { value: root, issues: or.issues.map((i: any) => ({ ...i, path: [...(p ?? []), ...(i.path ?? [])] })) };
+        return { value: setPath(root, p, or.value), issues: [] };
+      }
+      if (st.type === "transform") {
+        const out = await st.fn(cur);
+        const mine = ((st as any).pushed ?? []).map(({ path, ...rest }: any) => ({
+          inst: st.inst, schema: st.schema, ...rest, path: [...(p ?? []), ...(path ?? [])],
+        }));
+        if (out === NEVER || mine.length) return { value: root, issues: mine };
+        return { value: setPath(root, p, out), issues: [] };
+      }
       if (st.type === "superrefine") {
         const pushed: any[] = [];
         await st.fn(cur, { addIssue: (i: any) => pushed.push(i) });
@@ -1092,10 +1108,17 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       };
     };
     const allIssues: ZodIssue[] = [];
-    for (const st of pendingAsync) {
-      const r = await runStage(st, value);
-      value = r.value;
-      allIssues.push(...r.issues);
+    // replay IS async context — a transform/outer-run re-entered by pipetail
+    // may suspend again; queue its stage instead of throwing AsyncCheckError
+    asyncMode = true;
+    try {
+      for (const st of pendingAsync) {
+        const r = await runStage(st, value);
+        value = r.value;
+        allIssues.push(...r.issues);
+      }
+    } finally {
+      asyncMode = false;
     }
     if (allIssues.length) return { ok: false as const, issues: allIssues };
     return { ok: true as const, value };
@@ -1575,8 +1598,23 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
       return ir;
     };
     if (kind === "transform") {
-      const r = fn(base);
-      if (isThenable(r)) return queue();
+      // zod passes the payload as ctx — addIssue pushes into the run's issues,
+      // which aborts the enclosing pipe like any other failure
+      const pushed: any[] = [];
+      const r = fn(base, _addIssueCtx(pushed, this, base));
+      if (isThenable(r)) {
+        if (!asyncMode) throw new AsyncCheckError();
+        pendingAsync.push({ type: kind, fn: () => r, pushed, msg: this._def.message, ipath: this._def.path, inst: this, schema: this._def.inner } as any);
+        return ir;
+      }
+      if (pushed.length || r === NEVER) {
+        const mine = pushed.map(({ path, ...rest }: any) => ({ inst: this, schema: this._def.inner, ...rest, path: path ?? [] }));
+        return {
+          ok: false as const,
+          issues: [...(ir.ok ? [] : ir.issues), ...mine],
+          value: r === NEVER ? undefined : r, aborted: true,
+        } as any;
+      }
       if (!ir.ok) return { ok: false as const, issues: ir.issues, aborted: false, value: r } as any;
       return { ok: true as const, value: r };
     }
@@ -1613,6 +1651,7 @@ export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType
 
   protected override _runImpl(data: unknown) {
     if (!this._hasFx() && !(MEMO && _isRef(data) && this._isRec())) return super._runImpl(data);
+    const mark = pendingAsync.length;
     const ir = (this._def.in as any)._run(data);
     if (!ir.ok) {
       // any blocking issue truncates the pipe (aborted); unrecognized keys
@@ -1627,16 +1666,30 @@ export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType
         value: ("value" in or) ? or.value : (("value" in ir) ? ir.value : data),
       } as any;
     }
+    // `in` queued async work (an async transform leaf, a nested async field)
+    // — zod defers `out` behind the payload resolution, so a pipetail stage
+    // replays it after the queued stages write the real value back
+    if (pendingAsync.length > mark) {
+      if (!asyncMode) throw new AsyncCheckError();
+      pendingAsync.push({ type: "pipetail", out: this._def.out, inst: this, schema: this } as any);
+      return { ok: true as const, value: ir.value };
+    }
     const or = (this._def.out as any)._run(ir.value);
     if ((ir as any).memo) (or as any).memo = (or as any).memo ?? true;
     return or;
   }
 }
 
+// zod's ZodPreprocess — a pipe whose `in` is a $ZodTransform; the transform's
+// optin is "optional" so absent object fields still run the fn
+export class ZodPreprocess<B extends ZodTypeAny> extends ZodPipe<ZodTransform, B> {
+  constructor(_def: any) { super(_def); }
+}
+
 // zod's $ZodTransform — the function-holding `out` side of a transform pipe;
 // shares the effects runner with inner=any so the fn applies to the payload
 export class ZodTransform extends ZodEffects<any, any> {
-  constructor(fn: (v: unknown) => unknown) {
+  constructor(fn: (v: unknown, ctx?: any) => unknown) {
     super({
       type: "transform", kind: "transform", inner: new ZodAny(),
       cbid: regId(reg.transform, guardAsync(fn as (v: unknown) => unknown)),

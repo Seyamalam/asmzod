@@ -6,7 +6,7 @@ import {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
-  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform,
+  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess,
   ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema, _zodPattern,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
@@ -14,7 +14,7 @@ import {
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
-import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory, failure as _failure, captureStackTrace } from "./shared.ts";
+import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory, failure as _failure, captureStackTrace, NEVER } from "./shared.ts";
 
 export * from "./schema.ts";
 export * from "./error.ts";
@@ -132,10 +132,10 @@ export const z = {
       args: opts?.input ?? null, ret: opts?.output ?? null,
     }),
   /** Run a transform on the input before validating with the given schema. */
-  preprocess: <T extends ZodTypeAny>(fn: (v: unknown) => unknown, schema: T) =>
-    new ZodPipe<ZodEffects<ZodAny>, T>({
+  preprocess: <T extends ZodTypeAny>(fn: (v: unknown, ctx: any) => unknown, schema: T) =>
+    new ZodPreprocess<T>({
       type: "pipe",
-      in: new ZodEffects<ZodAny>({ type: "transform", inner: new ZodAny(), cbid: regId(reg.transform, fn) }),
+      in: new ZodTransform(fn),
       out: schema,
     }),
 
@@ -293,12 +293,8 @@ export const z = {
     new ZodAny().refine(fn, message),
   superRefine: (fn: (v: unknown, ctx: any) => void) =>
     new ZodAny().superRefine(fn),
-  /** Map the parsed value through a function. */
-  transform: (fn: (v: unknown) => unknown) => {
-    const s = new ZodAny().transform(fn);
-    s._def.node = true; // standalone $ZodTransform node: optin is "optional"
-    return s;
-  },
+  /** Map the parsed value through a function — zod's standalone $ZodTransform. */
+  transform: (fn: (v: unknown) => unknown) => new ZodTransform(fn),
 
   // string-format factories — equivalent to z.string().<fmt>()
   /** Alias of z.string().email(). */
@@ -617,7 +613,21 @@ export const z = {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodPromise, ZodFunction, ZodStringbool,
-  ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform,
+  ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform, ZodPreprocess,
+  NEVER,
+  ZodIssueCode: {
+    invalid_type: "invalid_type",
+    too_big: "too_big",
+    too_small: "too_small",
+    invalid_format: "invalid_format",
+    not_multiple_of: "not_multiple_of",
+    unrecognized_keys: "unrecognized_keys",
+    invalid_union: "invalid_union",
+    invalid_key: "invalid_key",
+    invalid_element: "invalid_element",
+    invalid_value: "invalid_value",
+    custom: "custom",
+  } as const,
 };
 
 // attach the real class
