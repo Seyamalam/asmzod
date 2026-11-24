@@ -1973,12 +1973,18 @@ _az_issue_size_n:
     bl AZ_NAPI(napi_get_value_bigint_int64)
     ldr x2, [sp, #LN_A]
     ldrb w1, [x27, #1]
-    cbz w1, .Ln_big_ok
+    cbz w1, .Ln_big_ok        // no checks: pass the value through regardless of range
+    ldrb w9, [sp, #LN_B]
+    cbz w9, .Ln_big_bail      // lossy i64 + checks -> bail to portable (exact bigint math)
     add x0, x27, #2
     mov x3, x27
     bl _az_run_bigintchecks   // (chkptr,count,i64 val,valptr)
     cmp x0, #0
     b.ne .Ln_ret
+    b .Ln_big_ok
+.Ln_big_bail:
+    mov x0, #-10
+    b .Ln_ret
 .Ln_big_ok:
     str x28, [x19]
     mov x0, #0
@@ -2246,6 +2252,8 @@ _azn_encval:
     add x2, sp, #32
     add x3, sp, #40
     bl AZ_NAPI(napi_get_value_bigint_int64)
+    ldrb w9, [sp, #40]
+    cbz w9, .Lenc_neg         // lossy: tagged i64 can't represent it
     ldr x9, [sp, #24]
     mov w10, #5
     strb w10, [x9]

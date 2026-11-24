@@ -27,6 +27,10 @@ export function encodeValue(v: unknown, hosts: HostTable): Uint8Array {
       return cat(u8(4), u64(s.length), s);
     }
     case "bigint": {
+      // beyond i64 the tagged i64 can't hold it — hostref carries the real
+      // bigint so portable checks compare exactly (zod semantics)
+      if (v > 9223372036854775807n || v < -9223372036854775808n)
+        return cat(u8(8), u64(hostIndex(hosts, v)));
       const b = new Uint8Array(9);
       b[0] = 5;
       new DataView(b.buffer).setBigInt64(1, BigInt.asIntN(64, v), true);

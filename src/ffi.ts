@@ -49,3 +49,11 @@ export function engineParse(blob: Uint8Array, input: Uint8Array, hosts: HostTabl
   const r = portableParse(blob, input, hosts);
   return r.ok ? { ok: true, value: r.value } : { ok: false, issues: finishIssues(r.issues.map(normalizeIssue)) };
 }
+
+// encoded inputs that hostref JS values the FFI engine can't inspect
+// (out-of-i64 bigints) must run the portable engine — FFI hostref kinds
+// only cover symbol/date/map/set
+export function portableEngineParse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): ParseResult {
+  const r = portableParse(blob, input, hosts);
+  return r.ok ? { ok: true, value: r.value } : { ok: false, issues: finishIssues(r.issues.map(normalizeIssue)) };
+}

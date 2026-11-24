@@ -1,6 +1,6 @@
 // schema.ts — schema classes + chaining API (zod3-compatible surface)
 import { compile, type Compiled } from "./bytecode.ts";
-import { engineParse, reg, regId } from "./ffi.ts";
+import { engineParse, portableEngineParse, reg, regId } from "./ffi.ts";
 import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
@@ -34,7 +34,12 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     const nr = napiBackend.parse(c.blob, data, c.hosts, c.cbUnsafe);
     // the encoded engine needs its own hosts array — encodeValue appends
     const hosts: HostTable | undefined = nr === null ? [...c.hosts] : undefined;
-    const r = nr ?? engineParse(c.blob, encodeValue(data, hosts!), hosts!);
+    // a bigint hostref in hosts means encodeValue met an out-of-i64 value —
+    // the FFI engine can't inspect it, so that input runs the portable engine
+    const enc = nr === null ? encodeValue(data, hosts!) : undefined;
+    const r = nr ?? (hosts!.some((v) => typeof v === "bigint")
+      ? portableEngineParse(c.blob, enc!, hosts!)
+      : engineParse(c.blob, enc!, hosts!));
     // `_u`-tagged invalid_union issues (union nodes reached inside containers)
     // get their per-option errors by re-running the registered options on the
     // value at the issue's path
