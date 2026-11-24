@@ -29,7 +29,8 @@ function loadBun(): EngineBackend | null {
   // Bun injects import.meta.require in ESM modules — resolves like import
   const req: undefined | ((spec: string) => any) = (import.meta as any).require;
   if (!req) return null;
-  const m = req("./native/bun.ts");
+  let m: any;
+  try { m = req("./native/bun.ts"); } catch { m = req("./native/bun.js"); }
   return { name: "bun:ffi", version: m.version, parse: (b: Uint8Array, i: Uint8Array, h: HostTable) => m.parse(b, i, h) };
 }
 

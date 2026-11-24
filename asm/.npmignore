@@ -1,1 +1,4 @@
 *.o
+aznc.s
+asmzod-count.node
+*-c.o

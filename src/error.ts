@@ -74,7 +74,7 @@ export class ZodError<T = unknown> extends Error {
     return { formErrors, fieldErrors };
   }
 
-  toString(): string {
+  override toString(): string {
     return this.message;
   }
 }

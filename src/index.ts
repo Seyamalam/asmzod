@@ -205,7 +205,7 @@ export const z = {
     s.transform(() => true) as ZodTypeAny,
 
   // zod3 compatibility aliases
-  ZodError: undefined as unknown as typeof import("./error").ZodError,
+  ZodError: undefined as unknown as typeof import("./error.ts").ZodError,
 };
 
 // attach the real class

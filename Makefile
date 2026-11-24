@@ -15,9 +15,11 @@ test-portable:
 
 test-node:
 	node --test node/node.test.mjs
+	@test -d dist || tsc -p tsconfig.dist.json
+	node --test node/cjs.test.cjs
 
 test-deno:
-	deno test --no-check deno/deno.test.ts
+	deno test --allow-all deno/deno.test.ts
 
 bench:
 	bun bench/bench.ts

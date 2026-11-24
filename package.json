@@ -3,13 +3,23 @@
   "version": "0.2.0",
   "description": "Zod-compatible validation — the validator is hand-written ARM64 assembly (with a portable TS engine for everywhere else)",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "exports": {
-    ".": "./src/index.ts",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./lite": {
+      "types": "./dist/lite.d.ts",
+      "import": "./dist/lite.js",
+      "require": "./dist/lite.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "src",
+    "dist",
     "asm",
     "scripts/postinstall.mjs",
     "FORMAT.md",
@@ -22,7 +32,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "make -C asm",
+    "build": "make -C asm && tsc -p tsconfig.dist.json",
     "test": "bun test",
     "test:portable": "AZ_ENGINE=portable bun test",
     "test:node": "node --test node/node.test.mjs",
@@ -31,15 +41,19 @@
     "bench": "bun bench/bench.ts",
     "postinstall": "node scripts/postinstall.mjs",
     "prepack": "make -C asm || true",
-    "doctor": "bun scripts/doctor.ts"
+    "doctor": "bun scripts/doctor.ts",
+    "build:dist": "tsc -p tsconfig.dist.json"
   },
   "devDependencies": {
+    "@rollup/plugin-typescript": "^12.3.1",
     "bun-types": "^1.2.0",
+    "rollup": "^4.68.8",
     "typescript": "^5.9.0",
     "wrangler": "^4.167.0",
     "zod": "4"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "types": "dist/index.d.ts"
 }
