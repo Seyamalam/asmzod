@@ -85,14 +85,14 @@
 - [x] 72. toJSONSchema parity (done: draft 2020-12, 22-schema diff-clean, unrepresentable throws)
 
 ## P — tooling & CI
-- [ ] 73. scripts/flake.ts (N× rerun, flaky report)
-- [ ] 74. bun test --coverage in make ci
-- [ ] 75. GitHub Actions matrix (macOS × {Bun,Node}, linux × {Bun,Node,Deno}, workerd)
-- [ ] 76. Release workflow (artifacts + npm publish)
-- [ ] 77. scripts/compare.ts (all backends side-by-side)
-- [ ] 78. scripts/asmlint.sh (AZ_NAPI symbols vs port.h, no raw _napi_*)
-- [ ] 79. Bench vs zod@3 toggle
-- [ ] 80. dump --verify structural invariants
+- [x] 73. scripts/flake.ts (N× rerun, flaky report)
+- [x] 74. bun test --coverage in make ci
+- [x] 75. GitHub Actions matrix (macOS × {Bun,Node}, linux × {Bun,Node,Deno}, workerd)
+- [x] 76. Release workflow (artifacts + npm publish)
+- [x] 77. scripts/compare.ts (all backends side-by-side)
+- [x] 78. scripts/asmlint.sh (AZ_NAPI symbols vs port.h, no raw _napi_*)
+- [x] 79. Bench vs zod@3 toggle
+- [x] 80. dump --verify structural invariants
 
 ## Q — docs & distribution
 - [ ] 81. JSDoc pass on public z.* surface

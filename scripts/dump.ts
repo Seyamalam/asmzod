@@ -2,7 +2,8 @@
 // usage: bun scripts/dump.ts '<expr>'   e.g. bun scripts/dump.ts 'z.object({a: z.string()})'
 import { z } from "../src/index.ts";
 
-const expr = process.argv[2] ?? "z.string().min(3)";
+const VERIFY = process.argv.includes("--verify");
+const expr = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? "z.string().min(3)";
 const schema = new Function("z", `return (${expr})`)(z);
 const c = (schema as any)._compile();
 const blob: Uint8Array = c.blob;
@@ -110,8 +111,23 @@ function node(off: number, depth: number) {
       info = ` msg=${JSON.stringify(m)} inner->@${i2}`; kids.push(i2); break; }
   }
   console.log(`${String(at).padStart(5)} ${name}${info}`);
+  if (VERIFY) {
+    if (visited.has(at)) errs.push(`node @${at} visited twice`);
+    visited.add(at);
+    for (const k of kids) {
+      if (k < 0 || k >= blob.length) errs.push(`node @${at}: child @${k} out of bounds`);
+      if (k === at) errs.push(`node @${at} points at itself`);
+    }
+    if (name.startsWith("?")) errs.push(`node @${at}: unknown op`);
+  }
   for (const k of kids) node(k, depth + 1);
 }
 
+const visited = new Set<number>();
+const errs: string[] = [];
 console.log(`blob: ${blob.length}B  hosts:${c.hosts.length} unions:${c.unions.length} cbUnsafe:${c.cbUnsafe}`);
 node(0, 0);
+if (VERIFY) {
+  if (errs.length) { console.error(`${errs.length} blob invariant violations:`); for (const e of errs) console.error(`  ${e}`); process.exit(1); }
+  console.log(`verify: ${visited.size} nodes, all in-bounds`);
+}

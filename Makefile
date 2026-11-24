@@ -8,7 +8,7 @@ typecheck:
 	npx tsc --noEmit
 
 test:
-	bun test
+	bun test $(if $(COVERAGE),--coverage)
 
 test-portable:
 	AZ_ENGINE=portable bun test

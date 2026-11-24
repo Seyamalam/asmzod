@@ -1,5 +1,9 @@
-import * as Z from "zod";
 import { z } from "../src/index";
+
+// --v3 benchmarks against zod@3 via the compat subpath
+const Z: any = process.argv.includes("--v3")
+  ? (await import("zod/v3")).z
+  : await import("zod");
 
 let sink: unknown = null;
 function bench(fn: (i: number) => unknown, iters: number): number {
