@@ -133,7 +133,7 @@ export type ErrorMap = (issue: any) => string | undefined;
 let globalErrorMap: ErrorMap | undefined;
 // issues whose message came from defaultMessage (not schema/engine custom)
 // — WeakSet so the marker can't leak into user-visible keys
-const defaultedIssues = new WeakSet<object>();
+export const defaultedIssues = new WeakSet<object>();
 export function setErrorMap(fn?: ErrorMap) { globalErrorMap = fn; }
 export function getErrorMap() { return globalErrorMap; }
 export function configure(opts: any) {
@@ -163,7 +163,10 @@ export function paramMsg(p: any): string | undefined {
   if (typeof p === "string") return p;
   const e = p.error ?? p.message;
   if (e === undefined) return undefined;
-  if (typeof e === "string") return e;
+  if (typeof e === "string") {
+    if (e === "") { msgFns.push(() => ""); return `\0m${msgFns.length - 1}`; }
+    return e;
+  }
   if (typeof e === "function") {
     msgFns.push(e);
     return `\0m${msgFns.length - 1}`;
@@ -176,7 +179,7 @@ export function defaultMessage(i: any): string {
     case "invalid_type": {
       // zod: message shows parsedType(input); the `received` field may carry a
       // guard-qualified name (Invalid Date) that the message does not use
-      const recv = i.received === "Invalid Date" ? "Date" : i.received;
+      const recv = i.received === "Invalid Date" ? "Date" : (i.received ?? ("input" in i ? parsedTypeName(i.input) : undefined));
       return `Invalid input: expected ${i.expected === "nan" ? "NaN" : i.expected}` +
         (recv !== undefined ? `, received ${recv}` : "");
     }
@@ -303,7 +306,10 @@ export function normalizeIssue(i: any): any {
   delete out._keepReceived;
   // zod's issue objects carry fields in creation order — snapshots serialize
   // that order, so normalize to it (expected-first for invalid_type etc)
-  const ord = ISSUE_ORDER[out.code as string];
+  // zod builds nonoptional issues from a code-first literal, unlike the
+  // expected-first order of every other invalid_type
+  const ord = out.code === "invalid_type" && out.expected === "nonoptional"
+    ? NONOPT_ORDER : ISSUE_ORDER[out.code as string];
   if (ord) {
     const ordOut: any = {};
     for (const k of ord) if (k in out) ordOut[k] = out[k];
@@ -314,6 +320,7 @@ export function normalizeIssue(i: any): any {
   return out;
 }
 
+const NONOPT_ORDER = ["code", "expected", "input", "path", "message"];
 // field order of zod issue objects (their finalizeIssue copies creation order)
 const ISSUE_ORDER: Record<string, string[]> = {
   invalid_type: ["expected", "format", "code", "input", "path", "message", "received"],
@@ -359,4 +366,102 @@ export const memoizerFactory = () => ({
 });
 export function ensureDefaultMemoizer(): void {
   if (!globalConfig.memoizer) globalConfig.memoizer = memoizerFactory();
+}
+
+export function unwrapMessage(m: any): string | undefined {
+  return typeof m === "string" ? m : m?.message;
+}
+
+// v8 captures the stack inside the Error ctor — suppress it for safeParse's
+// lazily-built error; parse() re-adds frames with captureStackTrace. Latched
+// off entirely when stackTraceLimit is unassignable (hardened realms) or
+// captureStackTrace is absent (old Safari), where suppression is unrecoverable
+let _suppE: any = "captureStackTrace" in Error ? Error : null;
+export function newError(make: () => any): any {
+  const E = _suppE;
+  if (E) {
+    const saved = E.stackTraceLimit;
+    if (typeof saved === "number") {
+      try {
+        E.stackTraceLimit = 0;
+      } catch {
+        _suppE = null;
+        return make();
+      }
+      try {
+        return make();
+      } finally {
+        E.stackTraceLimit = saved;
+      }
+    }
+  }
+  return make();
+}
+
+export const captureStackTrace: (t: object, fn?: Function) => void =
+  "captureStackTrace" in Error ? (Error as any).captureStackTrace : () => {};
+
+// exact port of zod's util.finalizeIssue — map ladder: check's own error
+// (iss.inst) > owning schema's error (iss.schema) > contextual > customError >
+// localeError > "Invalid input"; own-string-key copy minus internal slots
+export function finalizeIssue(iss: any, ctx: any, config: any): any {
+  const traits = iss.inst?._zod?.traits;
+  if (traits?.has("$ZodType") || iss.inst?._def !== undefined) {
+    if (traits?.has("$ZodCheck")) iss.schema ??= iss.inst;
+    else iss.schema = iss.inst;
+  }
+  const schemaError = iss.schema !== iss.inst ? iss.schema?._zod?.def?.error ?? iss.schema?._def?.error : undefined;
+  // a message normalizeIssue assigned from defaults is soft — the ladder wins
+  const hard = iss.message !== undefined && !defaultedIssues.has(iss) ? iss.message : undefined;
+  // _zod.def and _def are the same object on our classes — read once or
+  // fn-valued error params get invoked twice
+  const instDef = iss.inst?._zod?.def ?? iss.inst?._def;
+  const instErr = instDef?.error;
+  const message = hard !== undefined
+    ? hard
+    : (unwrapMessage(typeof instErr === "function" ? instErr(iss) : instErr) ??
+      unwrapMessage(typeof schemaError === "function" ? schemaError(iss) : schemaError) ??
+      unwrapMessage(ctx?.error?.(iss)) ??
+      unwrapMessage(config.customError?.(iss)) ??
+      unwrapMessage(config.localeError?.(iss)) ??
+      defaultMessage(iss));
+  const full: any = {};
+  for (const k of Object.keys(iss)) {
+    if (k === "inst" || k === "schema" || k === "continue" || k === "input" || k === "__proto__") continue;
+    full[k] = iss[k];
+  }
+  full.path ??= [];
+  full.message = message;
+  if (ctx?.reportInput) full.input = iss.input;
+  return full;
+}
+
+// the lazy-error result object — error materializes on first read
+export function failure(Err: any, issues: any[], ctx: any): any {
+  let error: any;
+  return {
+    success: false,
+    get error() {
+      if (!error) {
+        error = newError(() => new Err(issues.map((iss: any) => finalizeIssueTree(iss, ctx, globalConfig))));
+        issues = undefined as any;
+        ctx = undefined;
+      }
+      return error;
+    },
+    set error(e: any) {
+      error = e;
+      issues = undefined as any;
+      ctx = undefined;
+    },
+  };
+}
+
+// finalizeIssue over a whole tree — union errors / record+map nested issues
+// carry arrays of raw issues that finalize with the same ctx
+export function finalizeIssueTree(iss: any, ctx: any, config: any): any {
+  const f = finalizeIssue(iss, ctx, config);
+  if (Array.isArray(f.errors)) f.errors = f.errors.map((a: any) => Array.isArray(a) ? a.map((i: any) => finalizeIssueTree(i, ctx, config)) : a);
+  if (Array.isArray(f.issues)) f.issues = f.issues.map((i: any) => finalizeIssueTree(i, ctx, config));
+  return f;
 }

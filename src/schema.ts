@@ -2,9 +2,9 @@
 import { compile, type Compiled } from "./bytecode.ts";
 import { engineParse, portableEngineParse, reg, regId } from "./ffi.ts";
 import * as napiBackend from "./native/napi.ts";
-import { parsedTypeName, defaultMessage, applyErrorMaps } from "./shared.ts";
+import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, globalConfig, defaultedIssues } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
-import { ZodError, type ZodIssue } from "./error.ts";
+import { ZodError, ZodRealError, type ZodIssue } from "./error.ts";
 import { msgFns, paramMsg, ensureDefaultMemoizer } from "./shared.ts";
 
 // issues added via ctx.addIssue inside superRefine callbacks during the
@@ -108,6 +108,54 @@ function _isRecWalk(inst: any, stack: Set<object>, resolve: boolean): number {
 function _cloneIssues(iss: any[]): any[] {
   return iss.map((i) => (i.path ? { ...i, path: i.path.slice() } : { ...i }));
 }
+// schema-graph walk for JS-callback effect nodes — the engines can't host
+// them, and zod still runs each node's own checks on a best-effort payload
+// when children fail, so any container holding them runs at TS level
+const _FX_KINDS = new Set(["transform", "refine", "superrefine"]);
+const _fxCache = new WeakMap<object, boolean>();
+function _hasFxWalk(inst: any, stack: Set<any>): boolean {
+  if (inst == null || (typeof inst !== "object" && typeof inst !== "function")) return false;
+  if (stack.has(inst)) return false;
+  const cached = _fxCache.get(inst);
+  if (cached !== undefined) return cached;
+  stack.add(inst);
+  let hit = false;
+  const d = inst._def ?? inst._zod?.def ?? {};
+  const kind = d.kind ?? d.type;
+  if (_FX_KINDS.has(kind) && typeof d.fn === "function") hit = true;
+  if (!hit) {
+    const see = (v: any): boolean => _isSchema(v) && _hasFxWalk(v, stack);
+    const seeList = (v: any): boolean => Array.isArray(v) && v.some(see);
+    for (const key in d) {
+      const desc = Object.getOwnPropertyDescriptor(d, key);
+      if (!desc) continue;
+      let v: any;
+      if (desc.get) {
+        // def-level accessors (shape maps etc) resolve cached structures —
+        // safe to read. Deferred FIELD getters live on the resolved shape and
+        // can construct fresh schema graphs per call — never invoke those.
+        try { v = d[key]; } catch { hit = true; break; }
+      } else v = desc.value;
+      if (see(v) || seeList(v)) { hit = true; break; }
+      if (v && typeof v === "object" && !Array.isArray(v) && !_isSchema(v)) {
+        for (const sk of Reflect.ownKeys(v)) {
+          const sd = Object.getOwnPropertyDescriptor(v, sk);
+          if (!sd || !sd.enumerable) continue;
+          // a deferred field MIGHT hide effects — assume so; the runtime
+          // resolves it and dispatches correctly
+          if (sd.get) { hit = true; break; }
+          if (see(sd.value) || seeList(sd.value)) { hit = true; break; }
+        }
+      }
+      if (hit) break;
+    }
+    if (!hit && d.type === "lazy") hit = d._cachedInner ? see(d._cachedInner) : true;
+  }
+  stack.delete(inst);
+  _fxCache.set(inst, hit);
+  return hit;
+}
+
 // zod's public variant — resolves deferred edges on the walk path
 export function isRecursiveSchema(inst: any): boolean {
   return _isRecWalk(inst, new Set(), true) !== _REC_NONE;
@@ -323,6 +371,151 @@ function _zodPattern(s: any): any {
   return inner?._zod?.pattern;
 }
 
+// zod's check params: {error, message, path, params, abort} — error and
+// message can't coexist; a bare string is the message; a bare fn is error
+function _checkParams(p: any): any {
+  if (p == null) return {};
+  if (typeof p === "string") return { message: p };
+  if (typeof p === "function") return { error: p };
+  if (typeof p !== "object") return {};
+  if (p.error !== undefined && p.message !== undefined)
+    throw new Error("Cannot use both 'error' and 'message' params in a check");
+  return {
+    error: typeof p.error === "string" || typeof p.error === "function" ? p.error : p.error?.message,
+    message: paramMsg(p.message),
+    path: Array.isArray(p.path) ? p.path : undefined,
+    params: p.params,
+    abort: p.abort,
+  };
+}
+
+function _pathGet(data: any, path: any[] | undefined): any {
+  let v = data;
+  for (const p of path ?? []) {
+    if (v == null) return undefined;
+    const k = p && typeof p === "object" && "key" in p ? p.key : p;
+    v = v[k as any];
+  }
+  return v;
+}
+
+function _stampTree(i: any, inst: any, data: any): void {
+  i.inst ??= inst;
+  if (!("input" in i)) i.input = _pathGet(data, i.path);
+  if (Array.isArray(i.errors))
+    for (const a of i.errors) for (const j of a) _stampTree(j, inst, data);
+  if (Array.isArray(i.issues))
+    for (const j of i.issues) _stampTree(j, inst, data);
+}
+
+function _stampIss(r: any, inst: any, data?: any): void {
+  if (r && !r.ok && r.issues) for (const i of r.issues) _stampTree(i, inst, data);
+}
+
+const _ctxFrom = (params: any, async_: boolean): any =>
+  params ? { ...params, async: async_, error: params.error ?? (typeof params === "function" ? params : undefined) }
+       : { async: async_ };
+
+// MEMO-scoped sync run — parse and safeParse share it
+function _runScoped(schema: any, value: unknown): any {
+  const prev = MEMO;
+  MEMO = { buckets: new WeakMap() };
+  try { return schema._run(value); } finally { MEMO = prev; }
+}
+
+export const _parse = (Err: any) => {
+  const fn = (schema: any, value: unknown, _ctx?: any, _params?: any) => {
+    const ctx = _ctxFrom(_ctx, false);
+    const r = _runScoped(schema, value);
+    if (!r.ok) {
+      const e = new (_params?.Err ?? Err)(r.issues.map((i: any) => finalizeIssueTree(i, ctx, globalConfig)));
+      captureStackTrace(e, _params?.callee ?? fn);
+      throw e;
+    }
+    return r.value;
+  };
+  return fn;
+};
+
+export const _safeParse = (Err: any) => (schema: any, value: unknown, _ctx?: any) => {
+  const ctx = _ctxFrom(_ctx, false);
+  const r = _runScoped(schema, value);
+  return r.ok ? { success: true, data: r.value } : failure(Err, r.issues, ctx);
+};
+
+export const _parseAsync = (Err: any) => {
+  const fn = async (schema: any, value: unknown, _ctx?: any, _params?: any) => {
+    const ctx = _ctxFrom(_ctx, true);
+    let r = schema._runAsyncScoped(value);
+    if (r instanceof Promise) r = await r;
+    if (!r.ok) {
+      const e = new (_params?.Err ?? Err)(r.issues.map((i: any) => finalizeIssueTree(i, ctx, globalConfig)));
+      captureStackTrace(e, _params?.callee ?? fn);
+      throw e;
+    }
+    return r.value;
+  };
+  return fn;
+};
+
+export const _safeParseAsync = (Err: any) => async (schema: any, value: unknown, _ctx?: any) => {
+  const ctx = _ctxFrom(_ctx, true);
+  let r = schema._runAsyncScoped(value);
+  if (r instanceof Promise) r = await r;
+  return r.ok ? { success: true, data: r.value } : failure(Err, r.issues, ctx);
+};
+
+// encode family — the backward traversal; errors get the callee-stripped
+// stack of whichever entry raised them, resuppressed safeParse errors included
+export const _mkEncode = (Err: any) => {
+  const fn = (schema: any, value: unknown, _ctx?: any, _params?: any) => {
+    try {
+      return _encodeScoped(schema, value);
+    } catch (e: any) {
+      if (e instanceof Error) captureStackTrace(e, _params?.callee ?? fn);
+      throw e;
+    }
+  };
+  return fn;
+};
+
+export const _mkEncodeAsync = (Err: any) => {
+  const fn = async (schema: any, value: unknown, _ctx?: any, _params?: any) => {
+    try {
+      let r = _encodeScoped(schema, value);
+      if (r instanceof Promise) r = await r;
+      return r;
+    } catch (e: any) {
+      if (e instanceof Error) captureStackTrace(e, _params?.callee ?? fn);
+      throw e;
+    }
+  };
+  return fn;
+};
+
+export const _mkSafeEncode = (Err: any) => (schema: any, value: unknown, _ctx?: any) => {
+  try {
+    return { success: true as const, data: _encodeScoped(schema, value) };
+  } catch (e: any) {
+    const issues = e?.issues ? e.issues : [{ code: "custom", path: [], message: String(e?.message ?? e), input: value }];
+    return failure(Err, issues, _ctxFrom(_ctx, false));
+  }
+};
+
+export const _mkSafeEncodeAsync = (Err: any) => async (schema: any, value: unknown, _ctx?: any) => {
+  try {
+    return { success: true as const, data: await _encodeScoped(schema, value) };
+  } catch (e: any) {
+    const issues = e?.issues ? e.issues : [{ code: "custom", path: [], message: String(e?.message ?? e), input: value }];
+    return failure(Err, issues, _ctxFrom(_ctx, true));
+  }
+};
+
+export const _decode = _parse;
+export const _decodeAsync = _parseAsync;
+export const _safeDecode = _safeParse;
+export const _safeDecodeAsync = _safeParseAsync;
+
 export abstract class ZodType<Output = unknown, Input = Output> {
   readonly _output!: Output;
   readonly _input!: Input;
@@ -330,7 +523,18 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   __zod: any;
   private _rec: boolean | undefined;
   private _recChecked = false;
-  constructor() { ensureDefaultMemoizer(); }
+  constructor() {
+    ensureDefaultMemoizer();
+    // zod's $constructor binds proto methods onto each instance — detached
+    // `schema.parse` keeps `this`
+    for (const k of ["parse", "parseAsync", "safeParse", "safeParseAsync", "spa",
+                     "encode", "decode", "encodeAsync", "decodeAsync"]) {
+      const m = (this as any)[k];
+      if (typeof m === "function") (this as any)[k] = m.bind(this);
+    }
+  }
+
+  protected _hasFx(): boolean { return _hasFxWalk(this, new Set()); }
 
   // latched recursion check — ASSUMED answers count as recursive for the
   // current parse without being cached, matching zod's memoizer latch
@@ -393,6 +597,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   protected _run(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
+    const r = this._runImpl(data) as any;
+    _stampIss(r, this, data);
+    return r;
+  }
+  protected _runImpl(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const c = this._compile();
     // direct N-API validation walks the JS value natively (no encode/decode);
     // null -> schema needs the encoded engine path (callbacks, unions, ...)
@@ -474,36 +683,29 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   parse(data: unknown, params?: any): Output {
-    const prev = MEMO;
-    MEMO = { buckets: new WeakMap() };
-    try {
-      const r = this._run(data);
-      if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); throw new ZodError(r.issues); }
-      return r.value as Output;
-    } finally { MEMO = prev; }
+    return _parse(ZodRealError)(this, data, params, { callee: ZodType.prototype.parse });
   }
 
   safeParse(data: unknown, params?: any): SafeParseResult<Output> {
-    const prev = MEMO;
-    MEMO = { buckets: new WeakMap() };
-    try {
-      const r = this._run(data);
-      if (r.ok) return { success: true, data: r.value as Output };
-      applyErrorMaps(r.issues, params?.error ?? params);
-      return { success: false, error: new ZodError(r.issues) };
-    } finally { MEMO = prev; }
+    return _safeParse(ZodRealError)(this, data, params);
   }
 
-  async parseAsync(data: unknown): Promise<Output> {
-    const r = await this.safeParseAsync(data);
-    if (!r.success) throw new ZodError(r.error.issues);
-    return r.data;
+  async parseAsync(data: unknown, params?: any): Promise<Output> {
+    return await _parseAsync(ZodRealError)(this, data, params, { callee: ZodType.prototype.parseAsync });
   }
 
-  decode(data: unknown, params?: any): any { return this.parse(data, params); }
-  encode(data: unknown): any { return _encodeScoped(this, data); }
-  async decodeAsync(data: unknown): Promise<any> { return this.parseAsync(data); }
-  async encodeAsync(data: unknown): Promise<any> { return this.encode(data); }
+  decode(data: unknown, params?: any): any {
+    return _decode(ZodRealError)(this, data, params, { callee: ZodType.prototype.decode });
+  }
+  encode(data: unknown, params?: any): any {
+    return _mkEncode(ZodRealError)(this, data, params, { callee: ZodType.prototype.encode });
+  }
+  async decodeAsync(data: unknown, params?: any): Promise<any> {
+    return await _decodeAsync(ZodRealError)(this, data, params, { callee: ZodType.prototype.decodeAsync });
+  }
+  async encodeAsync(data: unknown, params?: any): Promise<any> {
+    return await _mkEncodeAsync(ZodRealError)(this, data, params, { callee: ZodType.prototype.encodeAsync });
+  }
   /** zod's wrapper unwrap — the single inner schema, undefined elsewhere */
   unwrap(): any { return (this._def as any).inner ?? (this._def as any).innerType; }
 
@@ -538,11 +740,12 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return new ZodIntersection({ type: "intersect", left: this, right });
   }
   refine(fn: (v: Output) => boolean, message?: any): ZodEffects<this, Output> {
+    const p = _checkParams(message);
     return new ZodEffects({
       type: "refine", inner: this,
       cbid: regId(reg.refine, guardAsync(fn as (v: unknown) => unknown)),
-      fn, kind: "refine", message: paramMsg(message),
-      path: message && typeof message === "object" && Array.isArray(message.path) ? message.path : undefined,
+      fn, kind: "refine", message: p.message, error: p.error,
+      path: p.path, params: p.params, abort: p.abort,
     });
   }
   refinement(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
@@ -651,7 +854,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       },
     };
   }
-  async safeParseAsync(data: unknown, params?: any): Promise<SafeParseResult<Output>> {
+  safeParseAsync(data: unknown, params?: any): Promise<SafeParseResult<Output>> {
+    return _safeParseAsync(ZodRealError)(this, data, params);
+  }
+
+  // async run producing a raw {ok,value|issues} result — the public
+  // safe/parse variants finalize issues through the lazy-error boundary
+  private _runAsyncScoped(data: unknown): any {
     asyncMode = true;
     pendingAsync.length = 0;
     const prevMemo = MEMO;
@@ -663,9 +872,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       asyncMode = false;
       MEMO = prevMemo;
     }
-    if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); return { success: false, error: new ZodError(r.issues) }; }
-    if (!pendingAsync.length) return { success: true, data: r.value as Output };
-    let value = r.value;
+    if (!r.ok) return r;
+    if (!pendingAsync.length) return r;
+    return this._finishAsync(r.value);
+  }
+  private async _finishAsync(value: any): Promise<any> {
     // stages can carry a path (record/object children queue nested async
     // checks) — apply them to that position, not the root
     const atPath = (v: any, p: any[] | undefined) => (p?.length ? p.reduce((o, k) => o?.[k], v) : v);
@@ -688,18 +899,15 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         const pushed: any[] = [];
         await st.fn(cur, { addIssue: (i: any) => pushed.push(i) });
         for (const { path, ...rest } of pushed)
-          allIssues.push({ ...rest, path: [...(pp ?? []), ...(path ?? [])] });
+          allIssues.push({ ...rest, inst: (st as any).inst, schema: (st as any).schema, path: [...(pp ?? []), ...(path ?? [])] });
       } else {
         const res = await st.fn(cur);
         if (!res)
-          allIssues.push({ code: "custom", path: [...(pp ?? []), ...((st as any).ipath ?? [])], message: st.msg ?? "Invalid input" } as ZodIssue);
+          allIssues.push({ code: "custom", path: [...(pp ?? []), ...((st as any).ipath ?? [])], message: st.msg ?? "Invalid input", inst: (st as any).inst, schema: (st as any).schema } as ZodIssue);
       }
     }
-    if (allIssues.length) {
-      applyErrorMaps(allIssues, params?.error ?? params);
-      return { success: false, error: new ZodError(allIssues) };
-    }
-    return { success: true, data: value as Output };
+    if (allIssues.length) return { ok: false as const, issues: allIssues };
+    return { ok: true as const, value };
   }
   // extension: batch-validate through the addon's in-native loop when
   // available; per-element results like a map of safeParse
@@ -967,49 +1175,49 @@ export class ZodDate extends ZodType<Date> {
 export class ZodOptional<T extends ZodTypeAny> extends ZodType<T["_output"] | undefined, T["_input"] | undefined> {
   constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (this._isRec()) {
       if (data === undefined) return { ok: true as const, value: undefined };
       return (this._def.inner as any)._run(data);
     }
-    return super._run(data);
+    return super._runImpl(data);
   }
 }
 export class ZodNullable<T extends ZodTypeAny> extends ZodType<T["_output"] | null, T["_input"] | null> {
   constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (this._isRec()) {
       if (data === null) return { ok: true as const, value: null };
       return (this._def.inner as any)._run(data);
     }
-    return super._run(data);
+    return super._runImpl(data);
   }
 }
 export class ZodDefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"] | undefined> {
   constructor(_def: any) { super(); this._def = _def; }
   removeDefault() { return this._def.inner as T; }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (this._isRec()) {
       const v = data === undefined
         ? (typeof this._def.value === "function" ? this._def.value() : this._def.value)
         : data;
       return (this._def.inner as any)._run(v);
     }
-    return super._run(data);
+    return super._runImpl(data);
   }
 }
 export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
   removeCatch() { return this._def.inner as T; }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (this._isRec()) {
       const r = (this._def.inner as any)._run(data);
       if (r.ok) return r;
       const v = typeof this._def.value === "function" ? this._def.value() : this._def.value;
       return { ok: true as const, value: v };
     }
-    return super._run(data);
+    return super._runImpl(data);
   }
 }
 export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<N, T["_input"]> {
@@ -1066,12 +1274,12 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   // effects always run at the TS level — the compiled engine can't host them
   // in nested positions (record keys etc). only thenable results queue for
   // safeParseAsync's replay; sync effects stay transparent in async mode too.
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const kind = this._def.kind ?? this._def.type;
     // coerce_* and check-record wrappers compile to engine ops — only
     // JS-callback effects (transform/refine/superrefine) run here
     if (kind !== "transform" && kind !== "superrefine" && kind !== "refine")
-      return super._run(data);
+      return super._runImpl(data);
     const ir = (this._def.inner as any)._run(data);
     // back-edge hit: the value is an in-flight container — its own parse owns
     // the checks, and a transform's output can't exist in time to bind
@@ -1083,7 +1291,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
     // inner failed non-aborted: zod keeps running the check chain on the
     // parsed-so-far payload — re-run inner minus its unrecognized keys to get
     // it (no user callbacks re-fire), falling back to the raw input
-    let base: any = ir.ok ? ir.value : data;
+    let base: any = ir.ok ? ir.value : ("value" in (ir as any) ? (ir as any).value : data);
     if (!ir.ok && data !== null && typeof data === "object" && !Array.isArray(data)) {
       const drop = new Set<PropertyKey>();
       for (const iss of ir.issues)
@@ -1102,7 +1310,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
     if (kind === "transform" && MEMO?.backEdges?.has(base)) throw new ZodCyclicError();
     const queue = () => {
       if (!asyncMode) throw new AsyncCheckError();
-      pendingAsync.push({ type: kind, fn, msg: this._def.message, ipath: this._def.path });
+      pendingAsync.push({ type: kind, fn, msg: this._def.message, ipath: this._def.path, inst: this, schema: this._def.inner } as any);
       return ir;
     };
     if (kind === "transform") {
@@ -1115,14 +1323,20 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
       const pushed: any[] = [];
       const r = fn(base, { addIssue: (i: any) => pushed.push(i) });
       if (isThenable(r)) return queue();
-      const mine = pushed.map(({ path, ...rest }: any) => ({ ...rest, path: path ?? [] }));
+      const mine = pushed.map(({ path, ...rest }: any) => ({ inst: this, schema: this._def.inner, ...rest, path: path ?? [] }));
       if (ir.ok) return mine.length ? { ok: false as const, issues: mine } : ir;
       return { ok: false as const, issues: [...ir.issues, ...mine], value: base } as any;
     }
     const r = fn(base);
     if (isThenable(r)) return queue();
     if (!r) {
-      const mine = [{ code: "custom", path: this._def.path ?? [], message: this._def.message ?? "Invalid input" }] as any;
+      const iss: any = {
+        code: "custom", input: base, inst: this, schema: this._def.inner,
+        path: [...(this._def.path ?? [])], continue: !this._def.abort,
+      };
+      if (this._def.params) iss.params = this._def.params;
+      if (this._def.message !== undefined) iss.message = this._def.message;
+      const mine = [iss];
       return ir.ok
         ? { ok: false as const, issues: mine }
         : { ok: false as const, issues: [...ir.issues, ...mine], value: base } as any;
@@ -1133,8 +1347,8 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
 export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<B["_output"], A["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
 
-  protected override _run(data: unknown) {
-    if (!(MEMO && _isRef(data) && this._isRec())) return super._run(data);
+  protected override _runImpl(data: unknown) {
+    if (!(MEMO && _isRef(data) && this._isRec())) return super._runImpl(data);
     const ir = (this._def.in as any)._run(data);
     if (!ir.ok) return ir;
     return (this._def.out as any)._run(ir.value);
@@ -1255,7 +1469,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
   // the string keys and symbol fields are validated here at TS level.
   // undeclared input symbols are intentionally invisible to every engine,
   // matching zod's deliberate ignore-don't-flag behavior.
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const shape = this._def.shape;
     // zod reads declared keys through the prototype chain and validates exotic
     // objects the same as plain ones — engines only see own enumerable props,
@@ -1280,8 +1494,16 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     const syms = Reflect.ownKeys(shape).filter((k): k is symbol => typeof k === "symbol");
     if (MEMO && _isRef(data) && !Array.isArray(data) && this._isRec())
       return _memoRun(this, data, () => ({}), (out) => this._runTSObj(input, out));
+    // JS-callback effects anywhere below need TS-level orchestration — the
+    // engine skips a node's own checks once its children fail, while zod runs
+    // them on the best-effort payload
+    if (this._hasFx()) {
+      const rr = this._runTSObj(input);
+      _stampIss(rr, this, data);
+      return rr;
+    }
     try {
-      const r = super._run(input);
+      const r = super._runImpl(input);
       if (!syms.length) return r;
       const out: any = r.ok ? { ...(r.value as object) } : {};
       const symIssues: any[] = [];
@@ -1294,7 +1516,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
           if (!present && fd._def?.type === "exactOptional") continue;
           const res = (fd as any)._run((input as any)[k]);
           if (!present && fd._zod.optin === undefined && res.ok) {
-            symIssues.push({ expected: "nonoptional", code: "invalid_type",
+            symIssues.push({ code: "invalid_type", expected: "nonoptional",
               path: [k], message: "Invalid input: expected nonoptional, received undefined" });
           } else if (res.ok) {
             if (present || res.value !== undefined) out[k] = res.value;
@@ -1339,7 +1561,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
       for (let i = mark; i < pendingAsync.length; i++)
         (pendingAsync[i] as any).path = [k, ...((pendingAsync[i] as any).path ?? [])];
       if (!present && res.ok && f._zod.optin === undefined) {
-        issues.push({ expected: "nonoptional", code: "invalid_type",
+        issues.push({ code: "invalid_type", expected: "nonoptional",
           path: [k], message: "Invalid input: expected nonoptional, received undefined" });
         continue;
       }
@@ -1455,15 +1677,32 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
   constructor(_def: any) { super(); this._def = _def; }
   unwrap(): T { return this._def.element; }
   get element(): T { return this._def.element; }
-  min(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, _minMsg: message }); }
-  max(n: number, message?: string) { return new ZodArray({ ...this._def, maxLen: n, _maxMsg: message }); }
-  length(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, maxLen: n, exactLen: true }); }
+  min(n: number, message?: any) { return new ZodArray({ ...this._def, minLen: n, _minMsg: paramMsg(message) }); }
+  max(n: number, message?: any) { return new ZodArray({ ...this._def, maxLen: n, _maxMsg: paramMsg(message) }); }
+  length(n: number, message?: any) { return new ZodArray({ ...this._def, minLen: n, maxLen: n, exactLen: true, _minMsg: paramMsg(message), _maxMsg: paramMsg(message) }); }
   nonempty(message?: string) { return this.min(1, message); }
 
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
+    const mm = this._def._minMsg, xm = this._def._maxMsg;
+    if (mm === undefined && xm === undefined) return this._runArrImpl(data);
+    const r = this._runArrImpl(data) as any;
+    // size params: this node's own too_small/too_big sits at path [] — patch
+    // its message (nested arrays' issues carry deeper paths)
+    if (!r.ok) for (const i of r.issues) {
+      const msg = i.code === "too_small" && Number(i.minimum) === Number(this._def.minLen) ? mm
+        : i.code === "too_big" && Number(i.maximum) === Number(this._def.maxLen) ? xm : undefined;
+      if (msg !== undefined && (i.path?.length ?? 0) === 0 && i.origin === "array") {
+        i.message = msg.charCodeAt(0) === 0 ? msgFns[+msg.slice(2)]?.(i) ?? i.message : msg;
+        defaultedIssues.delete(i);
+      }
+    }
+    return r;
+  }
+  private _runArrImpl(data: unknown) {
     // recursive-capable subtree: the engine can't close a reference cycle,
     // so recursive arrays validate per-element at TS level through the memo
-    if (!(MEMO && Array.isArray(data) && this._isRec())) return super._run(data);
+    if (!this._hasFx() && !(MEMO && Array.isArray(data) && this._isRec())) return super._runImpl(data);
+    if (!Array.isArray(data)) return super._runImpl(data);
     const el = this._def.element as any;
     const d = this._def;
     return _memoRun(this, data, () => new Array(data.length), (out: any[]) => {
@@ -1497,8 +1736,9 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
     return new ZodTuple({ ...this._def, rest: r }) as any;
   }
 
-  protected override _run(data: unknown) {
-    if (!(MEMO && Array.isArray(data) && this._isRec())) return super._run(data);
+  protected override _runImpl(data: unknown) {
+    if (!this._hasFx() && !(MEMO && Array.isArray(data) && this._isRec())) return super._runImpl(data);
+    if (!Array.isArray(data)) return super._runImpl(data);
     const items: any[] = this._def.items ?? [];
     const rest = this._def.rest as any;
     return _memoRun(this, data, () => new Array(data.length), (out) => {
@@ -1577,7 +1817,7 @@ export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodTy
   // closed key sets own every universe key; open keyTypes constrain each
   // input key (numeric-string retry covers number keyTypes). "__proto__" is
   // never read, validated, or written — in or out.
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const kt = this._def.keyType as any;
     const vt = this._def.valueType as any;
     const mode: string = this._def.mode ?? "strict";
@@ -1680,8 +1920,17 @@ export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodTy
 // code), but every key/value still validates through the ARM64 engine.
 export class ZodNonOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodType<NonNullable<T["_output"]>, T["_input"]> {
   constructor(_def: any) { super(); this._def = { ..._def, type: "nonoptional" }; }
-  protected override _run(data: unknown) {
-    if (data === undefined) return { ok: false as const, issues: [typeIssue("nonoptional", data)], aborted: true };
+  protected override _runImpl(data: unknown) {
+    const nir = (this._def.inner as any)._run(data);
+    if (nir.ok && nir.value === undefined) {
+      const iss: any = {
+        code: "invalid_type", expected: "nonoptional", input: undefined, path: [],
+        message: "Invalid input: expected nonoptional, received undefined",
+      };
+      defaultedIssues.add(iss);
+      return { ok: false as const, issues: [iss], aborted: true };
+    }
+    return nir;
     return (this._def.inner as any)._run(data);
   }
 }
@@ -1755,6 +2004,28 @@ export function _encode(s: any, v: any): any {
         for (const k of Object.keys(v)) if (!Object.prototype.hasOwnProperty.call(d.shape, k)) out[k] = v[k];
       return out;
     }
+    case "optional": case "exactOptional":
+      return v === undefined ? undefined : _encode(d.inner ?? d.innerType, v);
+    case "nullable":
+      return v === null ? null : _encode(d.inner ?? d.innerType, v);
+    case "nonoptional": {
+      // inner may pass undefined through cleanly — that earns the
+      // nonoptional issue, same gate as the parse direction
+      const ev = _encode(d.inner ?? d.innerType, v);
+      if (ev === undefined) {
+        const r = s.safeParse(v);
+        if (!r.success) throw r.error;
+      }
+      return ev;
+    }
+    case "default": case "prefault":
+      return _encode(d.inner ?? d.innerType,
+        v === undefined ? (typeof d.value === "function" ? d.value() : d.value) : v);
+    case "catch":
+      try { return _encode(d.inner ?? d.innerType, v); }
+      catch { return typeof d.value === "function" ? d.value() : d.value; }
+    case "readonly": case "brand": case "success":
+      return _encode(d.inner ?? d.innerType, v);
     default: {
       const inner = d.inner ?? d.innerType;
       if (inner) return _encode(inner, v);
@@ -1766,25 +2037,28 @@ export function _encode(s: any, v: any): any {
 }
 
 function isAborted(issues: any[]): boolean {
-  return issues.some((i) => i._nc || !CONTINUING_CODES.has(i.code));
+  return issues.some((i) => i._nc || i.continue === false || !CONTINUING_CODES.has(i.code));
 }
 
 function typeIssue(expected: string, received: unknown): ZodIssue {
-  const recvd = parsedTypeName(received);
-  // zod field order: expected first (their issues are built that way)
-  return {
+  // soft message: flag it so finalizeIssue's ladder (inst > schema > ctx >
+  // customError > localeError) can win — the default text fills in last
+  const iss: any = {
     expected,
     code: "invalid_type",
+    input: received,
     path: [],
-    message: `Invalid input: expected ${expected === "nan" ? "NaN" : expected}, received ${recvd}`,
-  } as ZodIssue;
+    message: `Invalid input: expected ${expected === "nan" ? "NaN" : expected}, received ${parsedTypeName(received)}`,
+  };
+  defaultedIssues.add(iss);
+  return iss as ZodIssue;
 }
 
 export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
   extends ZodType<Map<K["_output"], V["_output"]>, Map<K["_input"], V["_input"]>> {
   constructor(_def: any) { super(); this._def = _def; }
 
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (!(data instanceof Map)) return { ok: false as const, issues: [typeIssue("map", data)], aborted: true };
     if (MEMO && this._isRec())
       return _memoRun(this, data, () => new Map(), (out) => this._runMap(data, out));
@@ -1809,7 +2083,7 @@ export class ZodSet<V extends ZodTypeAny>
   extends ZodType<Set<V["_output"]>, Set<V["_input"]>> {
   constructor(_def: any) { super(); this._def = _def; }
 
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (!(data instanceof Set)) return { ok: false as const, issues: [typeIssue("set", data)], aborted: true };
     if (MEMO && this._isRec())
       return _memoRun(this, data, () => new Set(), (out) => this._runSet(data, out));
@@ -1837,8 +2111,9 @@ export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output
   // invalid_union issue; otherwise per-option errors arrays attach.
   // recursive unions take the same option loop at TS level so a cyclic
   // input can close through the parse memo
-  protected override _run(data: unknown) {
-    if (!(MEMO && _isRef(data) && this._isRec())) return super._run(data);
+  protected override _runImpl(data: unknown) {
+    const fx = this._hasFx();
+    if (!fx && !(MEMO && _isRef(data) && this._isRec())) return super._runImpl(data);
     const opts = this._def.options as any[];
     const runs = opts.map((o) => o._run(data));
     const win = runs.find((r) => r.ok);
@@ -1867,7 +2142,7 @@ export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[num
     return new Set([...map.keys()].filter((k) => map.get(k) !== null));
   }
 
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (data === null || typeof data !== "object" || Array.isArray(data))
       return { ok: false as const, issues: [typeIssue("object", data)], aborted: true };
     const disc = this._def.discriminator;
@@ -1952,7 +2227,7 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
   // both sides run independently; a key rejection is reported only when BOTH
   // sides reject it (strict objects: unrecognized_keys; open records:
   // invalid_key) — a key owned by one branch survives the other's key schema
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const l = (this._def.left as any)._run(data);
     const r = (this._def.right as any)._run(data);
     const issues: ZodIssue[] = [];
@@ -2017,7 +2292,7 @@ export class ZodLiteral<T> extends ZodType<T> {
   // multi-value literals are one closed enum-like set — a single invalid_value
   // issue listing every member, not a union of per-literal failures. string
   // members compile to the enum node; anything else stays TS-side.
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const vals: any[] | undefined = this._def.values
       ?? (Array.isArray(this._def.value) ? this._def.value : undefined);
     if (vals && vals.some((v) => typeof v !== "string")) {
@@ -2026,7 +2301,7 @@ export class ZodLiteral<T> extends ZodType<T> {
         : { ok: false as const, issues: [{ code: "invalid_value", values: vals, path: [],
             message: `Invalid option: expected one of ${vals.map((v) => JSON.stringify(v)).join("|")}` }] as any };
     }
-    return super._run(data);
+    return super._runImpl(data);
   }
 }
 
@@ -2038,9 +2313,9 @@ export class ZodEnum<T extends string = string> extends ZodType<T> {
   }
   // the bytecode enum node is string-members-only — native enums with
   // numeric members check at the TS level
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const vals: any[] = this._def.values;
-    if (vals.every((v) => typeof v === "string")) return super._run(data);
+    if (vals.every((v) => typeof v === "string")) return super._runImpl(data);
     return vals.includes(data)
       ? { ok: true as const, value: data }
       : { ok: false as const, issues: [{ code: "invalid_value", values: vals, path: [], message: `Invalid option: expected one of ${vals.map((v) => JSON.stringify(v)).join("|")}` }] as any };
@@ -2065,10 +2340,10 @@ export class ZodLazy<T extends ZodTypeAny> extends ZodType<T["_output"], T["_inp
 
   // the engine's lazy thunk recurses natively — cyclic input can only reach
   // a lazy through a recursive subtree, which runs at TS level via the memo
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (MEMO && _isRef(data) && this._isRec())
       return ((this._def._cachedInner ??= this._def.getter()) as any)._run(data);
-    return super._run(data);
+    return super._runImpl(data);
   }
 }
 
@@ -2162,7 +2437,7 @@ const STRINGBOOL_FALSE = new Set(["false", "0", "no", "off", "n", "disabled"]);
 
 export class ZodStringbool extends ZodType<boolean, unknown> {
   constructor(_def: any) { super(); this._def = _def; }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (typeof data !== "string")
       return { ok: false as const, issues: [typeIssue("string", data)], aborted: true };
     const s = data.toLowerCase();
@@ -2180,7 +2455,7 @@ export class ZodStringbool extends ZodType<boolean, unknown> {
 }
 
 export class ZodXor<T extends ZodTypeAny[]> extends ZodUnion<T> {
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const opts = this._def.options as ZodTypeAny[];
     const runs = opts.map((o) => (o as any)._run(data));
     const wins = runs.filter((r: any) => r.ok);
@@ -2217,7 +2492,7 @@ export class ZodFile extends ZodType<File, File> {
   max(n: number, message?: string) { return this._c({ kind: "max", value: n, message }); }
   size(n: number, message?: string) { return this._c({ kind: "size", value: n, message }); }
   mime(m: string[], message?: string) { return this._c({ kind: "mime", value: m, message }); }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (typeof File === "undefined" || !(data instanceof File))
       return { ok: false as const, issues: [typeIssue("file", data)], aborted: true };
     const issues: ZodIssue[] = [];
@@ -2238,7 +2513,7 @@ export class ZodFile extends ZodType<File, File> {
 export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
   extends ZodType<B["_output"], A["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     const ir = (this._def.in as any)._run(data);
     if (!ir.ok) return ir;
     const decoded = this._def.transform(ir.value);
@@ -2262,7 +2537,7 @@ export class ZodAlgoFormat extends ZodType<string, string> {
   constructor(_def: { format: string; message: string; fn: (s: string) => boolean }) {
     super(); this._def = { ..._def, type: "algoformat" };
   }
-  protected override _run(data: unknown) {
+  protected override _runImpl(data: unknown) {
     if (typeof data !== "string")
       return { ok: false as const, issues: [typeIssue("string", data)], aborted: true };
     if (this._def.fn(data)) return { ok: true as const, value: data };

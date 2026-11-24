@@ -8,10 +8,13 @@ import {
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec,
   ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema,
+  _parse, _safeParse, _parseAsync, _safeParseAsync,
+  _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
+  _mkSafeEncode as _safeEncodeFn, _mkSafeEncodeAsync as _safeEncodeAsyncFn,
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
-import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory } from "./shared.ts";
+import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory, failure as _failure, captureStackTrace } from "./shared.ts";
 
 export * from "./schema.ts";
 export * from "./error.ts";
@@ -26,7 +29,8 @@ const mk = (Cls: any, type: string, params: any, checks: any[] = []): any => {
   let s: any = new Cls({
     type,
     checks: all.filter((c: any) => typeof c !== "function" && c?.kind !== "checkfn"),
-    error: params,
+    error: typeof params === "string" || typeof params === "function" ? params
+      : params && typeof params === "object" ? params.error ?? params.message : undefined,
   });
   if (fns.length) s = s.check(...fns);
   return s;
@@ -101,11 +105,13 @@ export const z = {
     <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V): ZodRecord<K, V>;
   },
   /** Create a Map schema. */
-  map: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V) =>
-    new ZodMap<K, V>({ type: "map", keyType: key, valueType: value }),
+  map: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V, params?: any) =>
+    new ZodMap<K, V>({ type: "map", keyType: key, valueType: value,
+      error: typeof params === "string" || typeof params === "function" ? params : params?.error ?? params?.message }),
   /** Create a Set schema. */
-  set: <V extends ZodTypeAny>(value: V) =>
-    new ZodSet<V>({ type: "set", valueType: value }),
+  set: <V extends ZodTypeAny>(value: V, params?: any) =>
+    new ZodSet<V>({ type: "set", valueType: value,
+      error: typeof params === "string" || typeof params === "function" ? params : params?.error ?? params?.message }),
   /** Record where the closed key set is optional; other keys rejected (or loose). */
   partialRecord: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V, params?: any) =>
     new ZodRecord<K, V>({ type: "record", keyType: key, valueType: value, partial: true, mode: params?.mode ?? "strict" }),
@@ -340,33 +346,23 @@ export const z = {
 
   // ---------- standalone parse/encode fns (zod 4 top-level) ----------
   /** standalone safeParse: z.safeParse(schema, data, params?) */
-  safeParse: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
+  safeParse: _safeParse(ZodError) as any,
   /** standalone parse */
-  parse: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parse(data, params),
-  safeParseAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
-  parseAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parseAsync(data),
+  parse: _parse(ZodError) as any,
+  safeParseAsync: _safeParseAsync(ZodError) as any,
+  parseAsync: _parseAsync(ZodError) as any,
   validate: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params).success,
   validateAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
   /** codec decode — same as parse on codecs */
-  decode: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parse(data, params),
-  decodeAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.parseAsync(data),
-  safeDecode: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
-  safeDecodeAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
+  decode: _parse(ZodError) as any,
+  decodeAsync: _parseAsync(ZodError) as any,
+  safeDecode: _safeParse(ZodError) as any,
+  safeDecodeAsync: _safeParseAsync(ZodError) as any,
   /** codec encode — backward-direction traversal over the schema graph */
-  encode: <T extends ZodTypeAny>(s: T, data: unknown): unknown => _encodeScoped(s, data),
-  encodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown): Promise<unknown> => _encodeScoped(s, data),
-  safeEncode: <T extends ZodTypeAny>(s: T, data: unknown) => {
-    try {
-      if (typeof (s as any).encode === "function") return { success: true, data: (s as any).encode(data) };
-      return { success: false, error: new ZodError([{ code: "custom", path: [], message: "schema is not a codec" } as any]) };
-    } catch (e: any) { return { success: false, error: e instanceof ZodError ? e : new ZodError([{ code: "custom", path: [], message: String(e?.message ?? e) } as any]) }; }
-  },
-  safeEncodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown) => {
-    try {
-      if (typeof (s as any).encode === "function") return { success: true, data: await (s as any).encode(data) };
-      return { success: false, error: new ZodError([{ code: "custom", path: [], message: "schema is not a codec" } as any]) };
-    } catch (e: any) { return { success: false, error: e instanceof ZodError ? e : new ZodError([{ code: "custom", path: [], message: String(e?.message ?? e) } as any]) }; }
-  },
+  encode: _encodeFn(ZodError) as any,
+  encodeAsync: _encodeAsyncFn(ZodError) as any,
+  safeEncode: _safeEncodeFn(ZodError) as any,
+  safeEncodeAsync: _safeEncodeAsyncFn(ZodError) as any,
   /** runtime _input accessor */
   input: <T extends ZodTypeAny>(s: T) => s._input,
   /** runtime _output accessor */
@@ -607,6 +603,11 @@ function $constructor(name: string, init: (inst: any, def: any) => void) {
 // z.core — the v4/core namespace: error classes + error walkers
 export const core = {
   $ZodError, $ZodRealError: ZodRealError, ZodError, ZodRealError,
+  _parse, _safeParse, _parseAsync, _safeParseAsync,
+  _encode: _encodeFn, _encodeAsync: _encodeAsyncFn,
+  _safeEncode: _safeEncodeFn, _safeEncodeAsync: _safeEncodeAsyncFn,
+  _decode: _parse, _decodeAsync: _parseAsync,
+  _safeDecode: _safeParse, _safeDecodeAsync: _safeParseAsync,
   flattenError: _flattenError, formatError: _formatError,
   treeifyError: _treeifyError, prettifyError: _prettifyError,
   toDotPath: _toDotPath,

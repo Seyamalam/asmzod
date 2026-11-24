@@ -9,73 +9,137 @@ export interface ZodIssue {
   [key: string]: unknown;
 }
 
-// zod recomputes .message lazily — issues added after construction show up
-const _stringify = (issues: ZodIssue[]): string => {
-  try {
-    return JSON.stringify(issues, null, 2);
-  } catch {
-    return JSON.stringify(issues, (_k, v) =>
-      typeof v === "bigint" ? `${v}n` : v, 2);
-  }
+// bigint can't JSON.stringify — zod's replacer stringifies it
+const _jsonReplacer = (_k: string, v: any) => (typeof v === "bigint" ? v.toString() : v);
+
+const _stringifyIssues = (issues: any[]): string =>
+  JSON.stringify(issues, _jsonReplacer, 2);
+
+// _zod slot on errors: { def: issues, message?: string, traits: Set }
+function _getMessage(this: any): string {
+  const z = this._zod;
+  z.message ??= _stringifyIssues(z.def);
+  return z.message;
+}
+function _setMessage(this: any, v: string): void {
+  this._zod.message = v;
+}
+const _messageDesc: PropertyDescriptor = {
+  get: _getMessage, set: _setMessage, enumerable: true, configurable: true,
 };
 
-export class $ZodError<T = unknown> extends Error {
-  issues: ZodIssue[] = [];
+// prototypes carrying the lazy toString already — intrinsics are seeded so a
+// foreign receiver's proto is never touched
+const _installedToString = new WeakSet<object>([Object.prototype, Error.prototype]);
 
-  constructor(issues: ZodIssue[] = []) {
+function _installToString(inst: any): void {
+  const proto = Object.getPrototypeOf(inst);
+  if (_installedToString.has(proto)) return;
+  _installedToString.add(proto);
+  Object.defineProperty(proto, "toString", {
+    configurable: true, enumerable: false,
+    get(this: any) {
+      const value = () => this.message;
+      Object.defineProperty(this, "toString", { value, configurable: true, writable: true });
+      return value;
+    },
+    set(this: any, value: unknown) {
+      Object.defineProperty(this, "toString", { value, configurable: true, writable: true });
+    },
+  });
+}
+
+// helper methods: non-enumerable lazy getters on the shared prototype — first
+// access materializes a bound own property so detached calls keep working
+function _lazyMethod(proto: object, key: string, make: (self: any) => unknown): void {
+  Object.defineProperty(proto, key, {
+    configurable: true, enumerable: false,
+    get(this: any) {
+      const value = make(this);
+      Object.defineProperty(this, key, { value, configurable: true, writable: true });
+      return value;
+    },
+    set(this: any, value: unknown) {
+      Object.defineProperty(this, key, { value, configurable: true, writable: true });
+    },
+  });
+}
+
+const _installedErrorProtos = new WeakSet<object>([Object.prototype, Error.prototype]);
+
+function _zodErrorInit(inst: any, def: any[]): void {
+  inst.name = "$ZodError";
+  if (!inst._zod) {
+    Object.defineProperty(inst, "_zod", { value: {}, enumerable: false, writable: true, configurable: true });
+  }
+  inst._zod.def = def;
+  (inst._zod.traits ??= new Set()).add("$ZodError");
+  Object.defineProperty(inst, "issues", { value: def, enumerable: false, writable: true, configurable: true });
+  Object.defineProperty(inst, "message", _messageDesc);
+  _installToString(inst);
+}
+
+function _zodClassicErrorInit(inst: any, issues: any[]): void {
+  _zodErrorInit(inst, issues);
+  inst.name = "ZodError";
+  inst._zod.traits.add("ZodError");
+
+  const proto = Object.getPrototypeOf(inst);
+  if (_installedErrorProtos.has(proto)) return;
+  _installedErrorProtos.add(proto);
+
+  _lazyMethod(proto, "format", (self) => (mapper: any) => formatError(self, mapper));
+  _lazyMethod(proto, "flatten", (self) => (mapper: any) => flattenError(self, mapper));
+  _lazyMethod(proto, "addIssue", (self) => (issue: any) => {
+    self.issues.push(issue);
+    self.message = _stringifyIssues(self.issues);
+  });
+  _lazyMethod(proto, "addIssues", (self) => (issues: any) => {
+    self.issues.push(...issues);
+    self.message = _stringifyIssues(self.issues);
+  });
+  Object.defineProperty(proto, "isEmpty", {
+    configurable: true, enumerable: false,
+    get(this: any) { return this.issues.length === 0; },
+  });
+}
+
+// not a real Error — zod's $ZodError is a structural type only
+export class $ZodError<T = unknown> {
+  _zod!: any;
+  name!: string;
+  issues!: T[];
+  message!: string;
+  constructor(issues: T[] = []) { _zodErrorInit(this, issues as any[]); }
+  static init(inst: any, def: any[]): void { _zodErrorInit(inst, def); }
+  static [Symbol.hasInstance](inst: any): boolean {
+    return !!inst?._zod?.traits?.has("$ZodError") || inst instanceof Error;
+  }
+}
+
+// the real-Error variant — safeParse/parse throw and return this
+export class ZodRealError<T = unknown> extends Error {
+  _zod!: any;
+  declare name: string;
+  issues!: T[];
+  declare message: string;
+  constructor(issues: T[] = []) {
     super();
-    this.name = "$ZodError";
-    this.issues = issues;
+    _zodClassicErrorInit(this, issues as any[]);
+    this._zod.traits.add("ZodRealError");
   }
-
-  override get message(): string { return _stringify(this.issues); }
-  override set message(v: string) {
-    Object.defineProperty(this, "message", { value: v, writable: true, configurable: true });
-  }
-}
-
-export class ZodError<T = unknown> extends $ZodError<T> {
-  constructor(issues: ZodIssue[] = []) {
-    super(issues);
-    this.name = "ZodError";
-  }
-
-  get errors(): ZodIssue[] {
-    return this.issues;
-  }
-
-  static create(issues: ZodIssue[]): ZodError {
-    return new ZodError(issues);
-  }
-
-  get isEmpty(): boolean {
-    return this.issues.length === 0;
-  }
-
-  addIssue(issue: ZodIssue): void {
-    this.issues.push(issue);
-  }
-
-  addIssues(issues: ZodIssue[]): void {
-    this.issues.push(...issues);
-  }
-
-  format(mapper?: (i: ZodIssue) => unknown): { _errors: unknown[] } & Record<string, any> {
-    return formatError(this, mapper as any);
-  }
-
-  flatten(mapper?: (i: ZodIssue) => unknown): { formErrors: unknown[]; fieldErrors: Record<string, unknown[]> } {
-    return flattenError(this, mapper as any);
-  }
-
-  override toString(): string {
-    return this.message;
+  static init(inst: any, issues: any[]): void { _zodClassicErrorInit(inst, issues); }
+  static [Symbol.hasInstance](inst: any): boolean {
+    return inst instanceof Error || !!inst?._zod?.traits?.has("ZodError");
   }
 }
 
-// zod's real-Error variant — in our hierarchy ZodError already extends Error,
-// so this exists purely for the instanceof surface
-export class ZodRealError<T = unknown> extends ZodError<T> {}
+export class ZodError<T = unknown> extends ZodRealError<T> {
+  static init(inst: any, issues: any[]): void { _zodClassicErrorInit(inst, issues); }
+  static create(issues: any[]): ZodError { return new ZodError(issues); }
+  get errors(): any[] { return this.issues; }
+}
+Object.defineProperty(ZodRealError, "name", { value: "ZodError" });
 
 // proto-safe own-key creation, like zod's util node()
 function _node<T>(obj: any, key: PropertyKey, make: () => T): T {
@@ -92,7 +156,7 @@ function _node<T>(obj: any, key: PropertyKey, make: () => T): T {
 export function flattenError<U>(error: $ZodError, mapper: (i: any) => U = (i) => i.message): { formErrors: U[]; fieldErrors: Record<PropertyKey, U[]> } {
   const fieldErrors: Record<PropertyKey, any> = {};
   const formErrors: U[] = [];
-  for (const sub of error.issues) {
+  for (const sub of error.issues as any[]) {
     if (sub.path.length > 0) {
       _node<U[]>(fieldErrors, sub.path[0], () => []).push(mapper(sub));
     } else {
