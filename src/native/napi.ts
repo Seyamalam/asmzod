@@ -2,7 +2,7 @@
 // directly inside asmzod.node. No value encoding, no output decode —
 // only the cold issue path crosses as an ArrayBuffer.
 import { decodeValueAt, type HostTable } from "../codec.ts";
-import { normalizeIssue, finishIssues } from "../shared.ts";
+import { normalizeIssue, finishIssues, reg } from "../shared.ts";
 import type { ParseResult } from "./bun.ts";
 
 import { createRequire } from "node:module";
@@ -12,7 +12,19 @@ const req = createRequire(import.meta.url);
 
 interface AzNapi {
   init(cbTable: Uint8Array): boolean;
+  initLazy(blobs: Uint8Array[]): boolean;
   parse(blob: Uint8Array, value: unknown): { ok: true; value: unknown } | { ok: false; err: ArrayBuffer } | { ok: null; code: number } | undefined;
+}
+
+let lazyCount = 0;
+const lazyBlobs: Uint8Array[] = [];
+
+function ensureLazy(a: AzNapi) {
+  if (reg.lazy.length === lazyCount) return;
+  while (lazyCount < reg.lazy.length && lazyCount < 1024) {
+    lazyBlobs.push(reg.lazy[lazyCount++]()); // compiles the subschema once (cached)
+  }
+  if (lazyBlobs.length) a.initLazy(lazyBlobs);
 }
 
 let addon: AzNapi | null | undefined;
@@ -53,6 +65,7 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
     cbInit = a.init(new Uint8Array(32));
     if (!cbInit) return null;
   }
+  ensureLazy(a);
   const r = a.parse(blob, value);
   // success returns the raw output value; failure/fallback objects carry
   // the ~azres marker so an object result containing `ok` can't collide.

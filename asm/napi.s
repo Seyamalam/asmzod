@@ -25,6 +25,7 @@ _azn_cbtab:     .quad 0          // cb table ptr (from init())
     .p2align 3
 _azn_errbuf:    .space 1048576   // 1MB err arena
 _azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
+_azn_lazytab:   .space 8192       // 1024 resolved lazy-subblob data ptrs
     .text
 
 #define NAPI_UNDEF 0
@@ -76,12 +77,26 @@ _napi_register_module_v1:
     mov x1, x20
     AZ_ADR x2, .Lnm_init
     bl _napi_set_named_property
+    // create "initLazy" fn
+    mov x0, x19
+    AZ_ADR x1, .Lnm_initlazy
+    mov x2, #8
+    AZ_ADR x3, _aznapi_initlazy
+    mov x4, #0
+    add x5, sp, #32
+    bl _napi_create_function
+    ldr x3, [sp, #32]
+    mov x0, x19
+    mov x1, x20
+    AZ_ADR x2, .Lnm_initlazy
+    bl _napi_set_named_property
     mov x0, x20
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #64
     ret
 .Lnm_parse: .ascii "parse\0"
 .Lnm_init:  .ascii "init\0"
+.Lnm_initlazy: .ascii "initLazy\0"
     .p2align 2
 
 // ================= init(cbTableBuf) -> true =================
@@ -123,7 +138,84 @@ _aznapi_init:
     ldp x29, x30, [sp], #96
     ret
 
-// ================= parse(blobTA, value) =================
+// ================= initLazy(blobs) — resolve lazy subschema blob ptrs =================
+// argv[0] = Array<Uint8Array> — lazytab[i] = data ptr of blobs[i]
+_aznapi_initlazy:
+    stp x29, x30, [sp, #-160]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    stp x23, x24, [sp, #48]
+    mov x19, x0               // env
+    mov x20, x1               // info
+    mov x9, #1
+    str x9, [sp, #112]
+    mov x0, x19
+    mov x1, x20
+    add x2, sp, #112
+    add x3, sp, #96
+    mov x4, #0
+    mov x5, #0
+    bl _napi_get_cb_info
+    mov x0, x19
+    ldr x1, [sp, #96]
+    add x2, sp, #120
+    bl _napi_get_array_length
+    cbnz x0, .Lil_fail
+    ldr w9, [sp, #120]
+    mov x10, #1024
+    cmp x9, x10
+    b.hs .Lil_fail            // >1024 lazy schemas -> bail
+    str x9, [sp, #128]        // n
+    str xzr, [sp, #136]       // i
+.Lil_loop:
+    ldr x9, [sp, #136]
+    ldr x10, [sp, #128]
+    cmp x9, x10
+    b.hs .Lil_done
+    mov x0, x19
+    ldr x1, [sp, #96]
+    ldr x2, [sp, #136]
+    add x3, sp, #144
+    bl _napi_get_element
+    cbnz x0, .Lil_fail
+    mov x0, x19
+    ldr x1, [sp, #144]
+    add x2, sp, #104          // type (unused)
+    add x3, sp, #112          // len (reuse)
+    add x4, sp, #120          // data
+    mov x5, #0
+    mov x6, #0
+    bl _napi_get_typedarray_info
+    cbnz x0, .Lil_fail
+    ldr x9, [sp, #136]
+    ldr x10, [sp, #120]
+    AZ_ADR x11, _azn_lazytab
+    str x10, [x11, x9, lsl #3]
+    ldr x9, [sp, #136]
+    add x9, x9, #1
+    str x9, [sp, #136]
+    b .Lil_loop
+.Lil_done:
+    mov x0, x19
+    mov x1, #1
+    add x2, sp, #96
+    bl _napi_get_boolean
+    ldr x0, [sp, #96]
+    b .Lil_ret
+.Lil_fail:
+    mov x0, x19
+    add x1, sp, #96
+    bl _napi_get_undefined
+    ldr x0, [sp, #96]
+.Lil_ret:
+    ldp x19, x20, [sp, #16]
+    ldp x21, x22, [sp, #32]
+    ldp x23, x24, [sp, #48]
+    ldp x29, x30, [sp], #160
+    ret
+
+// ================= parse(blobTA, value) =================// ================= parse(blobTA, value) =================
 // -> value | {ok:false,err} | undefined(fallback)
 _aznapi_parse:
     stp x29, x30, [sp, #-256]!
@@ -383,6 +475,8 @@ _aznapi_run:
     b.eq .Ln_undef
     cmp w9, #0x19
     b.eq .Ln_nanop
+    cmp w9, #0x1a
+    b.eq .Ln_lazy
     cmp w9, #0x21
     b.eq .Ln_sym
     cmp w9, #0x23
@@ -2373,6 +2467,25 @@ _azn_encval:
     b .Ln_ret
 
 // ================= data =================
+// ============ 0x1A LAZY ============
+// [op][u64 cbid] — lazytab[cbid] holds the precompiled sub-blob data ptr
+.Ln_lazy:
+    ldr x9, [x27, #1]
+    mov x10, #1024
+    cmp x9, x10
+    b.hs .Ln_lazy_punt
+    AZ_ADR x10, _azn_lazytab
+    ldr x10, [x10, x9, lsl #3]
+    cbz x10, .Ln_lazy_punt
+    mov x0, x10
+    mov x1, x28
+    mov x2, x19
+    bl _aznapi_run
+    b .Ln_ret
+.Ln_lazy_punt:
+    mov x0, #-10
+    b .Ln_ret
+
 // ============ 0x08 DISCRIMINATED UNION ============
 // [op][dlen u64][dname][n u64][klen,key,field]*n — input obj, disc prop string-matches a key
 .Ln_disc:
