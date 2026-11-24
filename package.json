@@ -1,13 +1,26 @@
 {
   "name": "asmzod",
   "version": "0.2.0",
-  "description": "Zod-compatible validation — the validator is hand-written ARM64 assembly (with a portable TS engine for everywhere else)",
+  "description": "Zod-compatible validation \u2014 the validator is hand-written ARM64 assembly (with a portable TS engine for everywhere else)",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
   },
-  "files": ["src", "asm", "FORMAT.md", "README.md"],
+  "files": [
+    "src",
+    "asm",
+    "scripts/postinstall.mjs",
+    "FORMAT.md",
+    "ARCHITECTURE.md",
+    "COMPAT.md",
+    "PORTING.md",
+    "PERF.md",
+    "RESULTS.md",
+    "CHANGELOG.md",
+    "README.md"
+  ],
   "scripts": {
     "build": "make -C asm",
     "test": "bun test",
@@ -15,17 +28,17 @@
     "test:node": "node --test node/node.test.mjs",
     "test:deno": "deno test --no-check deno/deno.test.ts",
     "test:linux": "./docker-test.sh",
-    "bench": "bun bench/bench.ts"
+    "bench": "bun bench/bench.ts",
+    "postinstall": "node scripts/postinstall.mjs",
+    "prepack": "make -C asm || true",
+    "doctor": "bun scripts/doctor.ts"
   },
   "devDependencies": {
     "bun-types": "^1.2.0",
     "typescript": "^5.9.0",
     "zod": "4"
   },
-  "peerDependencies": {
-    "koffi": "^2.11.0"
-  },
-  "peerDependenciesMeta": {
-    "koffi": { "optional": true }
+  "engines": {
+    "node": ">=18"
   }
 }
