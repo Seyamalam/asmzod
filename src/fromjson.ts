@@ -1,7 +1,7 @@
 // port of zod's classic from-json-schema — converts JSON Schema documents into
 // zod schemas across draft-4, draft-7, draft-2020-12 and openapi-3.0
-import * as _idx from "./index.js";
-import { globalRegistry } from "./shared.js";
+import * as _idx from "./index.ts";
+import { globalRegistry } from "./shared.ts";
 
 // `z` is resolved lazily — this module is imported by index.ts, so eager
 // bindings would trip TDZ during circular evaluation

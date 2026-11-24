@@ -687,7 +687,9 @@ function _checkInst(c: any): any {
   const name = _checkClsName(c);
   let cls = _CHECK_CLS.get(name);
   if (!cls) {
-    cls = new Function(`return class ${name} {}`)();
+    // no codegen — workers and strict CSPs forbid new Function
+    cls = class {};
+    Object.defineProperty(cls, "name", { value: name });
     _CHECK_CLS.set(name, cls);
   }
   const inst = new cls();
@@ -2150,7 +2152,7 @@ export class ZodDate extends ZodType<Date> {
 // ---------- wrappers ----------
 export class ZodOptional<T extends ZodTypeAny> extends ZodType<T["_output"] | undefined, T["_input"] | undefined> {
   constructor(_def: any) { super(); _definit(this, _def); }
-  unwrap() { return this._def.inner as T; }
+  override unwrap() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
     const defaulted = (this._def.inner as any)?._zod?.optin === "defaulted";
     if (this._isRec() || defaulted) {
@@ -2172,7 +2174,7 @@ export class ZodExactOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodOpti
 
 export class ZodNullable<T extends ZodTypeAny> extends ZodType<T["_output"] | null, T["_input"] | null> {
   constructor(_def: any) { super(); _definit(this, _def); }
-  unwrap() { return this._def.inner as T; }
+  override unwrap() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
     if (this._isRec()) {
       if (data === null) return { ok: true as const, value: null };
@@ -2522,7 +2524,7 @@ export class ZodTransform extends ZodEffects<any, any> {
       fn,
     });
   }
-  unwrap() { return undefined as any; }
+  override unwrap() { return undefined as any; }
 }
 export class ZodBranded<T extends ZodTypeAny, B extends string> extends ZodType<T["_output"] & { __brand: B }, T["_input"]> {
   constructor(_def: any) { super(); _definit(this, _def); }
@@ -2874,7 +2876,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
 
 export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_input"][]> {
   constructor(_def: any) { super(); _definit(this, _def); }
-  unwrap(): T { return this._def.element; }
+  override unwrap(): T { return this._def.element; }
   get element(): T { return this._def.element; }
   min(n: number, message?: any) { return new ZodArray({ ...this._def, minLen: n, _minMsg: paramMsg(message) }); }
   max(n: number, message?: any) { return new ZodArray({ ...this._def, maxLen: n, _maxMsg: paramMsg(message) }); }
@@ -3475,7 +3477,7 @@ export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output
 export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {
   constructor(_def: any) { super(); _definit(this, _def); }
   get options(): T { return this._def.options as T; }
-  get def(): any { return this._def; }
+  override get def(): any { return this._def; }
   // discriminator value -> option map, built lazily on first use — recursive
   // options resolve their getters only once the union exists
   discMap(): Map<any, any> {
@@ -4063,12 +4065,12 @@ export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
     return isThenable(enc) ? enc.then(tail) : tail(enc);
   }
   // encode: validate against B, reverse-transform, validate against A
-  encode(value: B["_output"]): A["_output"] {
+  override encode(value: B["_output"]): A["_output"] {
     const r = this._enc(value);
     if (isThenable(r)) throw new AsyncCheckError();
     return r as A["_output"];
   }
-  decode(value: A["_input"]): B["_output"] { return this.parse(value); }
+  override decode(value: A["_input"]): B["_output"] { return this.parse(value); }
 }
 
 // ---------- algorithmic string formats (can't be regexes) ----------

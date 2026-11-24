@@ -137,15 +137,29 @@ export class ZodRealError<T = unknown> extends Error {
     this._zod.traits.add("ZodRealError");
   }
   static init(inst: any, issues: any[]): void { _zodClassicErrorInit(inst, issues); }
-  static [Symbol.hasInstance](inst: any): boolean {
+  static override [Symbol.hasInstance](inst: any): boolean {
     return inst instanceof Error || !!inst?._zod?.traits?.has("ZodError");
   }
 }
 
 export class ZodError<T = unknown> extends ZodRealError<T> {
-  static init(inst: any, issues: any[]): void { _zodClassicErrorInit(inst, issues); }
+  declare issues: any[];
+  static override init(inst: any, issues: any[]): void { _zodClassicErrorInit(inst, issues); }
   static create(issues: any[]): ZodError { return new ZodError(issues); }
   get errors(): any[] { return this.issues; }
+  format(mapper?: (i: any) => any): any { return formatError(this, mapper); }
+  flatten(mapper?: (i: any) => any): { formErrors: any[]; fieldErrors: Record<PropertyKey, any[]> } {
+    return flattenError(this, mapper);
+  }
+  addIssue(issue: any): void {
+    this.issues.push(issue);
+    this.message = _stringifyIssues(this.issues);
+  }
+  addIssues(issues: any[]): void {
+    this.issues.push(...issues);
+    this.message = _stringifyIssues(this.issues);
+  }
+  get isEmpty(): boolean { return this.issues.length === 0; }
 }
 Object.defineProperty(ZodRealError, "name", { value: "ZodError" });
 
