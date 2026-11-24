@@ -8,6 +8,7 @@ import {
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess,
   ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema, _zodPattern,
+  deepPartial as _deepPartial,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
   _mkSafeEncode as _safeEncodeFn, _mkSafeEncodeAsync as _safeEncodeAsyncFn,
@@ -540,7 +541,7 @@ export const z = {
   /** optional wrapper preserving zod's exactOptional field semantics */
   exactOptional: <T extends ZodTypeAny>(s: T) => s.exactOptional(),
   /** deepPartial on an object schema */
-  deepPartial: <T extends ZodTypeAny>(s: T) => (s as any).deepPartial(),
+  deepPartial: <T extends ZodTypeAny>(s: T) => (s as any).deepPartial?.() ?? _deepPartial(s),
   /** shape passthrough helper */
   properties: <T extends ZodRawShape>(shape: T): T => shape,
   /** single-property shape helper */

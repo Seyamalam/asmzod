@@ -165,10 +165,10 @@ function refThunk(s: SchemaLike): () => Uint8Array {
 }
 
 function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): void {
-  const d = s._def;
+  const d = s._def ?? (s as any)._zod?.def;
   // schema-level {error}/message param -> 0x2A msgwrap node: the engine
   // scopes the message to issues raised at this node's path depth
-  const m = paramMsg(d.error ?? d.message);
+  const m = paramMsg(d?.error ?? d?.message);
   if (m !== undefined && m !== "") {
     w.u8(0x2A);
     checkMsg(w, m);
@@ -192,7 +192,7 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): voi
 }
 
 function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): void {
-  const d = s._def;
+  const d = s._def ?? (s as any)._zod?.def;
   switch (d.type) {
     case "string": w.u8(0x01); emitStrChecks(w, d.checks); return;
     case "number": w.u8(0x02); emitNumChecks(w, d.checks, false, hosts); return;

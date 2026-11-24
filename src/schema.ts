@@ -226,7 +226,7 @@ export type SafeParseResult<T> = SafeParseSuccess<T> | SafeParseFail;
 
 // ---------- _zod internals (zod v4 internals surface) ----------
 const _optResolving = new WeakSet<object>();
-function _inner(s: any): any { return s._def.inner ?? s._def.innerType ?? (s.schema ?? undefined); }
+function _inner(s: any): any { const d = s._def ?? s._zod?.def; return d?.inner ?? d?.innerType ?? (s.schema ?? undefined); }
 function _zodOptin(s: any): any {
   const t = s._def.type;
   const inner = _inner(s);
@@ -600,7 +600,17 @@ export const _safeDecodeAsync = _safeParseAsync;
 export abstract class ZodType<Output = unknown, Input = Output> {
   readonly _output!: Output;
   readonly _input!: Input;
-  _def!: any;
+  __def: any;
+  // inner/innerType alias the same child — zod's clone writes innerType, our
+  // builders write inner; whichever side arrives wins and the other syncs
+  get _def(): any { return this.__def; }
+  set _def(v: any) {
+    if (v && typeof v === "object") {
+      if (v.innerType !== undefined) v.inner = v.innerType;
+      else if (v.inner !== undefined) v.innerType = v.inner;
+    }
+    this.__def = v;
+  }
   __zod: any;
   private _rec: boolean | undefined;
   private _recChecked = false;
@@ -632,8 +642,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     let z = this.__zod;
     if (z) return z;
     const inner = _inner(this);
+    const t = this;
     z = {
-      def: this._def,
+      get def() { return t._def; },
+      set def(v: any) { t._def = v; },
+      constr: (this as any).constructor,
       traits: new Set([(this as any).constructor]),
       parent: this._def.parent,
       innerType: inner,
@@ -668,6 +681,24 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       });
     }
     this.__zod = z;
+    // visit() can graft real-zod nodes into our defs — wrap them on contact.
+    // Runs after __zod is cached: shape getters may re-enter _zod via merge
+    const d0 = this._def;
+    if (d0 && typeof d0 === "object") {
+      for (const k of ["inner", "innerType", "element", "rest", "in", "out",
+                       "left", "right", "catchall", "keyType", "valueType",
+                       "input", "output", "schema"])
+        if (d0[k] != null) d0[k] = _norm(d0[k]);
+      for (const k of ["items", "options"])
+        if (Array.isArray(d0[k])) { const a = d0[k]; for (let i = 0; i < a.length; i++) a[i] = _norm(a[i]); }
+      const sh = d0.shape;
+      if (sh && typeof sh === "object") for (const k of Object.keys(sh)) {
+        const desc = Object.getOwnPropertyDescriptor(sh, k);
+        if (!desc || !("value" in desc)) continue; // deferred prop — getters stay lazy
+        const m = _norm(desc.value);
+        if (m !== desc.value) Object.defineProperty(sh, k, { ...desc, value: m });
+      }
+    }
     return z;
   }
 
@@ -678,6 +709,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   protected _run(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
+    void this._zod; // materialize internals + normalize foreign def children
     const r = this._runImpl(data) as any;
     _stampIss(r, this, data);
     return r;
@@ -1501,7 +1533,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   private _delegateCheck(m: string, args: any[]) {
     const inner: any = this._def.inner;
     if (typeof inner?.[m] !== "function") throw new TypeError(`asmzod: .${m}() not supported on this wrapper`);
-    return new ZodEffects({ ...this._def, inner: inner[m](...args) });
+    return new ZodEffects({ ...this._def, innerType: inner[m](...args) });
   }
   min(n: number, m?: any) { return this._delegateCheck("min", [n, m]); }
   max(n: number, m?: any) { return this._delegateCheck("max", [n, m]); }
@@ -1533,7 +1565,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   private _mapRefinedObj(fn: (o: any) => any): any {
     const inner: any = this._def.inner;
     const ni = inner instanceof ZodEffects ? inner._mapRefinedObj(fn) : fn(inner);
-    return new ZodEffects({ ...this._def, inner: ni });
+    return new ZodEffects({ ...this._def, innerType: ni });
   }
   merge(): any {
     if (this._refinedObj())
@@ -2038,7 +2070,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     return new ZodObject({ ...this._def, shape });
   }
   keyof() { return new ZodEnum({ type: "enum", values: _shapeKeys(this._def.shape) }); }
-  deepPartial() { return this.partial(); }
+  deepPartial() { return deepPartial(this); }
   loose() { return this.passthrough(); }
   merge<O extends ZodObject<any>>(o: O) {
     if (!(o as any)?._zod?.def)
@@ -2828,6 +2860,25 @@ export class ZodLazy<T extends ZodTypeAny> extends ZodType<T["_output"], T["_inp
   }
 }
 
+// real-zod schemas (grafted by core.visit's $ZodLazy cycle nodes) lack _run —
+// this wrapper parses through their payload-shaped _zod.parse instead
+class ZodForeign extends ZodLazy<any> {
+  _foreign: any;
+  constructor(s: any) {
+    super({ type: "lazy", getter: () => s });
+    this._foreign = s;
+  }
+  protected override _runImpl(data: unknown) {
+    const p: any = { value: data, issues: [] };
+    this._foreign._zod.parse(p, {});
+    return p.issues?.length ? { ok: false as const, issues: p.issues } : { ok: true as const, value: p.value };
+  }
+}
+function _norm(s: any): any {
+  if (s == null || typeof s._run === "function" || typeof s._zod?.parse !== "function") return s;
+  return (s.__az ??= new ZodForeign(s));
+}
+
 export class ZodInstanceof<T> extends ZodType<T> {
   constructor(_def: any) { super(); this._def = _def; }
 }
@@ -3041,4 +3092,135 @@ export function ibanCheck(s: string): boolean {
     else { const n = code - 55; rem = (rem * 10 + Math.floor(n / 10)) % 97; rem = (rem * 10 + (n % 10)) % 97; }
   }
   return rem === 1;
+}
+
+// visit() — bottom-up schema rewrite ported from zod's core/visit.ts, adapted
+// to our def field names (inner|innerType, discunion, etc.). Cache-deferred
+// cycles resolve to a lazy that reads the finished node.
+const _AZ_RESOLVING = Symbol("az.visit/resolving");
+export function visit(schema: any, fnOrHandlers: any): any {
+  const fn = typeof fnOrHandlers === "function" ? fnOrHandlers : (node: any, rw: boolean) => {
+    let t = node?._def?.type;
+    if (t === "discunion") t = "union";
+    else if (t === "intersect") t = "intersection";
+    const h = fnOrHandlers[t];
+    return h ? h(node, rw) : node;
+  };
+  const cache = new Map<any, any>();
+  function run(s: any): any {
+    const c = cache.get(s);
+    if (c === _AZ_RESOLVING)
+      return new ZodLazy({ type: "lazy", getter: () => cache.get(s) });
+    if (c !== undefined) return c;
+    cache.set(s, _AZ_RESOLVING);
+    const inner = mapInner(s);
+    const mapped = fn(inner, inner !== s);
+    cache.set(s, mapped);
+    return mapped;
+  }
+  const clone = (s: any, def: any) => new (s.constructor as any)(def);
+  function mapInner(s: any): any {
+    const d = s._def ?? s._zod?.def;
+    if (!d) return s;
+    switch (d.type) {
+      case "object": {
+        const old = d.shape as Record<string, any>;
+        let changed = false;
+        const shape: Record<string, any> = {};
+        for (const k of Object.keys(old)) {
+          const m = run(old[k]);
+          if (m !== old[k]) changed = true;
+          shape[k] = m;
+        }
+        let catchall = d.catchall;
+        if (catchall) {
+          catchall = run(catchall);
+          if (catchall !== d.catchall) changed = true;
+        }
+        return changed ? clone(s, { ...d, shape, catchall }) : s;
+      }
+      case "array": {
+        const m = run(d.element);
+        return m === d.element ? s : clone(s, { ...d, element: m });
+      }
+      case "tuple": {
+        let changed = false;
+        const items = (d.items as any[]).map((it) => {
+          const m = run(it);
+          if (m !== it) changed = true;
+          return m;
+        });
+        let rest = d.rest;
+        if (rest) {
+          rest = run(rest);
+          if (rest !== d.rest) changed = true;
+        }
+        return changed ? clone(s, { ...d, items, rest }) : s;
+      }
+      case "record": case "map": {
+        const k = run(d.keyType), v = run(d.valueType);
+        return k === d.keyType && v === d.valueType ? s
+          : clone(s, { ...d, keyType: k, valueType: v });
+      }
+      case "set": {
+        const v = run(d.valueType);
+        return v === d.valueType ? s : clone(s, { ...d, valueType: v });
+      }
+      case "union": case "discunion": {
+        let changed = false;
+        const options = (d.options as any[]).map((o) => {
+          const m = run(o);
+          if (m !== o) changed = true;
+          return m;
+        });
+        return changed ? clone(s, { ...d, options }) : s;
+      }
+      case "intersect": case "intersection": {
+        const l = run(d.left), r = run(d.right);
+        return l === d.left && r === d.right ? s
+          : clone(s, { ...d, left: l, right: r });
+      }
+      case "optional": case "exactOptional": case "nullable": case "default":
+      case "prefault": case "catch": case "readonly": case "nonoptional":
+      case "promise": case "success": case "refine": case "coerce_str":
+      case "coerce_num": case "coerce_bool": case "coerce_bigint": {
+        const old = d.innerType ?? d.inner;
+        if (old === undefined) return s;
+        const m = run(old);
+        return m === old ? s : clone(s, { ...d, innerType: m });
+      }
+      case "instof": {
+        const old = d.innerType ?? d.inner;
+        if (old === undefined) return s;
+        const m = run(old);
+        return m === old ? s : clone(s, { ...d, innerType: m });
+      }
+      case "pipe": case "codec": {
+        const i = run(d.in), o = run(d.out);
+        return i === d.in && o === d.out ? s : clone(s, { ...d, in: i, out: o });
+      }
+      case "function": {
+        const i = run(d.input), o = run(d.output);
+        return i === d.input && o === d.output ? s
+          : clone(s, { ...d, input: i, output: o });
+      }
+      case "lazy": {
+        const original = d.getter as () => any;
+        const { _cachedInner, ...rest } = d;
+        return clone(s, { ...rest, getter: () => run(original()) });
+      }
+      default:
+        return s;
+    }
+  }
+  return run(schema);
+}
+
+/** Every nested object's properties made optional, wrappers preserved. */
+export function deepPartial(schema: any): any {
+  return visit(schema, {
+    object: (s: any) => s.partial(),
+    union: (s: any) => (s._def.discriminator === undefined ? s
+      : new ZodUnion({ type: "union", options: s._def.options } as any)),
+  });
 }

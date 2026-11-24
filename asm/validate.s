@@ -2442,8 +2442,20 @@ _az_strtoi:
     cbnz x1, .Lob_gv
     ldr x9, [sp, #176]
     cmp x9, #2
-    b.eq .Lob_fnext
+    beq .Lob_skip2
     AZ_ADR x1, .Lundef_val
+    b .Lob_gv
+.Lob_skip2:
+    // opt 2 contributes nothing — but the emit loop reads one pair slot per
+    // schema field, so an empty undef/flags=0 pair still has to be pushed
+    ldr x0, [sp, #96]
+    ldr x1, [sp, #88]
+    AZ_ADR x2, .Lundef_val
+    mov x3, #0
+    mov x4, #0
+    bl _az_pair_push40
+    cbnz x0, .Lv_ret
+    b .Lob_fnext
 .Lob_gv:
     str x1, [sp, #144]          // val to validate
     ldr x0, [sp, #96]           // keyptr
@@ -2515,10 +2527,11 @@ _az_strtoi:
 .Lob_fmark:
     mov x9, #1
     str x9, [sp, #56]
+    ldp x2, x3, [sp, #152]
     ldr x0, [sp, #96]
     ldr x1, [sp, #88]
-    ldr x2, [sp, #120]
-    cbnz x2, .Lob_fm0           // present-fail: keep existing no-write
+    ldr x4, [sp, #120]
+    cbnz x4, .Lob_fm0           // present-fail: keep existing no-write
     ldr x9, [sp, #176]
     cmp x9, #3
     b.ne .Lob_fm0
