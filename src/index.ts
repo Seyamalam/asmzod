@@ -7,7 +7,7 @@ import {
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform,
-  ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema,
+  ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema, _zodPattern,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
   _mkSafeEncode as _safeEncodeFn, _mkSafeEncodeAsync as _safeEncodeAsyncFn,
@@ -21,6 +21,50 @@ export * from "./error.ts";
 export { engineVersion, engineBackend } from "./ffi.ts";
 
 // factory params: { checks: [z.minLength(1), z.check(fn)], error|message... }
+// zod's regexes.ts — ISO format sources, ported verbatim so the iso.*
+// factories match upstream's accepted/rejected surface exactly
+const _isoDateSrc = `(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))`;
+const _isoTimeSrc = (a: { precision?: number | null; seconds?: boolean }): string => {
+  const hhmm = `(?:[01]\\d|2[0-3]):[0-5]\\d`;
+  if (typeof a.precision === "number")
+    return a.precision === -1 ? hhmm
+      : a.precision === 0 ? `${hhmm}:[0-5]\\d`
+      : `${hhmm}:[0-5]\\d\\.\\d{${a.precision}}`;
+  return a.seconds ? `${hhmm}:[0-5]\\d(?:\\.\\d+)?` : `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
+};
+const _isoRe = {
+  date: new RegExp(`^${_isoDateSrc}$`),
+  duration: /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/,
+  time: (a: any) => new RegExp(`^${_isoTimeSrc(a)}$`),
+  datetime: (a: any) => {
+    const opts = ["Z"];
+    if (a.offset) opts.push(`([+-](?:[01]\\d|2[0-3]):[0-5]\\d)`);
+    const qualified = `${_isoTimeSrc({ precision: a.precision, seconds: true })}(?:${opts.join("|")})`;
+    const timeRe = a.local ? `${qualified}|${_isoTimeSrc({ precision: a.precision })}` : qualified;
+    return new RegExp(`^${_isoDateSrc}T(?:${timeRe})$`);
+  },
+};
+const _isoCheck = (fmt: "datetime" | "date" | "time" | "duration", p: any) => {
+  const opts = p && typeof p === "object" ? p : {};
+  const re = fmt === "date" ? _isoRe.date : fmt === "duration" ? _isoRe.duration
+    : fmt === "time" ? _isoRe.time(opts) : _isoRe.datetime(opts);
+  return (new ZodString() as any)._fmtcheck(fmt, re, typeof p === "string" ? p : opts.message ?? opts.error);
+};
+
+// zod's util.isPlainObject/shallowClone — constructor-based, not proto-based
+const _azIsPlainObject = (o: any): boolean => {
+  if (typeof o !== "object" || o === null) return false;
+  const ctor = o.constructor;
+  if (ctor === undefined) return true;
+  if (typeof ctor !== "function") return true;
+  const prot = ctor.prototype;
+  if (typeof prot !== "object" || prot === null) return false;
+  return Object.prototype.hasOwnProperty.call(prot, "isPrototypeOf");
+};
+const _azShallowClone = (o: any): any =>
+  _azIsPlainObject(o) ? { ...o } : Array.isArray(o) ? [...o]
+  : o instanceof Map ? new Map(o) : o instanceof Set ? new Set(o) : o;
+
 const mk = (Cls: any, type: string, params: any, checks: any[] = []): any => {
   const pc = params && typeof params === "object" && !Array.isArray(params) ? params.checks : undefined;
   const all = [...checks, ...(Array.isArray(pc) ? pc : [])];
@@ -94,8 +138,14 @@ export const z = {
   array: <T extends ZodTypeAny>(element: T, params?: any) =>
     new ZodArray<T>({ type: "array", element, error: params }),
   /** Create a fixed-length tuple schema. */
-  tuple: <T extends ZodTypeAny[]>(items: [...T], params?: any) =>
-    new ZodTuple<T>({ type: "tuple", items, rest: null, error: params }),
+  tuple: <T extends ZodTypeAny[]>(items: [...T], restOrParams?: any, params?: any) => {
+    const hasRest = restOrParams instanceof ZodType || restOrParams?._zod?.def !== undefined;
+    return new ZodTuple<T>({
+      type: "tuple", items,
+      rest: hasRest ? restOrParams : null,
+      error: hasRest ? params : restOrParams,
+    });
+  },
   /** Create a record schema: record(valueType) or record(keyType, valueType). */
   record: ((keyOrVal: ZodTypeAny, val?: any) =>
     !(val instanceof ZodType)
@@ -207,10 +257,11 @@ export const z = {
       inner: mk(ZodBigInt, "bigint", params),
     }),
     /** Create a Date schema. */
-    date: () => {
-      // coerce to date needs a JS callback — implement via custom transform later
-      throw new Error("asmzod: z.coerce.date() not supported in v1");
-    },
+    date: (params?: any) => new ZodPipe({
+      type: "pipe",
+      in: new ZodTransform((x: any) => new Date(x)),
+      out: mk(ZodDate, "date", params),
+    }) as any,
   },
 
   /** Schema that also accepts undefined. */
@@ -227,6 +278,9 @@ export const z = {
   /** Compile-time brand (no runtime effect). */
   brand: <T extends ZodTypeAny>(s: T) => s.brand(),
   nonoptional: <T extends ZodTypeAny>(s: T) => s.nonoptional(),
+  /** Substitute a default when input is undefined (zod's z._default). */
+  _default: <T extends ZodTypeAny>(s: T, v: T["_output"] | (() => T["_output"])) =>
+    new ZodDefault({ type: "default", inner: s, value: v }),
   /** Validate then freeze the output. */
   readonly: <T extends ZodTypeAny>(s: T) => s.readonly(),
   /** Add a custom check; fails with invalid_type when falsy. */
@@ -302,22 +356,27 @@ export const z = {
   getErrorMap: () => getErrorMap(),
   /** ISO 8601 formats: iso.date/datetime/time/duration. */
   iso: {
-    datetime: (p?: string) => new ZodString().datetime(p),
+    datetime: (p?: any) => _isoCheck("datetime", p),
     /** Create a Date schema. */
-    date: (p?: string) => new ZodString().date(p),
-    time: (p?: string) => new ZodString().time(p),
-    duration: (p?: string) => new ZodString().duration(p),
+    date: (p?: any) => _isoCheck("date", p),
+    time: (p?: any) => _isoCheck("time", p),
+    duration: (p?: any) => _isoCheck("duration", p),
   },
 
-  templateLiteral: (parts: readonly unknown[]) => {
-    // zod4: composes parts into a regex; schemas contribute their pattern
+  templateLiteral: (parts: readonly unknown[], _params?: any) => {
+    // zod4: composes parts into a regex; schemas contribute _zod.pattern
     const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const clean = (src: string) =>
+      src.slice(src.startsWith("^") ? 1 : 0, src.endsWith("$") ? src.length - 1 : undefined);
     const pat = parts.map((p) => {
-      if (p instanceof ZodString) return ".*";
-      if (p instanceof ZodNumber || p instanceof ZodBigInt) return "-?\\d+(?:\\.\\d+)?";
-      if (p instanceof ZodLiteral) return esc(String(p._def.value));
-      if (typeof p === "string") return esc(p);
-      return esc(String(p));
+      if (p instanceof ZodType || (p as any)?._zod?.def !== undefined) {
+        const re = _zodPattern(p);
+        if (!re) throw new Error(`Invalid template literal part, no pattern found: ${(p as any)?._def?.type}`);
+        return clean(re.source);
+      }
+      if (p === null || ["string", "number", "bigint", "boolean", "symbol", "undefined"].includes(typeof p))
+        return esc(`${p}`);
+      throw new Error(`Invalid template literal part: ${p}`);
     }).join("");
     return (new ZodString() as any)._fmtcheck(
       "template_literal", new RegExp(`^${pat}$`));
@@ -331,7 +390,7 @@ export const z = {
         options: [
           new ZodString(), new ZodNumber(), new ZodBoolean(), new ZodNull(),
           new ZodArray({ type: "array", element: inner }),
-          new ZodRecord({ type: "record", keyType: null, valueType: inner }),
+          new ZodRecord({ type: "record", keyType: new ZodString(), valueType: inner }),
         ],
       }),
     });
@@ -622,6 +681,7 @@ export const core = {
   toDotPath: _toDotPath,
   isRecursiveSchema: (s: any) => isRecursiveSchema(s),
   config: _config, globalConfig, memoizer: _memoizerFactory,
+  util: { isPlainObject: _azIsPlainObject, shallowClone: _azShallowClone },
   $constructor, $ZodType,
 };
 (z as any).core = core;
@@ -789,7 +849,7 @@ export const {
   record, map, set, partialRecord, looseRecord, keyof, xor, stringbool,
   file, codec, check, union, discriminatedUnion, intersection, literal,
   nativeEnum, lazy, custom, coerce, optional, nullable, nullish, brand,
-  nonoptional, readonly, refine, superRefine, transform,
+  nonoptional, readonly, refine, superRefine, transform, _default,
   email, url, uuid, uuidv4, uuidv6, uuidv7, guid, cuid, cuid2, ulid,
   nanoid, emoji, base64, base64url, jwt, hex, xid, ksuid, hash, uint64,
   e164, duration, ipv4, ipv6, cidrv4, cidrv6, hostname, httpUrl,

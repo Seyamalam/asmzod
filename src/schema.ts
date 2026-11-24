@@ -376,15 +376,77 @@ function _propValuesInner(s: any, seen: Set<object>): any {
   return undefined;
 }
 const _escapeRe = (v: any) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function _zodPattern(s: any): any {
-  const t = s._def.type;
-  if (t === "literal") {
-    const vs = s._def.values ?? [s._def.value];
-    if (vs.length === 1) return new RegExp(`^\\(${_escapeRe(vs[0])}\\)$`);
-    return new RegExp(`^\\(${vs.map(_escapeRe).join("|")}\\)$`);
+
+const _cleanRe = (src: string): string =>
+  src.slice(src.startsWith("^") ? 1 : 0, src.endsWith("$") ? src.length - 1 : undefined);
+
+// zod's leafPattern: format/check patterns beat bounds, bounds beat the
+// type default — check records carry `regex`/`value` where zod's carry
+// `pattern`/`minimum`/`maximum`/`length`
+function _zodLeafPattern(s: any): RegExp | undefined {
+  const d = s._def;
+  let pattern: RegExp | undefined = d.pattern;
+  let isInt = !!d.format?.includes("int");
+  let minimum: number | undefined, maximum: number | undefined;
+  for (const c of d.checks ?? []) {
+    if (c.regex) pattern = c.regex;
+    isInt ||= !!c.format?.includes("int") || c.kind === "int" || c.kind === "safeInt";
+    const lo = c.kind === "min" || c.kind === "length" ? c.value : c.minimum;
+    const hi = c.kind === "max" || c.kind === "length" ? c.value : c.maximum;
+    if (lo !== undefined && (minimum === undefined || lo > minimum)) minimum = lo;
+    if (hi !== undefined && (maximum === undefined || hi < maximum)) maximum = hi;
   }
-  const inner = _inner(s);
-  return inner?._zod?.pattern;
+  if (pattern) return pattern;
+  if (minimum !== undefined && maximum !== undefined && minimum > maximum) return /(?!)/;
+  if (minimum !== undefined || maximum !== undefined)
+    return new RegExp(`^[\\s\\S]{${minimum ?? 0},${maximum ?? ""}}$`);
+  if (d.type === "number") return isInt ? /^-?\d+$/ : /^-?\d+(?:\.\d+)?$/;
+  return undefined;
+}
+
+// zod's partPattern lattice: each type answers its own pattern; wrappers
+// delegate to their inner, unions fold options into an alternation
+export function _zodPattern(s: any): RegExp | undefined {
+  const d = s?._def;
+  if (!d) return undefined;
+  switch (d.type) {
+    case "string": return _zodLeafPattern(s) ?? /^[\s\S]{0,}$/;
+    case "number": return _zodLeafPattern(s) ?? /^-?\d+(?:\.\d+)?$/;
+    case "bigint": return /^-?\d+n?$/;
+    case "boolean": return /^(?:true|false)$/i;
+    case "null": return /^null$/i;
+    case "undefined": return /^undefined$/i;
+    case "literal": {
+      const vs = d.values ?? (Array.isArray(d.value) ? d.value : [d.value]);
+      return new RegExp(vs.length
+        ? `^(${vs.map((o: any) => o === undefined ? "undefined" : _escapeRe(`${o}`)).join("|")})$`
+        : "^[^\\s\\S]$");
+    }
+    case "enum": {
+      const vals: any[] = (d.values ?? Object.values(d.entries ?? {}))
+        .filter((k: any) => ["string", "number", "symbol"].includes(typeof k));
+      return new RegExp(vals.length
+        ? `^(${vals.map((v: any) => _escapeRe(`${v}`)).join("|")})$`
+        : "^[^\\s\\S]$");
+    }
+    case "optional": case "exactOptional": {
+      const p = _zodPattern(_inner(s));
+      return p ? new RegExp(`^(${_cleanRe(p.source)})?$`) : undefined;
+    }
+    case "nullable": {
+      const p = _zodPattern(_inner(s));
+      return p ? new RegExp(`^(${_cleanRe(p.source)}|null)$`) : undefined;
+    }
+    case "union": case "discriminatedUnion": {
+      const ps = (d.options ?? []).map(_zodPattern);
+      return ps.every(Boolean)
+        ? new RegExp(`^(${ps.map((p: any) => _cleanRe(p.source)).join("|")})$`)
+        : undefined;
+    }
+    case "template_literal": return d.pattern;
+    case "lazy": return _zodPattern(d.getter?.() ?? d._cachedInner);
+    default: { const inn = _inner(s); return inn ? _zodPattern(inn) : undefined; }
+  }
 }
 
 // zod's check params: {error, message, path, params, abort} — error and
@@ -819,6 +881,16 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const checks = [...(this._def.checks ?? [])];
       const def: any = { ...this._def, checks };
       for (const o of objs) {
+        // a schema passed to .check runs as a check — its whole validation
+        // applies to the payload (zod: schemas carry _zod.check too). this
+        // covers z.refine()/z.superRefine()/z.iso.* args
+        if (_isSchema(o)) {
+          fns.push((payload: any) => {
+            const r = (o as any)._run(payload.value);
+            if (!r.ok) payload.issues.push(...r.issues);
+          });
+          continue;
+        }
         const c = o._def ?? o;
         if (c.kind === "meta") { def.description = c.description ?? def.description; def.metadata = { ...(def.metadata ?? {}), ...(c.metadata ?? {}) }; }
         else if (c.kind === "checkfn") fns.push(c.fn);
@@ -836,6 +908,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     });
     return s;
   }
+  with(...args: any[]): any { return this.check(...args); }
   overwrite<N>(fn: (v: Output) => N): ZodPipe<this, ZodTransform> {
     return this.transform(fn);
   }
@@ -895,19 +968,30 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   private async _finishAsync(value: any): Promise<any> {
     // stages can carry a path (record/object children queue nested async
     // checks) — apply them to that position, not the root
-    const atPath = (v: any, p: any[] | undefined) => (p?.length ? p.reduce((o, k) => o?.[k], v) : v);
+    const atPath = (v: any, p: any[] | undefined) => (p?.length ? p.reduce((o, k) => o instanceof Map ? o.get(k) : o?.[k], v) : v);
     const setPath = (v: any, p: any[] | undefined, nv: any) => {
       if (!p?.length) return nv;
       let o = v;
-      for (let i = 0; i < p.length - 1; i++) o = o[p[i]];
-      o[p[p.length - 1]] = nv;
+      for (let i = 0; i < p.length - 1; i++) o = o instanceof Map ? o.get(p[i]) : o[p[i]];
+      if (o instanceof Map) o.set(p[p.length - 1], nv); else o[p[p.length - 1]] = nv;
       return v;
     };
     // zod collects every failed check's issue — refinements at sibling
     // positions and root-level checks all land in one error
     const runStage = async (st: any, root: any): Promise<{ value: any; issues: any[] }> => {
       const p = st.path as any[] | undefined;
-      const cur = atPath(root, p);
+      const cur = st.keyInput !== undefined ? st.keyInput : atPath(root, p);
+      if (st.type === "promisegate") {
+        // zod: Promise.resolve(payload.value).then(inner) — resolved value
+        // becomes the payload at the promise's position
+        const resolved = await Promise.resolve(st.input);
+        const mark = pendingAsync.length;
+        const ir = (st.inner as any)._run(resolved);
+        for (let i = mark; i < pendingAsync.length; i++)
+          (pendingAsync[i] as any).path = [...(p ?? []), ...((pendingAsync[i] as any).path ?? [])];
+        if (!ir.ok) return { value: root, issues: ir.issues };
+        return { value: setPath(root, p, ir.value), issues: [] };
+      }
       if (st.type === "catchgate") {
         // deferred inner work belongs to a catch — replay it inside the gate;
         // failures get swallowed into the catch value instead of surfacing
@@ -2185,11 +2269,32 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
     const { keyType, valueType } = this._def as { keyType: ZodTypeAny; valueType: ZodTypeAny };
     const issues: ZodIssue[] = [];
     for (const [k, v] of data) {
+      let mark = pendingAsync.length;
       const kr = (keyType as any)._run(k);
+      // key stages replay against the raw key, not a position in the output
+      for (let i = mark; i < pendingAsync.length; i++) {
+        (pendingAsync[i] as any).path = [k, ...((pendingAsync[i] as any).path ?? [])];
+        (pendingAsync[i] as any).keyInput = k;
+      }
+      mark = pendingAsync.length;
       const vr = (valueType as any)._run(v);
-      if (!kr.ok) issues.push(...kr.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
-      if (!vr.ok) issues.push(...vr.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
-      if (kr.ok && vr.ok) out.set(kr.value, vr.value);
+      for (let i = mark; i < pendingAsync.length; i++)
+        (pendingAsync[i] as any).path = [k, ...((pendingAsync[i] as any).path ?? [])];
+      // zod: PropertyKey-typed keys get their issues prefixed at [key];
+      // anything else wraps into invalid_key/invalid_element at the root
+      if (!kr.ok) {
+        if (["string", "number", "symbol"].includes(typeof k))
+          issues.push(...kr.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+        else issues.push({ code: "invalid_key", origin: "map", input: data, inst: this, issues: kr.issues, path: [], message: "Invalid key in map" } as any);
+      }
+      if (!vr.ok) {
+        if (["string", "number", "symbol"].includes(typeof k))
+          issues.push(...vr.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+        else issues.push({ code: "invalid_element", origin: "map", input: data, key: k, inst: this, issues: vr.issues, path: [], message: "Invalid value in map" } as any);
+      }
+      // zod sets into the payload map unconditionally — payload values are
+      // the raw key/value on failure
+      out.set(kr.ok ? kr.value : k, vr.ok ? vr.value : v);
     }
     return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
   }
@@ -2480,27 +2585,14 @@ export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output
   constructor(_def: any = { type: "instof", ctor: Promise, name: "promise", inner: null }) {
     super(); this._def = _def;
   }
-  private _syncThrow(): never {
-    throw new Error("Encountered Promise during synchronous parse. Use .parseAsync() instead.");
+  // zod: Promise.resolve(payload).then(inner) — any input resolves through
+  // the promise hop, so even non-thenables work in async mode and sync
+  // parse always raises the async error
+  protected override _runImpl(data: unknown) {
+    if (!asyncMode) throw new AsyncCheckError();
+    pendingAsync.push({ type: "promisegate", inst: this, input: data, inner: this._def.inner } as any);
+    return { ok: true as const, value: undefined };
   }
-  override parse(_: unknown): never { this._syncThrow(); }
-  override safeParse(_: unknown): never { this._syncThrow(); }
-  override async safeParseAsync(data: unknown): Promise<SafeParseResult<Promise<T["_output"]>>> {
-    const instof = new ZodInstanceof({ type: "instof", ctor: Promise, name: "promise" });
-    const r = instof.safeParse(data);
-    if (!r.success) return r as any;
-    const p = r.data as Promise<unknown>;
-    const inner = this._def.inner as T;
-    try {
-      const resolved = await p;
-      const ir = inner.safeParse(resolved);
-      if (!ir.success) return ir as any;
-      return { success: true, data: ir.data as any };
-    } catch (e) {
-      return { success: false, error: new ZodError([{ code: "custom", path: [], message: String(e) } as any]) };
-    }
-  }
-  override parseAsync(data: unknown) { return super.parseAsync(data); }
 }
 
 export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = ZodAny>
