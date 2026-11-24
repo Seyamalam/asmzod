@@ -9,7 +9,7 @@ import {
   ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess, ZodPrefault, STRINGBOOL_TRUE, STRINGBOOL_FALSE,
   ZodAlgoFormat, luhnCheck, ibanCheck, CREDITCARD_RE, IBAN_RE, _encode, _encodeScoped, isRecursiveSchema, _zodPattern, AsyncCheckError,
   deepPartial as _deepPartial, visit as _visit, _mkPropCheck, _mkPropertyCheck,
-  ZodCheckProperties, ZodCheckProperty,
+  ZodCheckProperties, ZodCheckProperty, _members,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
   _mkSafeEncode as _safeEncodeFn, _mkSafeEncodeAsync as _safeEncodeAsyncFn,
@@ -759,23 +759,76 @@ export const locales = {
 };
 const _config = _sharedConfig;
 
-// $constructor builds user-defined schema classes; $ZodType.init installs
-// the _zod internals a custom parse needs. Our engines drive these through
-// the TS-level _run shim, so memoized cycles close through them too.
-function $constructor(name: string, init: (inst: any, def: any) => void) {
-  const cls = class {
-    _zod: any;
-    constructor(def: any) { init(this, def); }
-    _run(data: unknown) {
-      const payload = { value: data, issues: [] as any[] };
-      const r = this._zod.parse(payload, {});
-      return r.issues.length
-        ? { ok: false as const, issues: r.issues }
-        : { ok: true as const, value: r.value, memo: r.memo };
+// $constructor builds user-defined schema classes — zod's trait model:
+// per-instance `_zod` internals, trait-name dedupe on init, member tables
+// installed once per composing prototype
+function $constructor(name: string, initializer: (inst: any, def: any) => void, protoMembers?: any) {
+  const zodProto: any = {};
+  function Internals(this: any, def: any) {
+    this.def = def;
+    this.constr = _;
+    this.traits = new Set();
+  }
+  Internals.prototype = zodProto;
+  const initialized = protoMembers && new WeakSet<object>();
+  const _zodDesc: any = { value: undefined, writable: true, enumerable: false, configurable: true };
+
+  function init(inst: any, def: any) {
+    if (!inst._zod) {
+      _zodDesc.value = new (Internals as any)(def);
+      try {
+        Object.defineProperty(inst, "_zod", _zodDesc);
+      } finally {
+        _zodDesc.value = undefined;
+      }
+    } else if (inst._zod.traits.has(name)) {
+      return;
     }
-  };
-  Object.defineProperty(cls, "name", { value: name });
-  return cls;
+
+    inst._zod.traits.add(name);
+    initializer(inst, def);
+
+    if (initialized) {
+      // install this trait's members on the prototype the constructor that
+      // built the instance owns — a receiver outside that chain gets them on
+      // its own prototype instead
+      const own = Object.getPrototypeOf(inst);
+      const ctorProto = inst._zod.constr.prototype;
+      let up: any = own;
+      while (up && up !== ctorProto) up = Object.getPrototypeOf(up);
+      const target = up ?? own;
+      if (!initialized.has(target)) {
+        initialized.add(target);
+        _members(target, protoMembers);
+      }
+    }
+
+    // enumerable own members of the constructor prototype bind per instance
+    const proto = _.prototype;
+    for (const k in proto) {
+      if (!Object.prototype.hasOwnProperty.call(proto, k)) continue;
+      if (!(k in inst)) (inst as any)[k] = proto[k].bind(inst);
+    }
+  }
+
+  function _(this: any, def: any) {
+    const inst = this;
+    init(inst, def);
+    const deferred = inst._zod.deferred;
+    if (deferred) {
+      for (const fn of deferred) fn();
+      inst._zod.deferred = undefined;
+    }
+    const pp = (globalThis as any).__zod_globalConfig?.postProcessor;
+    if (pp) pp(inst);
+    return inst;
+  }
+  Object.defineProperty(_, "init", { value: init });
+  Object.defineProperty(_, Symbol.hasInstance, {
+    value: (inst: any) => inst?._zod?.traits?.has(name),
+  });
+  Object.defineProperty(_, "name", { value: name });
+  return _ as any;
 }
 
 // z.util — byte codec helpers ported verbatim from zod's core/util.ts
@@ -952,7 +1005,7 @@ export const {
   invertCodec, getDiscriminatedOption, withParser, stringFormat,
   regexes,
 } = z;
-export { setErrorMap, getErrorMap, fromJSONSchema };
+export { setErrorMap, getErrorMap, fromJSONSchema, $constructor };
 export const toZod = z.toZod;
 export const ZodIssueCode = z.ZodIssueCode;
 export { renderZodSrc };

@@ -876,14 +876,101 @@ export const _decodeAsync = _parseAsync;
 export const _safeDecode = _safeParse;
 export const _safeDecodeAsync = _safeParseAsync;
 
-const _boundKeys = new WeakMap<object, string[]>();
+// zod's member machinery: methods materialize as bound own properties on
+// first read; live and derived accessors stay on the prototype
+const _own = (inst: any, key: PropertyKey, value: any, enumerable = true): any => {
+  Object.defineProperty(inst, key, { configurable: true, writable: true, enumerable, value });
+  return value;
+};
+export const _hide = (inst: any, key: PropertyKey, value: any): any => _own(inst, key, value, false);
+export function _defineBound(proto: object, key: PropertyKey, fn: any): void {
+  Object.defineProperty(proto, key, {
+    configurable: true,
+    get(this: any) { return this == null ? fn : _own(this, key, fn.bind(this)); },
+    set(this: any, v: any) { _own(this, key, v); },
+  });
+}
+// a trait's member table onto a prototype — getters stay live and
+// non-enumerable, methods become materializing bound-getters
+export function _members(proto: object, table: object): void {
+  for (const key of Reflect.ownKeys(table)) {
+    const desc = Object.getOwnPropertyDescriptor(table, key)!;
+    if (desc.get || desc.set) Object.defineProperty(proto, key, { ...desc, enumerable: false });
+    else _defineBound(proto, key, desc.value);
+  }
+}
+
+// prototypes of the schema classes defined in this file — zod's `constr`
+const _STOCKS = new WeakSet<object>();
+// member tables install once per target prototype
+const _INSTALLED = new WeakMap<object, WeakSet<object>>();
+
+// inner/innerType alias the same child — whichever side arrives wins
+const _defsync = (v: any): any => {
+  if (v && typeof v === "object") {
+    if (v.innerType !== undefined) v.inner = v.innerType;
+    else if (v.inner !== undefined) v.innerType = v.inner;
+  }
+  return v;
+};
+// `__def` is a non-enumerable backing field — `_def` itself is a read-only
+// prototype accessor like zod's
+const _definit = (t: any, v: any): void => {
+  if (!Object.prototype.hasOwnProperty.call(t, "__def"))
+    Object.defineProperty(t, "__def", { value: _defsync(v), writable: true, enumerable: false, configurable: true });
+  else t.__def = _defsync(v);
+};
+
+// flattens fromProto's chain members (child-first) onto the instance's
+// prototype once — the reachable-stock-proto target mirrors zod's install
+function _installOn(inst: any, fromProto: object): void {
+  const own = Object.getPrototypeOf(inst);
+  let up: any = own;
+  while (up && up !== fromProto) up = Object.getPrototypeOf(up);
+  const target = up ?? own;
+  let set = _INSTALLED.get(fromProto);
+  if (!set) _INSTALLED.set(fromProto, (set = new WeakSet()));
+  if (set.has(target)) return;
+  set.add(target);
+  const table = new Map<PropertyKey, PropertyDescriptor>();
+  for (let p: any = fromProto; p && p !== Object.prototype; p = Object.getPrototypeOf(p))
+    for (const k of Reflect.ownKeys(p))
+      if (k !== "constructor" && !table.has(k)) table.set(k, Object.getOwnPropertyDescriptor(p, k)!);
+  for (const [k, desc] of table) {
+    if (desc.get || desc.set) Object.defineProperty(target, k, { ...desc });
+    else if (typeof desc.value === "function") _defineBound(target, k, desc.value);
+    else Object.defineProperty(target, k, { ...desc, enumerable: false });
+  }
+}
+
+// construction resolves the member set through the first stock prototype in
+// the instance's chain — a user subclass composes its stock base's members
+function _installFor(inst: any): void {
+  let p: any = Object.getPrototypeOf(inst);
+  while (p && !_STOCKS.has(p)) p = Object.getPrototypeOf(p);
+  if (p) _installOn(inst, p);
+}
 
 export abstract class ZodType<Output = unknown, Input = Output> {
-  readonly _output!: Output;
-  readonly _input!: Input;
+  declare readonly _output: Output;
+  declare readonly _input: Input;
   // $ZodType.init — installs the _zod internals a $constructor-built class
   // needs; the TS-level _run shim drives custom parses through it
   static init(inst: any, def: any) {
+    const ctor: any = this;
+    if (inst._zod?.traits?.has?.(ctor)) return;
+    if (inst._zod) { inst._zod.traits?.add?.(ctor); _installOn(inst, ctor.prototype); return; }
+    _own(inst, "_zod", {
+      def,
+      constr: ctor,
+      traits: new Set([ctor]),
+      run: (payload: any, ctx: any) => inst._zod.parse(payload, ctx),
+      parse: (payload: any) => payload,
+    }, false);
+    _installOn(inst, ctor.prototype);
+    return;
+  }
+  static _legacyInit(inst: any, def: any) {
     inst._zod = {
       def,
       traits: new Set([inst.constructor]),
@@ -891,42 +978,19 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       parse: (payload: any) => payload,
     };
   }
-  __def: any;
-  // inner/innerType alias the same child — zod's clone writes innerType, our
-  // builders write inner; whichever side arrives wins and the other syncs
+  declare __def: any;
+  // zod's `_def` is read-only — a getter-only accessor so assignment throws
   get _def(): any { return this.__def; }
-  set _def(v: any) {
-    if (v && typeof v === "object") {
-      if (v.innerType !== undefined) v.inner = v.innerType;
-      else if (v.inner !== undefined) v.innerType = v.inner;
-    }
-    this.__def = v;
-  }
-  __zod: any;
-  private _rec: boolean | undefined;
-  private _recChecked = false;
+  declare __zod: any;
+  declare _rec: boolean | undefined;
+  declare _recChecked: boolean;
   constructor() {
     ensureDefaultMemoizer();
     // English registers lazily on first schema construction (zod#5953)
     globalConfig.localeError ??= defaultMessage;
-    // zod's $constructor binds every proto method onto each instance —
-    // detached `schema.parse`/`schema.optional` keeps `this` (zod#5870)
-    const proto = Object.getPrototypeOf(this);
-    let keys = _boundKeys.get(proto);
-    if (!keys) {
-      keys = [];
-      let p: any = proto;
-      while (p && p !== Object.prototype) {
-        for (const k of Object.getOwnPropertyNames(p)) {
-          if (k === "constructor") continue;
-          const desc = Object.getOwnPropertyDescriptor(p, k);
-          if (desc?.value !== undefined && typeof desc.value === "function") keys.push(k);
-        }
-        p = Object.getPrototypeOf(p);
-      }
-      _boundKeys.set(proto, keys);
-    }
-    for (const k of keys) (this as any)[k] = (this as any)[k].bind(this);
+    // members live on the prototype as materializing bound-getters — first
+    // read installs an enumerable bound copy, so detached calls keep `this`
+    _installFor(this);
   }
 
   protected _hasFx(): boolean { return _hasFxWalk(this, new Set()); }
@@ -966,7 +1030,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         z.__zdef = out;
         return out;
       },
-      set def(v: any) { t._def = v; z.__zdef = undefined; },
+      set def(v: any) { _definit(t, v); z.__zdef = undefined; },
       constr: (this as any).constructor,
       traits: new Set([(this as any).constructor]),
       parent: this._def.parent,
@@ -1001,7 +1065,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         get: () => { if (!cached) { val = fn(); cached = true; } return val; },
       });
     }
-    this.__zod = z;
+    Object.defineProperty(this, "__zod", { value: z, writable: true, enumerable: false, configurable: true });
     // visit() can graft real-zod nodes into our defs — wrap them on contact.
     // Runs after __zod is cached: shape getters may re-enter _zod via merge
     const d0 = this._def;
@@ -1023,13 +1087,21 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return z;
   }
 
-  private _compiled: Compiled | null = null;
+  declare _compiled: Compiled | null;
 
   protected _compile(): Compiled {
     return (this._compiled ??= compile(this));
   }
 
   protected _run(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
+    if (this.__def === undefined && this._zod?.parse) {
+      // $constructor-built — custom classes speak the _zod payload protocol
+      const payload = { value: data, issues: [] as any[] };
+      this._zod.parse(payload, {});
+      return payload.issues.length
+        ? { ok: false as const, issues: payload.issues }
+        : { ok: true as const, value: payload.value, memo: (payload as any).memo } as any;
+    }
     void this._zod; // materialize internals + normalize foreign def children
     const r = this._runImpl(data) as any;
     _stampIss(r, this, data);
@@ -1510,9 +1582,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   get description(): string | undefined {
     return globalRegistry.get(this)?.description ?? this._def.description;
   }
+  set "~standard"(v: any) { _own(this, "~standard", v); }
   get "~standard"() {
     const self = this;
-    return {
+    return _hide(this, "~standard", {
       version: 1 as const, vendor: "zod",
       validate: (v: unknown) => {
         try {
@@ -1530,7 +1603,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         input: (params?: any) => (self as any).toJSONSchema({ ...params, io: "input" }),
         output: (params?: any) => (self as any).toJSONSchema({ ...params, io: "output" }),
       },
-    };
+    });
   }
   safeParseAsync(data: unknown, params?: any): Promise<SafeParseResult<Output>> {
     return _safeParseAsync(ZodRealError)(this, data, params);
@@ -1755,7 +1828,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
 // readonly freezes the parsed payload; async children resolve first — the
 // freeze is queued behind their replay so in-place path writes still land
 export class ZodReadonly<T extends ZodTypeAny = ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   protected override _runImpl(data: unknown) {
     const mark = pendingAsync.length;
     const r = (this._def.inner as any)._run(data);
@@ -1780,7 +1853,7 @@ export type ZodTypeAny = ZodType<any, any>;
 
 // ---------- primitives ----------
 export class ZodString extends ZodType<string> {
-  constructor(_def: any = { type: "string", checks: [] }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "string", checks: [] }) { super(); _definit(this, _def); }
   private _check(c: any) {
     const mk: any = FMT_FNS[c.kind];
     const rec = mk ? { ...c, fn: mk(c), builtin: true } : c;
@@ -1914,12 +1987,14 @@ export class ZodString extends ZodType<string> {
         return c.kind === "datestr" ? "date" : c.kind === "timestr" ? "time" : c.kind === "httpurl" ? "url" : c.kind;
     return null;
   }
+  set minLength(v: number | null) { _own(this, "minLength", v); }
   get minLength(): number | null {
     let v: number | null = null;
     for (const c of this._def.checks ?? [])
       if (c.kind === "min" || c.kind === "length") v = v === null ? c.value : Math.max(v, c.value);
-    return v;
+    return _own(this, "minLength", v);
   }
+  set maxLength(v: number | null) { _own(this, "maxLength", v); }
   get maxLength(): number | null {
     let v: number | null = null;
     for (const c of this._def.checks ?? [])
@@ -1929,7 +2004,7 @@ export class ZodString extends ZodType<string> {
 }
 
 export class ZodNumber extends ZodType<number> {
-  constructor(_def: any = { type: "number", checks: [] }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "number", checks: [] }) { super(); _definit(this, _def); }
   private _check(c: any) { return new ZodNumber({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   gt(n: number, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -1969,13 +2044,15 @@ export class ZodNumber extends ZodType<number> {
     }
     return { minimum, exclusiveMinimum, maximum, exclusiveMaximum, isInt, divs };
   }
+  set minValue(v: number | null) { _own(this, "minValue", v); }
   get minValue(): number | null {
     const { minimum, exclusiveMinimum } = this._agg();
-    return Math.max(minimum ?? Number.NEGATIVE_INFINITY, exclusiveMinimum ?? Number.NEGATIVE_INFINITY);
+    return _own(this, "minValue", Math.max(minimum ?? Number.NEGATIVE_INFINITY, exclusiveMinimum ?? Number.NEGATIVE_INFINITY));
   }
+  set maxValue(v: number | null) { _own(this, "maxValue", v); }
   get maxValue(): number | null {
     const { maximum, exclusiveMaximum } = this._agg();
-    return Math.min(maximum ?? Number.POSITIVE_INFINITY, exclusiveMaximum ?? Number.POSITIVE_INFINITY);
+    return _own(this, "maxValue", Math.min(maximum ?? Number.POSITIVE_INFINITY, exclusiveMaximum ?? Number.POSITIVE_INFINITY));
   }
   get isInt(): boolean {
     const { isInt, divs } = this._agg();
@@ -1989,7 +2066,7 @@ export class ZodNumber extends ZodType<number> {
 }
 
 export class ZodBigInt extends ZodType<bigint> {
-  constructor(_def: any = { type: "bigint", checks: [] }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "bigint", checks: [] }) { super(); _definit(this, _def); }
   private _check(c: any) { return new ZodBigInt({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   gt(n: bigint, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -2006,12 +2083,14 @@ export class ZodBigInt extends ZodType<bigint> {
   nonnegative(m?: string) { return this.gte(0n, m); }
   negative(m?: string) { return this.lt(0n, m); }
   nonpositive(m?: string) { return this.lte(0n, m); }
+  set minValue(v: bigint | null) { _own(this, "minValue", v); }
   get minValue(): bigint | null {
     let v: bigint | null = null;
     for (const c of this._def.checks ?? [])
       if (c.kind === "gte" || c.kind === "gt" || c.kind === "min") v = v === null || c.value > v ? c.value : v;
     return v;
   }
+  set maxValue(v: bigint | null) { _own(this, "maxValue", v); }
   get maxValue(): bigint | null {
     let v: bigint | null = null;
     for (const c of this._def.checks ?? [])
@@ -2022,35 +2101,35 @@ export class ZodBigInt extends ZodType<bigint> {
 }
 
 export class ZodBoolean extends ZodType<boolean> {
-  constructor(_def: any = { type: "boolean" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "boolean" }) { super(); _definit(this, _def); }
 }
 export class ZodAny extends ZodType<any> {
-  constructor(_def: any = { type: "any" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "any" }) { super(); _definit(this, _def); }
 }
 export class ZodUnknown extends ZodType<unknown> {
-  constructor(_def: any = { type: "unknown" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "unknown" }) { super(); _definit(this, _def); }
 }
 export class ZodNever extends ZodType<never> {
-  constructor(_def: any = { type: "never" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "never" }) { super(); _definit(this, _def); }
 }
 export class ZodNull extends ZodType<null> {
-  constructor(_def: any = { type: "null" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "null" }) { super(); _definit(this, _def); }
 }
 export class ZodUndefined extends ZodType<undefined> {
-  constructor(_def: any = { type: "undefined" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "undefined" }) { super(); _definit(this, _def); }
 }
 export class ZodVoid extends ZodType<void> {
-  constructor(_def: any = { type: "void" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "void" }) { super(); _definit(this, _def); }
 }
 export class ZodNaN extends ZodType<number> {
-  constructor(_def: any = { type: "nan" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "nan" }) { super(); _definit(this, _def); }
 }
 export class ZodSymbol extends ZodType<symbol> {
-  constructor(_def: any = { type: "symbol" }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "symbol" }) { super(); _definit(this, _def); }
 }
 
 export class ZodDate extends ZodType<Date> {
-  constructor(_def: any = { type: "date", checks: [] }) { super(); this._def = _def; }
+  constructor(_def: any = { type: "date", checks: [] }) { super(); _definit(this, _def); }
   private _check(c: any) { return new ZodDate({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   min(d: Date | number, message?: string) { return this._check({ kind: "min", value: d instanceof Date ? d.getTime() : +d, message }); }
   max(d: Date | number, message?: string) { return this._check({ kind: "max", value: d instanceof Date ? d.getTime() : +d, message }); }
@@ -2070,7 +2149,7 @@ export class ZodDate extends ZodType<Date> {
 
 // ---------- wrappers ----------
 export class ZodOptional<T extends ZodTypeAny> extends ZodType<T["_output"] | undefined, T["_input"] | undefined> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   unwrap() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
     const defaulted = (this._def.inner as any)?._zod?.optin === "defaulted";
@@ -2092,7 +2171,7 @@ export class ZodOptional<T extends ZodTypeAny> extends ZodType<T["_output"] | un
 export class ZodExactOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodOptional<T> {}
 
 export class ZodNullable<T extends ZodTypeAny> extends ZodType<T["_output"] | null, T["_input"] | null> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   unwrap() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
     if (this._isRec()) {
@@ -2103,7 +2182,7 @@ export class ZodNullable<T extends ZodTypeAny> extends ZodType<T["_output"] | nu
   }
 }
 export class ZodDefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"] | undefined> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   removeDefault() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
     if (this._isRec() || this._hasFx() || typeof this._def.value === "function") {
@@ -2121,7 +2200,7 @@ export class ZodDefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_
   }
 }
 export class ZodPrefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"] | undefined> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   protected override _runImpl(data: unknown) {
     // prefault validates the substituted value through inner (unlike
     // default, which trusts it) — the engine's 0x0d node shares that shape
@@ -2134,7 +2213,7 @@ export class ZodPrefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["
   }
 }
 export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   removeCatch() { return this._def.inner as T; }
   protected override _runImpl(data: unknown) {
     // function catchValues need the zod catch ctx and any fx inside the
@@ -2164,7 +2243,7 @@ export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_in
   }
 }
 export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<N, T["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   // zod's checks live on the schema's own def — refinements expose inner
   // def fields like `pattern` through the wrapper
   override get def(): any {
@@ -2178,12 +2257,18 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   innerType() { return this._def.inner as T; }
   sourceType() { return this._def.inner as T; }
   private get _innerS(): any { return this._def.inner ?? this._def.innerType; }
-  get minValue(): any { return this._innerS?.minValue ?? null; }
-  get maxValue(): any { return this._innerS?.maxValue ?? null; }
-  get minLength(): any { return this._innerS?.minLength ?? null; }
-  get maxLength(): any { return this._innerS?.maxLength ?? null; }
-  get minDate(): any { return this._innerS?.minDate ?? null; }
-  get maxDate(): any { return this._innerS?.maxDate ?? null; }
+  set minValue(v: any) { _own(this, "minValue", v); }
+  get minValue(): any { return _own(this, "minValue", this._innerS?.minValue ?? null); }
+  set maxValue(v: any) { _own(this, "maxValue", v); }
+  get maxValue(): any { return _own(this, "maxValue", this._innerS?.maxValue ?? null); }
+  set minLength(v: any) { _own(this, "minLength", v); }
+  get minLength(): any { return _own(this, "minLength", this._innerS?.minLength ?? null); }
+  set maxLength(v: any) { _own(this, "maxLength", v); }
+  get maxLength(): any { return _own(this, "maxLength", this._innerS?.maxLength ?? null); }
+  set minDate(v: any) { _own(this, "minDate", v); }
+  get minDate(): any { return _own(this, "minDate", this._innerS?.minDate ?? null); }
+  set maxDate(v: any) { _own(this, "maxDate", v); }
+  get maxDate(): any { return _own(this, "maxDate", this._innerS?.maxDate ?? null); }
 
   // refine/superRefine wrap an object — object helpers delegate to the
   // inner object the way zod's checks-in-def model exposes them
@@ -2372,7 +2457,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   }
 }
 export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<B["_output"], A["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
 
   get in(): A { return this._def.in; }
   get out(): B { return this._def.out; }
@@ -2440,7 +2525,7 @@ export class ZodTransform extends ZodEffects<any, any> {
   unwrap() { return undefined as any; }
 }
 export class ZodBranded<T extends ZodTypeAny, B extends string> extends ZodType<T["_output"] & { __brand: B }, T["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
 }
 
 // ---------- composites ----------
@@ -2546,9 +2631,12 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
         },
       });
     }
-    this._def = _def;
+    _definit(this, _def);
   }
-  get shape(): T { return this._def.shape; }
+  // zod's shape is a lazy member — first read caches a non-enumerable,
+  // writable own value; assignment and delete behave like they always did
+  set shape(v: T) { _own(this, "shape", v, false); }
+  get shape(): T { return _own(this, "shape", this._def.shape, false); }
 
   // symbol keys can't be tagged into bytecode — the compiled engine handles
   // the string keys and symbol fields are validated here at TS level.
@@ -2785,7 +2873,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
 }
 
 export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_input"][]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   unwrap(): T { return this._def.element; }
   get element(): T { return this._def.element; }
   min(n: number, message?: any) { return new ZodArray({ ...this._def, minLen: n, _minMsg: paramMsg(message) }); }
@@ -2857,7 +2945,7 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
 }
 
 export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType<{ [k in keyof Items]: Items[k]["_output"] }> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   rest<R extends ZodTypeAny>(r: R) {
     return new ZodTuple({ ...this._def, rest: r }) as any;
   }
@@ -2996,7 +3084,7 @@ const _unrecMsg = (ks: string[]) =>
   ks.length === 1 ? `Unrecognized key: "${ks[0]}"` : `Unrecognized keys: ${ks.map((k) => `"${k}"`).join(", ")}`;
 
 export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodType<Record<string, V["_output"]>> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   get keyType(): K { return this._def.keyType; }
   get valueType(): V { return this._def.valueType; }
 
@@ -3105,7 +3193,7 @@ export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodTy
 // Map/Set: the container walk is JS (can't enumerate a Map in machine
 // code), but every key/value still validates through the ARM64 engine.
 export class ZodNonOptional<T extends ZodTypeAny = ZodTypeAny> extends ZodType<NonNullable<T["_output"]>, T["_input"]> {
-  constructor(_def: any) { super(); this._def = { ..._def, type: "nonoptional" }; }
+  constructor(_def: any) { super(); _definit(this, { ..._def, type: "nonoptional" }); }
   protected override _runImpl(data: unknown) {
     const nir = (this._def.inner as any)._run(data);
     if (nir.ok && nir.value === undefined) {
@@ -3258,7 +3346,7 @@ function typeIssue(expected: string, received: unknown): ZodIssue {
 
 export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
   extends ZodType<Map<K["_output"], V["_output"]>, Map<K["_input"], V["_input"]>> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   private _check(c: any) { return new ZodMap({ ...this._def, checks: [...(this._def.checks ?? []), _zrec(c)] }); }
   min(n: number, message?: string) { return this._check({ kind: "size", min: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "size", max: n, message }); }
@@ -3323,7 +3411,7 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
 
 export class ZodSet<V extends ZodTypeAny>
   extends ZodType<Set<V["_output"]>, Set<V["_input"]>> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   private _check(c: any) { return new ZodSet({ ...this._def, checks: [...(this._def.checks ?? []), _zrec(c)] }); }
   min(n: number, message?: string) { return this._check({ kind: "size", min: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "size", max: n, message }); }
@@ -3360,7 +3448,7 @@ export class ZodSet<V extends ZodTypeAny>
 }
 
 export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   get options(): T { return this._def.options; }
 
   // union resolution happens in ZodType._run via the engine's `_u` marker:
@@ -3385,7 +3473,7 @@ export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output
 }
 
 export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   get options(): T { return this._def.options as T; }
   get def(): any { return this._def; }
   // discriminator value -> option map, built lazily on first use — recursive
@@ -3479,7 +3567,7 @@ function _mergeValues(a: any, b: any): { valid: true; data: any } | { valid: fal
 }
 
 export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<A["_output"] & B["_output"], A["_input"] & B["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
 
   // both sides run independently; a key rejection is reported only when BOTH
   // sides reject it (strict objects: unrecognized_keys; open records:
@@ -3563,7 +3651,7 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
 }
 
 export class ZodLiteral<T> extends ZodType<T> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   private _vals(): any[] {
     return this._def.values ?? (Array.isArray(this._def.value) ? this._def.value : [this._def.value]);
   }
@@ -3593,7 +3681,7 @@ export class ZodLiteral<T> extends ZodType<T> {
 
 export class ZodEnum<T extends string = string> extends ZodType<T> {
   constructor(_def: any) {
-    super(); this._def = _def;
+    super(); _definit(this, _def);
     if (!_def.entries && Array.isArray(_def.values))
       _def.entries = Object.fromEntries(_def.values.map((v: string) => [v, v]));
   }
@@ -3619,7 +3707,7 @@ export class ZodEnum<T extends string = string> extends ZodType<T> {
 }
 
 export class ZodLazy<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   // the getter resolves once — a factory that mints fresh schemas per call
   // still yields a finite schema graph (zod caches def.innerType)
   get schema(): T { return (this._def._cachedInner ??= this._def.getter()) as T; }
@@ -3653,7 +3741,7 @@ function _norm(s: any): any {
 }
 
 export class ZodInstanceof<T> extends ZodType<T> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   // zod: .check() clones the schema into a plain custom — the instanceof
   // predicate degrades from invalid_type to a `custom` code check
   override check(...args: any[]): any {
@@ -3672,7 +3760,7 @@ export class ZodInstanceof<T> extends ZodType<T> {
 
 export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output"]>, Promise<T["_input"]>> {
   constructor(_def: any = { type: "promise", ctor: Promise, name: "promise", inner: null }) {
-    super(); this._def = _def;
+    super(); _definit(this, _def);
   }
   // zod: Promise.resolve(payload).then(inner) — any input resolves through
   // the promise hop, so even non-thenables work in async mode and sync
@@ -3687,7 +3775,7 @@ export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output
 export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = ZodAny>
   extends ZodType<(...args: any[]) => any, (...args: any[]) => any> {
   constructor(_def: any = { type: "function", name: "function", input: null, output: null }) {
-    super(); this._def = _def;
+    super(); _definit(this, _def);
   }
   // `.input(args[])` wraps the list in a tuple; a bare schema passes through
   input(...args: any[]): any {
@@ -3762,7 +3850,7 @@ export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = Zod
 }
 
 export class ZodCustom<T> extends ZodType<T> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   protected override _runImpl(data: unknown) {
     const fn = this._def.fn as ((v: unknown) => boolean) | undefined;
     if (fn !== undefined) {
@@ -3815,7 +3903,7 @@ export const STRINGBOOL_FALSE = new Set(["false", "0", "no", "off", "n", "disabl
 export class ZodStringbool extends ZodType<boolean, unknown> {
   constructor(_def: any) {
     super();
-    this._def = _def;
+    _definit(this, _def);
     (this as any)._zod.bag = { truthy: _def.truthy, falsy: _def.falsy, case: _def.case };
   }
   _lists(): { t: string[]; f: string[] } {
@@ -3872,7 +3960,7 @@ export class ZodXor<T extends ZodTypeAny[]> extends ZodUnion<T> {
 }
 
 export class ZodFile extends ZodType<File, File> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) { super(); _definit(this, _def); }
   private _c(c: any) { return new ZodFile({ ...this._def, checks: [...(this._def.checks ?? []), c] }); }
   min(n: number, message?: string) { return this._c({ kind: "min", value: n, message }); }
   max(n: number, message?: string) { return this._c({ kind: "max", value: n, message }); }
@@ -3987,7 +4075,7 @@ export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
 // emitted as invalid_format issues exactly like zod's ZodStringFormat defs
 export class ZodAlgoFormat extends ZodType<string, string> {
   constructor(_def: { format: string; message: string; fn: (s: string) => boolean; abort?: boolean; pattern?: RegExp }) {
-    super(); this._def = { ..._def, type: "algoformat" };
+    super(); _definit(this, { ..._def, type: "algoformat" });
   }
   protected override _runImpl(data: unknown) {
     if (typeof data !== "string")
@@ -4204,13 +4292,36 @@ export function deepPartial(schema: any): any {
   });
 }
 
+// `def`/`type` are the only enumerable prototype members — `for..in` over a
+// schema yields exactly these two
+{
+  const dd = Object.getOwnPropertyDescriptor(ZodType.prototype, "def")!;
+  const td = Object.getOwnPropertyDescriptor(ZodType.prototype, "type")!;
+  Object.defineProperty(ZodType.prototype, "def", { ...dd, enumerable: true });
+  Object.defineProperty(ZodType.prototype, "type", { ...td, enumerable: true });
+}
+
+// stock prototypes — construction installs each class's flattened member set
+// onto the first of these reachable from the instance
+for (const Cls of [
+  ZodType, ZodString, ZodNumber, ZodBigInt, ZodBoolean, ZodAny, ZodUnknown,
+  ZodNever, ZodNull, ZodUndefined, ZodVoid, ZodNaN, ZodSymbol, ZodDate,
+  ZodObject, ZodArray, ZodTuple, ZodRecord, ZodUnion, ZodDiscriminatedUnion,
+  ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
+  ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodCatch,
+  ZodEffects, ZodPipe, ZodBranded, ZodMap, ZodSet, ZodPromise, ZodFunction,
+  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform,
+  ZodPreprocess, ZodPrefault, ZodNonOptional, ZodReadonly, ZodForeign,
+])
+  if (Cls) _STOCKS.add(Cls.prototype);
+
 // zod installs the spa alias accessor on every prototype that composes a trait
 const _spaDesc: PropertyDescriptor = {
   get(this: any) { return this?.safeParseAsync; },
   set(this: any, v: any) {
     Object.defineProperty(this, "spa", { value: v, writable: true, enumerable: true, configurable: true });
   },
-  enumerable: true,
+  enumerable: false,
   configurable: true,
 };
 for (const Cls of [
