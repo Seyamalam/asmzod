@@ -2280,7 +2280,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     let b: any = o;
     while (b instanceof ZodEffects && (b._def.kind === "refine" || b._def.kind === "superrefine")) {
       const e = b;
-      wraps.unshift((s: any) => new ZodEffects({ ...e._def, inner: s }));
+      wraps.unshift((s: any) => new ZodEffects({ ...e._def, innerType: s, inner: s }));
       b = e._def.inner;
     }
     if (!(b instanceof ZodObject))
