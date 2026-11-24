@@ -464,6 +464,7 @@ function _checkParams(p: any): any {
     path: Array.isArray(p.path) ? p.path : undefined,
     params: p.params,
     abort: p.abort,
+    when: typeof p.when === "function" ? p.when : undefined,
   };
 }
 
@@ -870,13 +871,14 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       type: "refine", inner: this,
       cbid: regId(reg.refine, guardAsync(fn as (v: unknown) => unknown)),
       fn, kind: "refine", message: p.message, error: p.error,
-      path: p.path, params: p.params, abort: p.abort,
+      path: p.path, params: p.params, abort: p.abort, when: p.when,
     });
   }
   refinement(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
     return this.refine(fn, message);
   }
-  superRefine(fn: (v: Output, ctx: { addIssue: (i: any) => void }) => void): ZodEffects<this, Output> {
+  superRefine(fn: (v: Output, ctx: { addIssue: (i: any) => void }) => void, params?: any): ZodEffects<this, Output> {
+    const p = _checkParams(params);
     return new ZodEffects({
       type: "refine", inner: this,
       cbid: regId(reg.refine, guardAsync(((v: unknown) => {
@@ -886,7 +888,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         });
         return ok;
       }) as (v: unknown) => unknown)),
-      fn, kind: "superrefine", message: undefined,
+      fn, kind: "superrefine", message: undefined, when: p.when, abort: p.abort,
+      error: p.error, path: p.path, params: p.params,
     });
   }
   transform<N>(fn: (v: Output) => N): ZodPipe<this, ZodTransform> {
@@ -1571,7 +1574,14 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
       if (kind === "transform") throw new ZodCyclicError();
       return { ok: true as const, value: ir.value, memo: true };
     }
-    if (ir.ok === false && ((ir as any).aborted ?? isAborted(ir.issues))) return ir;
+    // zod's check loop: a `when` check evaluates on any payload not explicitly
+    // aborted (continue:false / pipe truncation); checks without `when` skip
+    // whenever the payload is aborted
+    const _when = this._def.when as ((p: any) => boolean) | undefined;
+    if (_when) {
+      if ((ir as any)._hardAbort === true ||
+          (!ir.ok && ir.issues.some((i: any) => i.continue === false))) return ir;
+    } else if (ir.ok === false && ((ir as any).aborted ?? isAborted(ir.issues))) return ir;
     // inner failed non-aborted: zod keeps running the check chain on the
     // parsed-so-far payload — re-run inner minus its unrecognized keys to get
     // it (no user callbacks re-fire), falling back to the raw input
@@ -1589,6 +1599,7 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
       }
     }
     const fn = this._def.fn as (v: unknown, ctx?: any) => unknown;
+    if (_when && !_when({ value: base, issues: ir.ok ? [] : ir.issues })) return ir;
     // a transform fed a node a back-edge already resolved to can't mirror
     // the cycle — its output is allocated after the input, never before
     if (kind === "transform" && MEMO?.backEdges?.has(base)) throw new ZodCyclicError();
@@ -1620,11 +1631,14 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
     }
     if (kind === "superrefine") {
       const pushed: any[] = [];
-      const r = fn(base, { addIssue: (i: any) => pushed.push(i) });
+      const r = fn(base, _addIssueCtx(pushed, this, base));
       if (isThenable(r)) return queue();
       const mine = pushed.map(({ path, ...rest }: any) => ({ inst: this, schema: this._def.inner, ...rest, path: path ?? [] }));
-      if (ir.ok) return mine.length ? { ok: false as const, issues: mine } : ir;
-      return { ok: false as const, issues: [...ir.issues, ...mine], value: base } as any;
+      const abort = mine.length ? isAborted(mine) : undefined;
+      if (ir.ok)
+        return mine.length ? { ok: false as const, issues: mine, aborted: abort } as any : ir;
+      return { ok: false as const, issues: [...ir.issues, ...mine], value: base,
+               aborted: abort === true || isAborted(ir.issues) } as any;
     }
     const r = fn(base);
     if (isThenable(r)) return queue();
@@ -1657,12 +1671,12 @@ export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType
       // any blocking issue truncates the pipe (aborted); unrecognized keys
       // forward through `out` so an enclosing intersection can reconcile them
       if (ir.issues.some((i: any) => i.code !== "unrecognized_keys"))
-        return { ...ir, aborted: true };
+        return { ...ir, aborted: true, _hardAbort: true };
       const or = (this._def.out as any)._run(("value" in ir) ? ir.value : data);
       if (or.ok)
-        return { ok: false as const, issues: ir.issues, aborted: true, value: or.value } as any;
+        return { ok: false as const, issues: ir.issues, aborted: true, _hardAbort: true, value: or.value } as any;
       return {
-        ok: false as const, issues: [...ir.issues, ...or.issues], aborted: true,
+        ok: false as const, issues: [...ir.issues, ...or.issues], aborted: true, _hardAbort: true,
         value: ("value" in or) ? or.value : (("value" in ir) ? ir.value : data),
       } as any;
     }
@@ -1933,8 +1947,10 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
         else for (const i of res.issues) issues.push({ ...i, path: [k, ...(i.path ?? [])] });
       }
     }
+    // zod's payload is best-effort: fields that parsed stay in `value` so
+    // when-checks and downstream effects see the partial object
     return issues.length
-      ? { ok: false as const, issues, aborted: isAborted(issues) }
+      ? { ok: false as const, issues, aborted: isAborted(issues), value: out }
       : { ok: true as const, value: out };
   }
   strict() { return new ZodObject({ ...this._def, mode: "strict", catchall: new ZodNever({ type: "never" }) }); }
