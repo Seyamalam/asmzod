@@ -5,7 +5,7 @@ import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, stripInternalFrames, globalConfig, defaultedIssues, globalRegistry, ZodRegistry } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, ZodRealError, ZodEncodeError, type ZodIssue } from "./error.ts";
-import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx, FORMAT_PATTERNS, FORMAT_NOPAT } from "./shared.ts";
+import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx, FORMAT_PATTERNS, FORMAT_NOPAT, _isoRe, _isoTimeSrc } from "./shared.ts";
 
 // issues added via ctx.addIssue inside superRefine callbacks during the
 // in-flight engine run; _run splices them over the engine's `custom` slots
@@ -466,6 +466,9 @@ const FMT_FNS: Record<string, (c: any) => (v: any) => any> = {
   httpurl: (c) => _urlCheck({ ...c, protocol: _HTTP_PROTO }),
   ipv6: () => (s) => typeof s !== "string" || (/^[0-9a-fA-F:.]+$/.test(s) && _canParseURL(`http://[${s}]`)),
   mac: (c) => { const d = String(c.delimiter ?? ":").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); const re = new RegExp(`^(?:[0-9A-F]{2}${d}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${d}){5}[0-9a-f]{2}$`); return (s) => typeof s !== "string" || re.test(s); },
+  datetime: (c) => { const re = _isoRe.datetime({ local: c.local, offset: c.offset, precision: c.precision }); c.pat = re; return (s) => typeof s !== "string" || re.test(s); },
+  datestr: (c) => { c.fmt = "date"; c.pat = _isoRe.date; return (s) => typeof s !== "string" || _isoRe.date.test(s); },
+  timestr: (c) => { c.fmt = "time"; const re = _isoRe.time({ precision: c.precision }); c.pat = re; return (s) => typeof s !== "string" || re.test(s); },
 };
 
 const _cleanRe = (src: string): string =>
@@ -1038,6 +1041,27 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         }
         continue;
       }
+      // pipe-side refine records — a boolean gate on the moving value, emitted
+      // as a `custom` issue; these never compile to engine opcodes
+      if (c.kind === "refine" && typeof c.fn === "function") {
+        const nv = c.fn(v);
+        if (isThenable(nv)) {
+          if (!asyncMode) throw new AsyncCheckError();
+          pendingAsync.push({ type: "checkchain", checks: checks.slice(i + 1), ctor: Base, def: carrierDef,
+            tx: Promise.resolve(nv).then((ok) => (ok ? v : { __azRefine: c })),
+            pre: issues.splice(0), inst: this } as any);
+          return { ok: true as const, value: v };
+        }
+        if (nv === false) {
+          const i: any = { code: "custom", input: v, path: [], message: "Invalid input" };
+          const e = c.error ?? c.message;
+          if (e !== undefined) i.message = typeof e === "function" ? e(i) : e;
+          if (c.abort === true) i.continue = false;
+          issues.push(i);
+          if (c.abort === true) break;
+        }
+        continue;
+      }
       // format records carrying a JS predicate (url/jwt/base64/uuid-version/
       // nanoid-length…) — zod's real semantics live in the function, so the
       // check never compiles to an engine opcode
@@ -1052,7 +1076,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         else if (nv === false)
           issues.push({ ...(FORMAT_NOPAT.has(c.fmt ?? c.kind) ? {} : { origin: "string" }),
                         code: "invalid_format", format: c.fmt ?? c.kind,
-                        ...(!FORMAT_NOPAT.has(c.fmt ?? c.kind) && FORMAT_PATTERNS[c.fmt ?? c.kind] ? { pattern: FORMAT_PATTERNS[c.fmt ?? c.kind] } : {}),
+                        ...(!FORMAT_NOPAT.has(c.fmt ?? c.kind) && (c.pat || FORMAT_PATTERNS[c.fmt ?? c.kind])
+                              ? { pattern: c.pat ? `/${c.pat.source}/` : FORMAT_PATTERNS[c.fmt ?? c.kind] } : {}),
                         input: v, path: [], message: c.message } as any);
         else if (typeof nv === "string") v = nv;
         continue;
@@ -1411,6 +1436,16 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         // then finish the remaining checks positionally
         let cv = await st.tx;
         const cIssues: any[] = [...(st.pre ?? [])];
+        if (cv != null && typeof cv === "object" && (cv as any).__azRefine) {
+          // a suspended pipe-refine resolved false — emit its custom issue
+          const rc = (cv as any).__azRefine;
+          const i: any = { code: "custom", input: cur, path: p ?? [], message: "Invalid input" };
+          const e = rc.error ?? rc.message;
+          if (e !== undefined) i.message = typeof e === "function" ? e(i) : e;
+          cIssues.push(i);
+          if (rc.abort === true) return { value: root, issues: cIssues };
+          cv = cur;
+        }
         for (const c of st.checks ?? []) {
           if (typeof c === "function" || c?.kind === "checkfn") {
             const fn = typeof c === "function" ? c : c.fn;
@@ -1433,7 +1468,12 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           (pendingAsync[i] as any).path = [...(p ?? []), ...((pendingAsync[i] as any).path ?? [])];
         if (!or.ok)
           return { value: root, issues: or.issues.map((i: any) => ({ ...i, path: [...(p ?? []), ...(i.path ?? [])] })) };
-        return { value: setPath(root, p, or.value), issues: [] };
+        let res = or;
+        if (st.inst?._def?.checks?.length)
+          res = (st.inst as any)._runChecksTS(or.value, st.inst._def.checks, or, st.out);
+        if (!res.ok)
+          return { value: root, issues: res.issues.map((i: any) => ({ ...i, path: [...(p ?? []), ...(i.path ?? [])] })) };
+        return { value: setPath(root, p, res.value), issues: [] };
       }
       if (st.type === "codecout") {
         // async codec transform resolved — run `out`, then codec checks
@@ -1555,8 +1595,10 @@ export type ZodTypeAny = ZodType<any, any>;
 export class ZodString extends ZodType<string> {
   constructor(_def: any = { type: "string", checks: [] }) { super(); this._def = _def; }
   private _check(c: any) {
-    const mk = FMT_FNS[c.kind];
+    const mk: any = FMT_FNS[c.kind];
     const rec = mk ? { ...c, fn: mk(c) } : c;
+    // mk may annotate the record (fmt/pat for JSON Schema + issues)
+    if (mk) Object.assign(rec, c);
     return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, { ...rec, message: paramMsg(rec.message) }] });
   }
   min(n: number, message?: string) { return this._check({ kind: "min", value: n, message }); }
@@ -1587,9 +1629,17 @@ export class ZodString extends ZodType<string> {
   ip(message?: string) { return this._check({ kind: "ipv4", message }); }
   ipv4(message?: string) { return this._check({ kind: "ipv4", message }); }
   ipv6(message?: string) { return this._check({ kind: "ipv6", message }); }
-  datetime(message?: string) { return this._check({ kind: "datetime", message }); }
+  datetime(params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    return this._check({ kind: "datetime", local: p.local, offset: p.offset,
+      precision: p.precision, message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
+  }
   date(message?: string) { return this._check({ kind: "datestr", message }); }
-  time(message?: string) { return this._check({ kind: "timestr", message }); }
+  time(params?: any) {
+    const p = typeof params === "object" && params !== null ? params : {};
+    return this._check({ kind: "timestr", precision: p.precision,
+      message: p.error ?? p.message ?? (typeof params === "string" ? params : undefined) });
+  }
   regex(re: RegExp, message?: string) { return this._check({ kind: "regex", regex: re, message }); }
   startsWith(s: string, message?: string) { return this._check({ kind: "startsWith", value: s, message }); }
   endsWith(s: string, message?: string) { return this._check({ kind: "endsWith", value: s, message }); }
@@ -2140,6 +2190,17 @@ export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType
   get in(): A { return this._def.in; }
   get out(): B { return this._def.out; }
 
+  // a pipe's refine is a real check record on the pipe def (never an
+  // effects wrapper) — `def.in`/`def.out` must stay reachable for
+  // input/output resolution and the checks run on the decoded value
+  override refine(fn: (v: any) => boolean, message?: any): any {
+    const p = _checkParams(message);
+    return this.check({ kind: "refine", fn, message: p.message ?? p.error, error: p.error, abort: p.abort, when: p.when } as any);
+  }
+  override superRefine(fn: (v: any, ctx: any) => void): any {
+    return this.check({ kind: "checkfn", fn: (p: any) => fn(p.value, { addIssue: (i: any) => p.issues.push(i) }) } as any);
+  }
+
   protected override _runImpl(data: unknown) {
     if (!this._hasFx() && !(MEMO && _isRef(data) && this._isRec())) return super._runImpl(data);
     const mark = pendingAsync.length;
@@ -2167,7 +2228,9 @@ export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType
     }
     const or = (this._def.out as any)._run(ir.value);
     if ((ir as any).memo) (or as any).memo = (or as any).memo ?? true;
-    return or;
+    // the pipe's own checks gate the finished value (refine-on-transform etc)
+    if (!or.ok || !this._def.checks?.length) return or;
+    return this._runChecksTS(or.value, this._def.checks, or, this._def.out);
   }
 }
 
@@ -2885,7 +2948,9 @@ export function _encode(s: any, v: any): any {
   if (!d) throw new Error("asmzod: encode() requires a schema");
   switch (d.type) {
     case "codec": return (s as any)._enc(v);
-    case "pipe": return _encode(d.in, _encode(d.out, v));
+    // pipe checks constrain the decoded side — run them on the input value
+    // before it flows back through `out`
+    case "pipe": return _encode(d.in, _encode(d.out, _encChecks(v, d.checks)));
     case "transform": throw new ZodEncodeError("ZodTransform");
     case "refine": case "superrefine": {
       v = _encChecks(v, d.checks);
@@ -3596,7 +3661,15 @@ function _encChecks(v: any, checks: any[] | undefined): any {
   for (const c of checks ?? []) {
     // `_zod`-shaped mirror records on refine defs aren't runnable checks
     if (c && typeof c === "object" && c.kind === undefined && c.fn === undefined) continue;
-    if (c?.kind === "tx") v = c.tx(v);
+    if (c?.kind === "refine" && typeof c.fn === "function") {
+      if (c.fn(v) === false) {
+        const i: any = { code: "custom", input: v, path: [], message: "Invalid input" };
+        const e = c.error ?? c.message;
+        if (e !== undefined) i.message = typeof e === "function" ? e(i) : e;
+        throw new ZodError([i]);
+      }
+    }
+    else if (c?.kind === "tx") v = c.tx(v);
     else if (typeof c?.fn === "function") {
       const nv = c.fn(v);
       if (nv === false) throw new ZodError([{ code: "invalid_format", format: c.fmt ?? c.kind, input: v, path: [], message: c.message } as any]);
@@ -3815,7 +3888,7 @@ export function visit(schema: any, fnOrHandlers: any): any {
         const m = run(old);
         return m === old ? s : clone(s, { ...d, innerType: m });
       }
-      case "instof": case "promise": case "function": {
+      case "instof": case "promise": {
         const old = d.innerType ?? d.inner;
         if (old === undefined) return s;
         const m = run(old);

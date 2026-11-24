@@ -72,6 +72,29 @@ const FORMAT_NAMES: Record<string, string> = {
   hostname: "hostname", httpurl: "url", template_literal: "template_literal",
 };
 
+// zod's regexes.ts ISO sources — datetime/time honor local/offset/precision
+export const _isoDateSrc = `(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))`;
+export const _isoTimeSrc = (a: { precision?: number | null; seconds?: boolean }): string => {
+  const hhmm = `(?:[01]\\d|2[0-3]):[0-5]\\d`;
+  if (typeof a.precision === "number")
+    return a.precision === -1 ? hhmm
+      : a.precision === 0 ? `${hhmm}:[0-5]\\d`
+      : `${hhmm}:[0-5]\\d\\.\\d{${a.precision}}`;
+  return a.seconds ? `${hhmm}:[0-5]\\d(?:\\.\\d+)?` : `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
+};
+export const _isoRe = {
+  date: new RegExp(`^${_isoDateSrc}$`),
+  duration: /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/,
+  time: (a: any) => new RegExp(`^${_isoTimeSrc(a)}$`),
+  datetime: (a: any) => {
+    const opts = ["Z"];
+    if (a.offset) opts.push(`([+-](?:[01]\\d|2[0-3]):[0-5]\\d)`);
+    const qualified = `${_isoTimeSrc({ precision: a.precision, seconds: true })}(?:${opts.join("|")})`;
+    const timeRe = a.local ? `${qualified}|${_isoTimeSrc({ precision: a.precision })}` : qualified;
+    return new RegExp(`^${_isoDateSrc}T(?:${timeRe})$`);
+  },
+};
+
 // zod 4 default messages, keyed off normalized issue fields. Engines emit
 // `message` only when the schema supplies a custom one; everything else lands
 // here so all backends produce identical strings.

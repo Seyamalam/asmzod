@@ -8,7 +8,7 @@ import {
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess, ZodPrefault, STRINGBOOL_TRUE, STRINGBOOL_FALSE,
   ZodAlgoFormat, luhnCheck, ibanCheck, CREDITCARD_RE, IBAN_RE, _encode, _encodeScoped, isRecursiveSchema, _zodPattern, AsyncCheckError,
-  deepPartial as _deepPartial,
+  deepPartial as _deepPartial, visit as _visit,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
   _mkSafeEncode as _safeEncodeFn, _mkSafeEncodeAsync as _safeEncodeAsyncFn,
@@ -22,29 +22,8 @@ export * from "./error.ts";
 export { engineVersion, engineBackend } from "./ffi.ts";
 
 // factory params: { checks: [z.minLength(1), z.check(fn)], error|message... }
-// zod's regexes.ts — ISO format sources, ported verbatim so the iso.*
-// factories match upstream's accepted/rejected surface exactly
-const _isoDateSrc = `(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))`;
-const _isoTimeSrc = (a: { precision?: number | null; seconds?: boolean }): string => {
-  const hhmm = `(?:[01]\\d|2[0-3]):[0-5]\\d`;
-  if (typeof a.precision === "number")
-    return a.precision === -1 ? hhmm
-      : a.precision === 0 ? `${hhmm}:[0-5]\\d`
-      : `${hhmm}:[0-5]\\d\\.\\d{${a.precision}}`;
-  return a.seconds ? `${hhmm}:[0-5]\\d(?:\\.\\d+)?` : `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
-};
-const _isoRe = {
-  date: new RegExp(`^${_isoDateSrc}$`),
-  duration: /^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$/,
-  time: (a: any) => new RegExp(`^${_isoTimeSrc(a)}$`),
-  datetime: (a: any) => {
-    const opts = ["Z"];
-    if (a.offset) opts.push(`([+-](?:[01]\\d|2[0-3]):[0-5]\\d)`);
-    const qualified = `${_isoTimeSrc({ precision: a.precision, seconds: true })}(?:${opts.join("|")})`;
-    const timeRe = a.local ? `${qualified}|${_isoTimeSrc({ precision: a.precision })}` : qualified;
-    return new RegExp(`^${_isoDateSrc}T(?:${timeRe})$`);
-  },
-};
+import { _isoRe } from "./shared.ts";
+
 const _isoCheck = (fmt: "datetime" | "date" | "time" | "duration", p: any) => {
   const opts = p && typeof p === "object" ? p : {};
   const re = fmt === "date" ? _isoRe.date : fmt === "duration" ? _isoRe.duration
@@ -116,6 +95,20 @@ function _definite(s: any, stack = new Set<any>()): boolean {
   }
   return true;
 }
+
+// input/output resolution — zod's `in-out.ts`: pipes collapse to one side,
+// carrying their own checks when the out side wins
+const _ioWithChecks = (side: any, checks: any[] | undefined): any => {
+  if (!checks?.length) return side;
+  const d = side._def;
+  const c = new (side.constructor as any)({ ...d, checks: [...(d.checks ?? []), ...checks] });
+  c._zod.parent = side;
+  return c;
+};
+const _ioOut = (def: any) => _ioWithChecks(def.out, def.checks);
+// a bare transform validates nothing — the schema it feeds is the real input
+const _ioIn = (def: any) =>
+  def.in?._def?.type === "transform" ? _ioOut(def) : def.in;
 
 export const z = {
   /** Create a string schema. */
@@ -328,6 +321,21 @@ export const z = {
   /** Substitute a default when input is undefined (zod's z._default). */
   _default: <T extends ZodTypeAny>(s: T, v: T["_output"] | (() => T["_output"])) =>
     new ZodDefault({ type: "default", inner: s, value: v }),
+  /** Copy of the schema with every pipe/codec resolved to its input side. */
+  input: <T extends ZodTypeAny>(schema: T): any =>
+    _visit(schema, {
+      pipe: (s: any) => _ioIn(s._def),
+      codec: (s: any) => _ioIn(s._def),
+      default: (s: any, rw: boolean) => (rw ? new ZodOptional({ type: "optional", inner: s._def.inner ?? s._def.innerType }) : s),
+      catch: (s: any, rw: boolean) => (rw ? (s._def.inner ?? s._def.innerType) : s),
+    }),
+  /** Copy of the schema with every pipe/codec resolved to its output side, carrying the pipe's checks. */
+  output: <T extends ZodTypeAny>(schema: T): any =>
+    _visit(schema, {
+      pipe: (s: any) => _ioOut(s._def),
+      codec: (s: any) => _ioOut(s._def),
+      prefault: (s: any, rw: boolean) => (rw ? (s._def.inner ?? s._def.innerType) : s),
+    }),
   /** Validate then freeze the output. */
   readonly: <T extends ZodTypeAny>(s: T) => s.readonly(),
   /** Add a custom check; fails with invalid_type when falsy. */
@@ -485,10 +493,6 @@ export const z = {
   encodeAsync: _encodeAsyncFn(ZodError) as any,
   safeEncode: _safeEncodeFn(ZodError) as any,
   safeEncodeAsync: _safeEncodeAsyncFn(ZodError) as any,
-  /** runtime _input accessor */
-  input: <T extends ZodTypeAny>(s: T) => s._input,
-  /** runtime _output accessor */
-  output: <T extends ZodTypeAny>(s: T) => s._output,
   /** clone a schema instance (shares def internals) */
   clone: <T extends ZodTypeAny>(s: T, def?: any): T =>
     new (s as any).constructor({ ...(s as any)._def, ...(def ?? {}) }),
@@ -505,6 +509,7 @@ export const z = {
   /** shared schema metadata registry */
   globalRegistry,
   /** locale error-map factories */
+  TimePrecision: { Any: null, Minute: -1, Second: 0, Millisecond: 3, Microsecond: 6 },
   locales: {
     en: () => ({ localeError: defaultMessage }),
     fr: () => ({ localeError: frLocaleError() }),
@@ -733,6 +738,8 @@ import { toJSONSchema, JSONSchemaGenerator } from "./jsonschema.ts";
 };
 export const globalConfig: any = _globalConfig;
 export { globalRegistry, ZodRegistry };
+export const TimePrecision = { Any: null, Minute: -1, Second: 0, Millisecond: 3, Microsecond: 6 } as const;
+
 export const locales = {
   en: () => ({ localeError: defaultMessage }),
   fr: () => ({ localeError: frLocaleError() }),
@@ -824,6 +831,7 @@ export const core = {
   globalRegistry,
   compileFn: (schema: any) => (data: unknown) => schema.parse(data),
   JSONSchemaGenerator,
+  TimePrecision: { Any: null, Minute: -1, Second: 0, Millisecond: 3, Microsecond: 6 },
   $constructor,
 };
 (z as any).core = core;
