@@ -445,71 +445,15 @@ export const z = {
 
   // ---------- error utilities ----------
   /** {formErrors, fieldErrors} — errors grouped by top-level key */
-  flattenError: (err: ZodError) => {
-    const formErrors: string[] = [];
-    const fieldErrors: Record<string, string[]> = {};
-    for (const i of err.issues) {
-      if (!i.path?.length) formErrors.push(i.message);
-      else {
-        const k = String(i.path[0]);
-        (fieldErrors[k] ??= []).push(i.message);
-      }
-    }
-    return { formErrors, fieldErrors };
-  },
+  flattenError: <U>(err: ZodError, mapper?: (i: any) => U) => _flattenError(err, mapper),
   /** nested errors keyed by path: {name?/_errors/items/properties} */
-  formatError: (err: ZodError) => {
-    const walk = (issues: any[]): any => {
-      const node: any = { _errors: [] };
-      for (const i of issues) {
-        const [head, ...rest] = i.path ?? [];
-        if (head === undefined) { node._errors.push(i.message); continue; }
-        const key = typeof head === "number" ? "items" : "properties";
-        node[key] ??= {};
-        node[key][head] ??= { _errors: [] };
-        node[key][head]._errors.push === undefined && (node[key][head] = { _errors: [] });
-        if (!rest.length) node[key][head]._errors.push(i.message);
-        else {
-          const sub = walk([{ ...i, path: rest }]);
-          node[key][head] = { ...node[key][head], ...sub, _errors: node[key][head]._errors };
-        }
-      }
-      return node;
-    };
-    return walk(err.issues);
-  },
+  formatError: <U>(err: ZodError, mapper?: (i: any) => U) => _formatError(err, mapper),
   /** human-readable pretty print of an error */
-  prettifyError: (err: ZodError) =>
-    err.issues.map((i) => {
-      const p = (i.path ?? []).map((seg, j) => (typeof seg === "number" ? `[${seg}]` : j === 0 ? String(seg) : `.${seg}`)).join("");
-      return `✖ ${i.message}${p ? `\n  → at ${p}` : ""}`;
-    }).join("\n"),
+  prettifyError: (err: { issues: any[] }) => _prettifyError(err),
+  /** dotted path like `a.b[0]` with bracket escaping */
+  toDotPath: (path: readonly (string | number | symbol | { key: PropertyKey })[]) => _toDotPath(path),
   /** tree-shaped error: {errors, properties, items} */
-  treeifyError: (err: ZodError) => {
-    const walk = (issues: any[]): any => {
-      const node: any = { errors: [] };
-      for (const i of issues) {
-        const [head, ...rest] = i.path ?? [];
-        if (head === undefined) { node.errors.push(i.message); continue; }
-        const key = typeof head === "number" ? "items" : "properties";
-        node[key] ??= typeof head === "number" ? [] : {};
-        if (typeof head === "number") node[key][head] ??= { errors: [] };
-        else node[key][head] ??= { errors: [] };
-        if (!rest.length) node[key][head].errors.push(i.message);
-        else {
-          const sub = walk([{ ...i, path: rest }]);
-          const cur = node[key][head];
-          node[key][head] = {
-            errors: cur.errors,
-            ...(sub.properties ? { properties: { ...(cur.properties ?? {}), ...sub.properties } } : {}),
-            ...(sub.items ? { items: sub.items } : {}),
-          };
-        }
-      }
-      return node;
-    };
-    return walk(err.issues);
-  },
+  treeifyError: <U>(err: ZodError, mapper?: (i: any) => U) => _treeifyError(err, mapper),
 
   // ---------- string-format factories not in the asm engine ----------
   /** credit card (Luhn, spaces/dashes tolerated) */
@@ -610,7 +554,12 @@ export const z = {
 };
 
 // attach the real class
-import { ZodError } from "./error.ts";
+import {
+  ZodError, $ZodError, ZodRealError,
+  flattenError as _flattenError, formatError as _formatError,
+  treeifyError as _treeifyError, prettifyError as _prettifyError,
+  toDotPath as _toDotPath,
+} from "./error.ts";
 
 const HASH_LENS = {
   md5_hex: [32, 0, 0], md5_base64: [22, 1, 2], md5_base64url: [22, 2, 0],
@@ -620,8 +569,17 @@ const HASH_LENS = {
   sha512_hex: [128, 0, 0], sha512_base64: [86, 1, 2], sha512_base64url: [86, 2, 0],
 } as const;
 (z as any).ZodError = ZodError;
+(z as any).ZodRealError = ZodRealError;
 import { toJSONSchema } from "./jsonschema.ts";
 (z as any).toJSONSchema = toJSONSchema;
+// z.core — the v4/core namespace: error classes + error walkers
+export const core = {
+  $ZodError, $ZodRealError: ZodRealError, ZodError, ZodRealError,
+  flattenError: _flattenError, formatError: _formatError,
+  treeifyError: _treeifyError, prettifyError: _prettifyError,
+  toDotPath: _toDotPath,
+};
+(z as any).core = core;
 
 export default z;
 export type { ZodType } from "./schema.ts";
@@ -838,4 +796,4 @@ export {
   ZodCodec as $ZodCodec, ZodInstanceof as $ZodInstanceof,
   ZodFunction as $ZodFunction,
 } from "./schema.ts";
-export { ZodError as $ZodError } from "./error.ts";
+// $ZodError/ZodError/ZodRealError come through `export *` from error.ts

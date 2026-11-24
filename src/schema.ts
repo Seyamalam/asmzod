@@ -1495,12 +1495,17 @@ export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[num
       return (u as any)._run(data);
     }
     const opts = [...map.keys()].filter((k) => map.get(k) !== null);
+    // schema-level error param overrides the default discriminator message
+    const raw = paramMsg(this._def.error);
+    const msg = raw !== undefined
+      ? (raw.charCodeAt(0) === 0 ? msgFns[+raw.slice(2)]?.({ code: "invalid_union", path: [disc] }) : raw)
+      : `Invalid discriminator value. Expected ${opts.map((o) => `'${o}'`).join(" | ")}`;
     return {
       ok: false as const,
       issues: [{
         code: "invalid_union", errors: [], note: "No matching discriminator",
         discriminator: disc, options: opts, path: [disc],
-        message: `Invalid discriminator value. Expected ${opts.map((o) => `'${o}'`).join(" | ")}`,
+        message: msg,
       }] as any[],
     };
   }
@@ -1624,6 +1629,20 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
 export class ZodLiteral<T> extends ZodType<T> {
   constructor(_def: any) { super(); this._def = _def; }
   get value(): T { return this._def.value; }
+  // multi-value literals are one closed enum-like set — a single invalid_value
+  // issue listing every member, not a union of per-literal failures. string
+  // members compile to the enum node; anything else stays TS-side.
+  protected override _run(data: unknown) {
+    const vals: any[] | undefined = this._def.values
+      ?? (Array.isArray(this._def.value) ? this._def.value : undefined);
+    if (vals && vals.some((v) => typeof v !== "string")) {
+      return vals.includes(data)
+        ? { ok: true as const, value: data }
+        : { ok: false as const, issues: [{ code: "invalid_value", values: vals, path: [],
+            message: `Invalid option: expected one of ${vals.map((v) => JSON.stringify(v)).join("|")}` }] as any };
+    }
+    return super._run(data);
+  }
 }
 
 export class ZodEnum<T extends string = string> extends ZodType<T> {

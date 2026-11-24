@@ -282,21 +282,35 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
       return;
     }
 
-    case "literal":
-      if (Array.isArray(d.value) && d.value.length > 1) {
-        // multi-value literal = a closed union of single literals
-        const opts = d.value.map((v: any) => ({
-          _def: { type: "literal", value: v },
-          _run: (x: any) => x === v
-            ? { ok: true as const, value: x }
-            : { ok: false as const, issues: [{ code: "invalid_value", values: [v], path: [], message: `Invalid input: expected ${v}` }] },
-        }));
-        emit(w, { _def: { type: "union", options: opts } } as any, hosts, unions);
+    case "literal": {
+      const vals: any[] | undefined = d.values ?? (Array.isArray(d.value) ? d.value : undefined);
+      if (vals && vals.length > 1) {
+        // multi-value literal = closed enum-like set. all-string members join
+        // the enum node (single invalid_value issue); mixed members emit a
+        // union of single literals — membership stays correct, ZodLiteral._run
+        // still gives the right issue shape when run at TS level
+        if (vals.some((v: any) => typeof v !== "string")) {
+          const opts = vals.map((v: any) => ({
+            _def: { type: "literal", value: v },
+            _run: (x: any) => x === v
+              ? { ok: true as const, value: x }
+              : { ok: false as const, issues: [{ code: "invalid_value", values: [v], path: [], message: `Invalid input: expected ${JSON.stringify(v)}` }] },
+          }));
+          emit(w, { _def: { type: "union", options: opts } } as any, hosts, unions);
+          return;
+        }
+        w.u8(0x0a);
+        w.u64(vals.length);
+        for (const v of vals) {
+          const b = enc.encode(v);
+          w.u64(b.length); w.raw(b);
+        }
         return;
       }
       w.u8(0x09);
-      w.raw(encodeValue(Array.isArray(d.value) ? d.value[0] : d.value, hosts));
+      w.raw(encodeValue(vals ? vals[0] : d.value, hosts));
       return;
+    }
 
     case "enum":
       // string members only — mixed-type enums (native numeric enums) throw so
