@@ -73,8 +73,10 @@ function applyChecks(js: JSONSchema, d: any, isString: boolean, isNum: boolean):
 
 function toSchema(d: any): JSONSchema {
   const t = d.type;
-  if (UNREPRESENTABLE.has(t))
+  if (UNREPRESENTABLE.has(t)) {
+    if (ctx.unrepresentable === "any") return {};
     throw new Error(`${t[0].toUpperCase()}${t.slice(1)} cannot be represented in JSON Schema`);
+  }
   switch (t) {
     case "string": {
       const js: JSONSchema = { type: "string" };
@@ -181,8 +183,28 @@ function toSchema(d: any): JSONSchema {
       return toSchema((d.out ?? d.inner ?? d.in)._def);
     case "intersect":
       return { allOf: [toSchema((d.left as any)._def), toSchema((d.right as any)._def)] };
-    case "lazy":
-      return toSchema((d.getter as () => { _def: any })()._def);
+    case "lazy": {
+      // recursion guard — a self-referencing lazy emits {} on revisit
+      if (ctx.seen?.has(d)) return {};
+      (ctx.seen ??= new Set()).add(d);
+      try { return toSchema((d.getter as () => { _def: any })()._def); }
+      finally { ctx.seen.delete(d); }
+    }
+    // zod processes promise/instanceof as a ref to the inner schema
+    case "instof": case "promise":
+      return d.inner || d.innerType ? toSchema((d.inner ?? d.innerType)._def) : { type: "object" };
+    case "file": {
+      const js: JSONSchema = { type: "string", format: "binary", contentEncoding: "binary" };
+      const checks = d.checks ?? [];
+      const mime = checks.filter((c: any) => c.kind === "mime").map((c: any) => c.value);
+      const minC = checks.find((c: any) => c.kind === "min" || c.kind === "minSize");
+      const maxC = checks.find((c: any) => c.kind === "max" || c.kind === "maxSize");
+      if (minC) js.minLength = minC.value;
+      if (maxC) js.maxLength = maxC.value;
+      if (mime.length === 1) js.contentMediaType = mime[0];
+      else if (mime.length > 1) js.anyOf = mime.map((m: string) => ({ contentMediaType: m }));
+      return js;
+    }
     case "nonopt": case "nonoptional":
       return toSchema(inner(d)._def);
     default:
@@ -196,4 +218,4 @@ export function toJSONSchema(schema: { _def: any }, params?: { unrepresentable?:
   try { return { $schema: DRAFT, ...toSchema(schema._def) }; }
   finally { ctx.unrepresentable = prev; }
 }
-const ctx: { unrepresentable?: string } = {};
+const ctx: { unrepresentable?: string; seen?: Set<any> } = {};

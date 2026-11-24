@@ -667,6 +667,9 @@ const HASH_LENS = {
 (z as any).ZodRealError = ZodRealError;
 import { toJSONSchema } from "./jsonschema.ts";
 (z as any).toJSONSchema = toJSONSchema;
+(ZodType.prototype as any).toJSONSchema = function (this: any, params?: any) {
+  return toJSONSchema(this, params);
+};
 const globalConfig: any = _globalConfig;
 const _config = _sharedConfig;
 
