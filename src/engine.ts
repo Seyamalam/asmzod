@@ -168,6 +168,7 @@ function checkParamEnd(r: R, code: number, str_: boolean): number {
     else if (code === 0x18) { r.pos += 10; r.pos += 8 + Number(r.u64()); }
   } else {
     if (code >= 0x01 && code <= 0x04 || code === 0x07) { r.pos += 8; }
+    else if (code === 0x09) { r.pos += 17; }
   }
   const end = r.pos; r.pos = save; return end;
 }
@@ -188,7 +189,8 @@ const STR_FMT: Record<number, (s: string) => boolean> = {
   0x0b: (s) => s === s.toLowerCase(),
   0x0c: (s) => s === s.toUpperCase(),
   0x0d: (s) => /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/.test(s),
-  0x0e: (s) => /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/.test(s),
+  // zod validates ipv6 via the URL parser (the exported regex is decorative)
+  0x0e: (s) => /^[0-9a-fA-F:.]+$/.test(s) && (() => { try { new URL(`http://[${s}]`); return true; } catch { return false; } })(),
   0x0f: (s) => /^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/.test(s),
   0x10: (s) => /^[a-zA-Z0-9_-]{21}$/.test(s),
   0x11: (s) => /^[0-9a-z]+$/.test(s),
@@ -222,6 +224,12 @@ function runNumChecks(r: R, v: number | bigint, isBig: boolean, c: Ctx): boolean
         break;
       }
       case 0x07: case 0x17: { const p = code === 0x17 ? bound() : isBig ? r.i64() : r.f64(); if ((v as any) % (p as any) !== (isBig ? 0n : 0)) { pushIssue(c, "not_multiple_of", { divisor: p, ...(msg ? { message: msg } : {}) }); fail = true; } break; }
+      case 0x09: { // fused [lo f64][hi f64][flags] — both sides checked (numbers only)
+        const lo = r.f64(), hi = r.f64(), flags = r.u8();
+        if (!(v >= lo)) { sizeFail(c, "too_small", "number", lo, (flags & 1) === 1, false, msg); fail = true; }
+        if (!(v <= hi)) { sizeFail(c, "too_big", "number", hi, (flags & 2) === 2, false, msg); fail = true; }
+        break;
+      }
       case 0x08: {
         const nonInt = !isBig && !Number.isInteger(v as number);
         const ok = nonInt ? false : isBig
@@ -357,8 +365,12 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
       const n = Number(r.u64());
       const entries: { key: string; pos: number }[] = [];
       for (let i = 0; i < n; i++) { const kl = Number(r.u64()); const key = r.str(kl); const fp = r.pos; entries.push({ key, pos: fp + Number(r.i64()) }); }
-      const dv = (v as any)?.[dname];
-      if (typeof v !== "object" || v === null || Array.isArray(v) || !(typeof dv === "string" || typeof dv === "number" || typeof dv === "boolean" || dv === null || dv === undefined)) {
+      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+        pushIssue(c, "invalid_type", { expected: "object", received: typeName(v) });
+        throw FAILED;
+      }
+      const dv = (v as any)[dname];
+      if (!(typeof dv === "string" || typeof dv === "number" || typeof dv === "boolean" || dv === null || dv === undefined)) {
         pushIssue(c, "invalid_union", {});
         throw FAILED;
       }

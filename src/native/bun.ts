@@ -42,6 +42,7 @@ function hostTypeIndex(v: unknown): number {
   if (v instanceof Set) return 3;
   if (typeof v === "function") return 4;
   if (typeof v === "object" && v !== null) return 5;
+  if (typeof v === "bigint") return 8;
   return 6; // unknown
 }
 

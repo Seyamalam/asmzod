@@ -949,6 +949,7 @@ _aznapi_parse:
 .equ LN_O, 176
 .equ LN_P, 184
 .equ LN_Q, 240            // obj: children-changed flag
+.equ LN_R, 248            // obj: missing-declared-key flag
 _aznapi_run:
     stp x29, x30, [sp, #-256]!
     mov x29, sp
@@ -2869,6 +2870,7 @@ _azn_encval:
     ldr x9, [sp, #LN_A]
     str x9, [sp, #LN_A]       // outobj
     str xzr, [sp, #LN_Q]      // changed flag (strip-mode return-input)
+    str xzr, [sp, #LN_R]      // missing-declared-key flag
     // records are interleaved: [klen][key][field]*n starting at node+18
     add x10, x27, #18
     str x10, [sp, #LN_B]      // record cursor
@@ -2922,6 +2924,15 @@ _azn_encval:
     add x0, x12, x0           // node = fldaddr + reloff
     ldr x1, [sp, #LN_G]
     str x1, [sp, #LN_K]       // save input handle for identity check
+    // missing-key tracking: an `undefined` handle means the declared key
+    // was absent — return-input is then unsafe (input may have extras)
+    AZ_ADR x9, _azn_undef
+    ldr x10, [x9]
+    cmp x1, x10
+    b.ne .Ln_obj_havekey
+    mov x9, #1
+    str x9, [sp, #LN_R]
+.Ln_obj_havekey:
     add x2, sp, #LN_G
     bl _aznapi_run
     str x0, [sp, #LN_H]
@@ -3108,10 +3119,12 @@ _azn_encval:
 .Ln_obj_wrapup:
     ldr x9, [sp, #LN_I]
     cbnz x9, .Ln_obj_failed
-    // strip mode + all children identical + input has exactly the
-    // declared keys -> return the input object, skip the copy
+    // strip mode + all children identical + every declared key present +
+    // input has no extra keys -> return the input object, skip the copy
     ldr x9, [sp, #LN_Q]
     cbnz x9, .Ln_obj_retout
+    ldr x9, [sp, #LN_R]
+    cbnz x9, .Ln_obj_retout  // a declared key was missing: extras may exist
     ldrb w9, [x27, #1]
     ldr x10, [x27, #2]
     orr x11, x9, x10

@@ -712,6 +712,7 @@ _az_hosttype_table:
     .quad .Lh5, 5               // class / object
     .quad .Lh6, 7               // unknown
     .quad .Lh7, 12              // Invalid Date
+    .quad .Lh8, 6               // bigint
 
     AZ_RODATA
 .Lc0:  .ascii "invalid_type"
@@ -759,6 +760,7 @@ _az_hosttype_table:
 .Lh5:  .ascii "object"
 .Lh6:  .ascii "unknown"
 .Lh7:  .ascii "Invalid Date"
+.Lh8:  .ascii "bigint"
 .Lhv_date: .ascii "date"
 .Lk_code:     .ascii "code"
 .Lk_path:     .ascii "path"

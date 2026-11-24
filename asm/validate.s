@@ -543,6 +543,26 @@ _az_vtype:
     ldrb w9, [x28]
     cmp w9, #6
     b.eq .Ldu_obj
+    cmp w9, #8
+    b.ne .Ldu_typefail
+    // hostref: object-like kinds (date/map/set/object/unknown/Invalid Date)
+    // take the no-matching-discriminator path like zod; symbol/function/
+    // bigint are invalid_type
+    ldr x9, [x24, #24]         // cb_host
+    mov x0, #6                 // kind6 host type idx
+    ldr x1, [x28, #1]
+    mov x2, #0
+    mov x3, #0
+    blr x9
+    cbz x0, .Ldu_typefail      // symbol
+    cmp x0, #4
+    b.eq .Ldu_typefail         // function
+    cmp x0, #8
+    b.eq .Ldu_typefail         // bigint
+    ldr x13, [x27, #1]         // dnamelen
+    add x14, x27, #9           // dname
+    b .Ldu_fail
+.Ldu_typefail:
     AZ_ADR x0, .Lex_object
     mov x1, #6
     b _az_vtype
