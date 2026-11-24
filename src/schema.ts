@@ -865,7 +865,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   protected _runImpl(data: unknown): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const _checks = (this._def as any).checks as any[] | undefined;
-    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined) || (c.kind === "regex" && c.format !== undefined && c.format !== "regex"))))
+    if (_checks?.some((c) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || c.kind === "schemacheck" || c.kind === "size" || typeof c.fn === "function" || (c.kind === "includes" && c.position !== undefined) || (c.kind === "regex" && c.format !== undefined && c.format !== "regex"))))
       return this._runChecksTS(data, _checks);
     const c = this._compile();
     // direct N-API validation walks the JS value natively (no encode/decode);
@@ -1038,6 +1038,27 @@ export abstract class ZodType<Output = unknown, Input = Output> {
                         ...(FORMAT_PATTERNS[c.fmt ?? c.kind] ? { pattern: FORMAT_PATTERNS[c.fmt ?? c.kind] } : {}),
                         input: v, path: [], message: c.message } as any);
         else if (typeof nv === "string") v = nv;
+        continue;
+      }
+      // a schema passed to .check runs as a check — whole-schema validation
+      // against the payload, keeping this schema's class (getters survive)
+      if (c.kind === "schemacheck") {
+        const rr = (c.schema as any)._run(v);
+        if (!rr.ok) issues.push(...rr.issues);
+        else v = rr.value;
+        continue;
+      }
+      // set/map cardinality bounds — too_big already fired as an entry-parse
+      // precheck in _runImpl; only the lower side lands here
+      if (c.kind === "size") {
+        const n = (v as any)?.size;
+        if (typeof n === "number") {
+          const origin = v instanceof Set ? "set" : "map";
+          const lo = c.exact ?? c.min;
+          if (lo !== undefined && n < lo)
+            issues.push({ code: "too_small", origin, minimum: lo, inclusive: true,
+              ...(c.exact !== undefined ? { exact: true } : {}), path: [], message: c.message } as any);
+        }
         continue;
       }
       // a named format (z.stringFormat("creditCard", re)) emits
@@ -1216,10 +1237,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         // applies to the payload (zod: schemas carry _zod.check too). this
         // covers z.refine()/z.superRefine()/z.iso.* args
         if (_isSchema(o)) {
-          fns.push((payload: any) => {
-            const r = (o as any)._run(payload.value);
-            if (!r.ok) payload.issues.push(...r.issues);
-          });
+          checks.push({ kind: "schemacheck", schema: o });
           continue;
         }
         const c = o._def ?? o;
@@ -1481,6 +1499,9 @@ export class ZodReadonly<T extends ZodTypeAny = ZodTypeAny> extends ZodType<T["_
     const mark = pendingAsync.length;
     const r = (this._def.inner as any)._run(data);
     if (!r.ok) return r;
+    // a memo back-edge is a node still being parsed — freezing it would
+    // lock the enclosing object's in-flight payload
+    if ((r as any).memo) return r;
     if (asyncMode && pendingAsync.length > mark) {
       pendingAsync.push({ type: "freeze", path: [] } as any);
       return r;
@@ -1702,20 +1723,26 @@ export class ZodBigInt extends ZodType<bigint> {
   lt(n: bigint, message?: string) { return this._check({ kind: "lt", value: n, message }); }
   lte(n: bigint, message?: string) { return this._check({ kind: "lte", value: n, message }); }
   max(n: bigint, message?: string) { return this._check({ kind: "lte", value: n, message }); }
-  multipleOf(n: bigint, message?: string) { return this._check({ kind: "multipleOf", value: n, message }); }
+  multipleOf(n: bigint, message?: string) {
+    // a zero divisor can never divide — `x % 0n` throws, so this always fails
+    if (n === 0n) return this._check({ kind: "checkfn", fn: (p: any) => { p.issues.push({ code: "not_multiple_of", divisor: 0n, message: paramMsg(message) }); } });
+    return this._check({ kind: "multipleOf", value: n, message });
+  }
   positive(m?: string) { return this.gt(0n, m); }
   nonnegative(m?: string) { return this.gte(0n, m); }
   negative(m?: string) { return this.lt(0n, m); }
   nonpositive(m?: string) { return this.lte(0n, m); }
   get minValue(): bigint | null {
+    let v: bigint | null = null;
     for (const c of this._def.checks ?? [])
-      if (c.kind === "gte" || c.kind === "gt" || c.kind === "min") return c.value;
-    return null;
+      if (c.kind === "gte" || c.kind === "gt" || c.kind === "min") v = v === null || c.value > v ? c.value : v;
+    return v;
   }
   get maxValue(): bigint | null {
+    let v: bigint | null = null;
     for (const c of this._def.checks ?? [])
-      if (c.kind === "lte" || c.kind === "lt" || c.kind === "max") return c.value;
-    return null;
+      if (c.kind === "lte" || c.kind === "lt" || c.kind === "max") v = v === null || c.value < v ? c.value : v;
+    return v;
   }
   get format(): string | null { return null; }
 }
@@ -1876,6 +1903,13 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   }
   innerType() { return this._def.inner as T; }
   sourceType() { return this._def.inner as T; }
+  private get _innerS(): any { return this._def.inner ?? this._def.innerType; }
+  get minValue(): any { return this._innerS?.minValue ?? null; }
+  get maxValue(): any { return this._innerS?.maxValue ?? null; }
+  get minLength(): any { return this._innerS?.minLength ?? null; }
+  get maxLength(): any { return this._innerS?.maxLength ?? null; }
+  get minDate(): any { return this._innerS?.minDate ?? null; }
+  get maxDate(): any { return this._innerS?.maxDate ?? null; }
 
   // refine/superRefine wrap an object — object helpers delegate to the
   // inner object the way zod's checks-in-def model exposes them
@@ -2928,8 +2962,24 @@ function typeIssue(expected: string, received: unknown): ZodIssue {
 export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
   extends ZodType<Map<K["_output"], V["_output"]>, Map<K["_input"], V["_input"]>> {
   constructor(_def: any) { super(); this._def = _def; }
+  private _check(c: any) { return new ZodMap({ ...this._def, checks: [...(this._def.checks ?? []), { ...c, message: paramMsg(c.message) }] }); }
+  min(n: number, message?: string) { return this._check({ kind: "size", min: n, message }); }
+  max(n: number, message?: string) { return this._check({ kind: "size", max: n, message }); }
+  size(n: number, message?: string) { return this._check({ kind: "size", exact: n, message }); }
+  nonempty(message?: string) { return this.min(1, message); }
 
   protected override _runImpl(data: unknown) {
+    const _ck = this._def.checks;
+    if (_ck?.length) {
+      // zod aborts entry validation when the map already exceeds an upper
+      // bound — the size issue stands alone
+      const n = data instanceof Map ? data.size : undefined;
+      if (typeof n === "number")
+        for (const c of _ck)
+          if (c.kind === "size" && ((c.exact !== undefined && n > c.exact) || (c.exact === undefined && c.max !== undefined && n > c.max)))
+            return { ok: false as const, issues: [{ code: "too_big", origin: "map", maximum: c.exact ?? c.max, inclusive: true, ...(c.exact !== undefined ? { exact: true } : {}), path: [], message: c.message } as any], aborted: true };
+      return this._runChecksTS(data, _ck);
+    }
     if (!(data instanceof Map)) return { ok: false as const, issues: [typeIssue("map", data)], aborted: true };
     if (MEMO && this._isRec())
       return _memoRun(this, data, () => new Map(), (out) => this._runMap(data, out));
@@ -2977,8 +3027,22 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
 export class ZodSet<V extends ZodTypeAny>
   extends ZodType<Set<V["_output"]>, Set<V["_input"]>> {
   constructor(_def: any) { super(); this._def = _def; }
+  private _check(c: any) { return new ZodSet({ ...this._def, checks: [...(this._def.checks ?? []), { ...c, message: paramMsg(c.message) }] }); }
+  min(n: number, message?: string) { return this._check({ kind: "size", min: n, message }); }
+  max(n: number, message?: string) { return this._check({ kind: "size", max: n, message }); }
+  size(n: number, message?: string) { return this._check({ kind: "size", exact: n, message }); }
+  nonempty(message?: string) { return this.min(1, message); }
 
   protected override _runImpl(data: unknown) {
+    const _ck = this._def.checks;
+    if (_ck?.length) {
+      const n = data instanceof Set ? data.size : undefined;
+      if (typeof n === "number")
+        for (const c of _ck)
+          if (c.kind === "size" && ((c.exact !== undefined && n > c.exact) || (c.exact === undefined && c.max !== undefined && n > c.max)))
+            return { ok: false as const, issues: [{ code: "too_big", origin: "set", maximum: c.exact ?? c.max, inclusive: true, ...(c.exact !== undefined ? { exact: true } : {}), path: [], message: c.message } as any], aborted: true };
+      return this._runChecksTS(data, _ck);
+    }
     if (!(data instanceof Set)) return { ok: false as const, issues: [typeIssue("set", data)], aborted: true };
     if (MEMO && this._isRec())
       return _memoRun(this, data, () => new Set(), (out) => this._runSet(data, out));

@@ -220,8 +220,8 @@ export function defaultMessage(i: any): string {
       return FORMAT_MSGS[i.format] ?? `Invalid string: must match ${i.format}`;
     case "too_small": {
       const op = i.inclusive === false ? ">" : ">=";
-      if (i.origin === "string" || i.origin === "array") {
-        const unit = i.origin === "string" ? "characters" : "items";
+      const unit = i.origin === "string" ? "characters" : i.origin === "map" ? "entries" : "items";
+      if (i.origin === "string" || i.origin === "array" || i.origin === "set" || i.origin === "map") {
         return i.exact
           ? `Too small: expected ${i.origin} to have exactly ${i.minimum} ${unit}`
           : `Too small: expected ${i.origin} to have ${op}${i.minimum} ${unit}`;
@@ -232,8 +232,8 @@ export function defaultMessage(i: any): string {
     }
     case "too_big": {
       const op = i.inclusive === false ? "<" : "<=";
-      if (i.origin === "string" || i.origin === "array") {
-        const unit = i.origin === "string" ? "characters" : "items";
+      const unit = i.origin === "string" ? "characters" : i.origin === "map" ? "entries" : "items";
+      if (i.origin === "string" || i.origin === "array" || i.origin === "set" || i.origin === "map") {
         return i.exact
           ? `Too big: expected ${i.origin} to have exactly ${i.maximum} ${unit}`
           : `Too big: expected ${i.origin} to have ${op}${i.maximum} ${unit}`;

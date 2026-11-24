@@ -236,7 +236,7 @@ function runNumChecks(r: R, v: number | bigint, isBig: boolean, c: Ctx): boolean
       case 0x07: case 0x17: {
         const p = code === 0x17 ? bound() : isBig ? r.i64() : r.f64();
         // zod floatSafeRemainder: |ratio - round(ratio)| < 4*eps*max(|ratio|,1)
-        const ok = isBig ? (v as bigint) % (p as bigint) === 0n
+        const ok = isBig ? (p !== 0n && (v as bigint) % (p as bigint) === 0n)
           : Math.abs((v as number) / (p as number) - Math.round((v as number) / (p as number)))
             < 4 * Number.EPSILON * Math.max(Math.abs((v as number) / (p as number)), 1);
         if (!ok) { pushIssue(c, "not_multiple_of", { divisor: p, ...(msg ? { message: msg } : {}) }); fail = true; }
