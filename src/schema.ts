@@ -5,7 +5,7 @@ import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage, applyErrorMaps, finalizeIssueTree, failure, captureStackTrace, globalConfig, defaultedIssues } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, ZodRealError, type ZodIssue } from "./error.ts";
-import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx } from "./shared.ts";
+import { msgFns, paramMsg, ensureDefaultMemoizer, NEVER, _addIssueCtx, FORMAT_PATTERNS } from "./shared.ts";
 
 // issues added via ctx.addIssue inside superRefine callbacks during the
 // in-flight engine run; _run splices them over the engine's `custom` slots
@@ -165,6 +165,10 @@ function _hasFxWalk(inst: any, stack: Set<any>): boolean {
       }
       if (hit) break;
     }
+    // JS-effect check records (tx/checkfn/fn payloads) live inside defs, not
+    // as schema children — the walk needs an explicit look
+    if (!hit && Array.isArray(d.checks))
+      hit = d.checks.some((c: any) => c && (typeof c === "function" || c.kind === "tx" || c.kind === "checkfn" || typeof c.tx === "function" || typeof c.fn === "function"));
     if (!hit && d.type === "lazy") hit = d._cachedInner ? see(d._cachedInner) : true;
   }
   stack.delete(inst);
@@ -380,6 +384,22 @@ const _escapeRe = (v: any) => String(v).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const _cleanRe = (src: string): string =>
   src.slice(src.startsWith("^") ? 1 : 0, src.endsWith("$") ? src.length - 1 : undefined);
 
+// template-literal pattern sources for formats kept out of FORMAT_PATTERNS
+// (zod hides `pattern` on these issues but still derives them for parts)
+const TL_PATTERNS: Record<string, RegExp> = {
+  ipv6: /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/,
+  cidrv4: /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/,
+  cidrv6: /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/,
+  mac: /^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/,
+  guid: /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/,
+  xid: /^[0-9a-vA-V]{20}$/,
+  ksuid: /^[A-Za-z0-9]{27}$/,
+  e164: /^\+[1-9]\d{6,14}$/,
+  base64: /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/,
+  base64url: /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/,
+  hex: /^[0-9a-fA-F]*$/,
+};
+
 // zod's leafPattern: format/check patterns beat bounds, bounds beat the
 // type default — check records carry `regex`/`value` where zod's carry
 // `pattern`/`minimum`/`maximum`/`length`
@@ -388,8 +408,22 @@ function _zodLeafPattern(s: any): RegExp | undefined {
   let pattern: RegExp | undefined = d.pattern;
   let isInt = !!d.format?.includes("int");
   let minimum: number | undefined, maximum: number | undefined;
+  const fmtRe = (k: any): RegExp | undefined => {
+    if (typeof k !== "string") return undefined;
+    if (TL_PATTERNS[k]) return TL_PATTERNS[k];
+    const src = FORMAT_PATTERNS[k];
+    const m = src?.match(/^\/(.*)\/([a-z]*)$/s);
+    return m ? new RegExp(m[1], m[2]) : undefined;
+  };
+  if (!pattern && typeof d.format === "string") pattern = fmtRe(d.format);
   for (const c of d.checks ?? []) {
-    if (c.regex) pattern = c.regex;
+    if (c.pattern instanceof RegExp) pattern = c.pattern;
+    else if (c.regex) pattern = c.regex;
+    else if (c.kind === "startsWith") pattern = new RegExp(`^${_escapeRe(c.value)}.*`);
+    else if (c.kind === "endsWith") pattern = new RegExp(`.*${_escapeRe(c.value)}$`);
+    else if (c.kind === "includes")
+      pattern = new RegExp(typeof c.position === "number" ? `^.{${c.position},}${_escapeRe(c.value)}` : _escapeRe(c.value));
+    else if (!pattern) pattern = fmtRe(c.kind);
     isInt ||= !!c.format?.includes("int") || c.kind === "int" || c.kind === "safeInt";
     const lo = c.kind === "min" || c.kind === "length" ? c.value : c.minimum;
     const hi = c.kind === "max" || c.kind === "length" ? c.value : c.maximum;
@@ -976,7 +1010,6 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         const c = o._def ?? o;
         if (c.kind === "meta") { def.description = c.description ?? def.description; def.metadata = { ...(def.metadata ?? {}), ...(c.metadata ?? {}) }; }
         else if (c.kind === "checkfn") fns.push(c.fn);
-        else if (c.kind === "tx") s = new ZodEffects({ type: "transform", inner: s, cbid: regId(reg.transform, guardAsync(c.tx)), fn: c.tx, kind: "transform" });
         else checks.push(c);
       }
       s = new (this as any).constructor(def);
@@ -991,8 +1024,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return s;
   }
   with(...args: any[]): any { return this.check(...args); }
-  overwrite<N>(fn: (v: Output) => N): ZodPipe<this, ZodTransform> {
-    return this.transform(fn);
+  overwrite<N>(fn: (v: Output) => N): this {
+    return this.check({ kind: "tx", tx: fn });
   }
   prefault<V extends Input>(value: V | (() => V)): ZodType<Output, Input | undefined> {
     return new ZodPipe({
@@ -1219,9 +1252,9 @@ export class ZodString extends ZodType<string> {
   lowercase(message?: string) { return this._check({ kind: "lowercase", message }); }
   uppercase(message?: string) { return this._check({ kind: "uppercase", message }); }
   nonempty(message?: string) { return this.min(1, message); }
-  trim() { return this.transform((s) => s.trim()); }
-  toLowerCase() { return this.transform((s) => s.toLowerCase()); }
-  toUpperCase() { return this.transform((s) => s.toUpperCase()); }
+  trim() { return this._check({ kind: "tx", tx: (s: string) => s.trim() }); }
+  toLowerCase() { return this._check({ kind: "tx", tx: (s: string) => s.toLowerCase() }); }
+  toUpperCase() { return this._check({ kind: "tx", tx: (s: string) => s.toUpperCase() }); }
 
   private _fmtcheck(format: string, regex: RegExp, message?: string) {
     return this._check({ kind: "regex", regex, format, message });
@@ -1283,11 +1316,11 @@ export class ZodString extends ZodType<string> {
       /^https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b[-a-zA-Z0-9()@:%_+.~#?&/=]*$/, message);
   }
   normalize(form: "NFC" | "NFD" | "NFKC" | "NFKD" = "NFC") {
-    return this.transform((s) => s.normalize(form));
+    return this._check({ kind: "tx", tx: (s: string) => s.normalize(form) });
   }
   slugify() {
-    return this.transform((s) => s.toLowerCase().trim()
-      .replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, ""));
+    return this._check({ kind: "tx", tx: (s: string) => s.toLowerCase().trim()
+      .replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "") });
   }
 
   get format(): string | null {
@@ -1295,7 +1328,7 @@ export class ZodString extends ZodType<string> {
       if (c.format) return c.format === "httpurl" ? "url" : (c.format.startsWith("uuid") ? "uuid" : c.format);
     for (const c of this._def.checks ?? [])
       if (!["min", "max", "length", "startsWith", "endsWith", "includes", "regex",
-             "lowercase", "uppercase"].includes(c.kind))
+             "lowercase", "uppercase", "tx", "checkfn", "meta"].includes(c.kind))
         return c.kind === "datestr" ? "date" : c.kind === "timestr" ? "time" : c.kind;
     return null;
   }

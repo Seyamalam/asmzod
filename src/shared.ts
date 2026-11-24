@@ -98,7 +98,7 @@ const FORMAT_MSGS: Record<string, string> = {
 
 // zod exposes `origin: "string"` + the check's regex `pattern` on these formats
 // only. hex/ipv6/url/base64/base64url issues carry neither field.
-const FORMAT_PATTERNS: Record<string, string> = {
+export const FORMAT_PATTERNS: Record<string, string> = {
   email: "/^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$/",
   uuid: "/^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/",
   datetime: "/^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$/",
@@ -108,6 +108,7 @@ const FORMAT_PATTERNS: Record<string, string> = {
   ipv4: "/^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/",
   ulid: "/^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/",
   nanoid: "/^[a-zA-Z0-9_-]{21}$/",
+  cuid: "/^[cC][0-9a-z]{6,}$/",
   cuid2: "/^[0-9a-z]+$/",
   emoji: "/^(?=[\\s\\S]*[\\p{Extended_Pictographic}\\p{Regional_Indicator}\\u20E3])[\\p{Extended_Pictographic}\\p{Emoji_Component}]+$/u",
   lowercase: "/^[^A-Z]*$/",
