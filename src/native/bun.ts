@@ -197,7 +197,7 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
   pendingThrow = null;
 
   for (;;) {
-    if ((process.env as any)?.AZ_POISON) { new Uint8Array(outv).fill(0xaa); new Uint8Array(oute).fill(0xaa); }
+    if (((globalThis as any).process?.env as any)?.AZ_POISON) { new Uint8Array(outv).fill(0xaa); new Uint8Array(oute).fill(0xaa); }
     curOut = { base: ptr(outv), cap: outCap };
     const status = (lib.symbols as any)[P + "az_parse"](
       ptr(blob), ptr(input),
@@ -206,9 +206,9 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
       ptr(cbTable),
     ) as bigint;
 
-    if (process.env.AZ_DEBUG) console.error("az status", status, "outCap", outCap, "errCap", errCap);
+    if ((globalThis as any).process?.env?.AZ_DEBUG) console.error("az status", status, "outCap", outCap, "errCap", errCap);
     if (status === -3n) { outCap *= 4; outv = new ArrayBuffer(outCap); poolOut = outv; poolOutCap = outCap; continue; }
-    if (status === -4n) { if (process.env.AZ_DEBUG) throw new Error("ENOSPC"); errCap *= 4; oute = new ArrayBuffer(errCap); poolErr = oute; poolErrCap = errCap; continue; }
+    if (status === -4n) { if ((globalThis as any).process?.env?.AZ_DEBUG) throw new Error("ENOSPC"); errCap *= 4; oute = new ArrayBuffer(errCap); poolErr = oute; poolErrCap = errCap; continue; }
     if (pendingThrow !== null) { const e = pendingThrow; pendingThrow = null; throw e; }
 
     if (status === 0n) {
@@ -219,7 +219,7 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
     if (status === -2n) {
       const base = ptr(oute);
       const cnt = Number(read.u64(base) as bigint);
-      if ((process.env as any).AZ_DEBUG_ERR) {
+      if (((globalThis as any).process?.env as any)?.AZ_DEBUG_ERR) {
         const n = Math.min(Number(read.u64(base + 3104 - 8) as bigint) ? 512 : 512, errCap);
         const bytes = new Uint8Array(toArrayBuffer(base + ERR_ISSUES_OFF, 0, n));
         console.error("ERR[0..512]:", [...bytes].map(b => b.toString(16).padStart(2, "0")).join(" "));

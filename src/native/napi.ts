@@ -5,10 +5,14 @@ import { decodeValueAt, type HostTable } from "../codec.ts";
 import { normalizeIssue, finishIssues, reg } from "../shared.ts";
 import type { ParseResult } from "./bun.ts";
 
-import { createRequire } from "node:module";
-
+// resolve require lazily so the module loads in runtimes without
+// node:module (Cloudflare Workers, browsers) — the addon just never
+// loads there and the portable engine takes over
 const path = new URL("../../asm/asmzod.node", import.meta.url).pathname;
-const req = createRequire(import.meta.url);
+const req: undefined | ((spec: string) => any) =
+  (import.meta as any).require ??
+  (typeof require === "function" ? require : undefined) ??
+  (globalThis as any).process?.getBuiltinModule?.("module")?.createRequire?.(import.meta.url);
 
 interface AzNapi {
   init(cbTable: Uint8Array): boolean;
@@ -51,7 +55,7 @@ let addon: AzNapi | null | undefined;
 export function loadNapi(): AzNapi | null {
   if (addon !== undefined) return addon;
   try {
-    const a = req(path) as AzNapi;
+    const a = req?.(path) as AzNapi;
     addon = (typeof (a as any)?.parse === "function") ? a : null;
   } catch { addon = null; }
   return addon;
