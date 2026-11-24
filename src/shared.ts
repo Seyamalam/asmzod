@@ -330,14 +330,16 @@ export function normalizeIssue(i: any): any {
       break;
   }
   if (out.code === "invalid_type" && out.expected === "int") out.format = "safeint";
+  if (typeof out.message === "string" && out.message.charCodeAt(0) === 0) {
+    // deferred error-fn — it must see the issue after inst/schema stamping,
+    // so it moves to `__errfn` and the ladder invokes it in finalizeIssue
+    const fn = msgFns[+out.message.slice(2)];
+    if (fn) out.__errfn = fn;
+    out.message = undefined;
+  }
   if (out.message === undefined) {
     out.message = defaultMessage(out);
     defaultedIssues.add(out);
-  } else if (typeof out.message === "string" && out.message.charCodeAt(0) === 0) {
-    const fn = msgFns[+out.message.slice(2)];
-    const { message: _m, ...rest } = out;
-    const resolved = fn ? fn(rest) : _m;
-    out.message = unwrapMessage(resolved) ?? resolved;
   }
   // zod folds `received` into the message but exposes it as a field only from
   // guards that produce a value-qualified name: number-family NaN/Infinity and
@@ -513,12 +515,13 @@ export function finalizeIssue(iss: any, ctx: any, config: any): any {
     else iss.schema = iss.inst;
   }
   const schemaError = iss.schema !== iss.inst ? iss.schema?._zod?.def?.error ?? iss.schema?._def?.error : undefined;
-  // a message normalizeIssue assigned from defaults is soft — the ladder wins
-  const hard = iss.message !== undefined && !defaultedIssues.has(iss) ? iss.message : undefined;
+  // a message normalizeIssue assigned from defaults is soft — the ladder wins;
+  // falsy messages ("") fall through like zod's `iss.message ? :` ternary
+  const hard = iss.message && !defaultedIssues.has(iss) ? iss.message : undefined;
   // _zod.def and _def are the same object on our classes — read once or
   // fn-valued error params get invoked twice
   const instDef = iss.inst?._zod?.def ?? iss.inst?._def;
-  const instErr = instDef?.error;
+  const instErr = iss.__errfn ?? instDef?.error;
   const message = hard !== undefined
     ? hard
     : (unwrapMessage(typeof instErr === "function" ? instErr(iss) : instErr) ??
@@ -529,7 +532,7 @@ export function finalizeIssue(iss: any, ctx: any, config: any): any {
       defaultMessage(iss));
   const full: any = {};
   for (const k of Object.keys(iss)) {
-    if (k === "inst" || k === "schema" || k === "continue" || k === "input" || k === "__proto__") continue;
+    if (k === "inst" || k === "schema" || k === "continue" || k === "input" || k === "__proto__" || k === "__errfn") continue;
     full[k] = iss[k];
   }
   full.path ??= [];

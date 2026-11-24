@@ -8,7 +8,8 @@ import {
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess, ZodPrefault, STRINGBOOL_TRUE, STRINGBOOL_FALSE,
   ZodAlgoFormat, luhnCheck, ibanCheck, CREDITCARD_RE, IBAN_RE, _encode, _encodeScoped, isRecursiveSchema, _zodPattern, AsyncCheckError,
-  deepPartial as _deepPartial, visit as _visit,
+  deepPartial as _deepPartial, visit as _visit, _mkPropCheck, _mkPropertyCheck,
+  ZodCheckProperties, ZodCheckProperty,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
   _mkSafeEncode as _safeEncodeFn, _mkSafeEncodeAsync as _safeEncodeAsyncFn,
@@ -79,7 +80,9 @@ function _definite(s: any, stack = new Set<any>()): boolean {
     kind === "refine" || kind === "superrefine" || kind === "effects" || kind === "pipe" ||
     kind === "codec" || kind === "function" || kind === "promise" || kind === "instof") return false;
   if (Array.isArray(d.checks))
-    for (const c of d.checks) if (c && (c.kind === "checkfn" || c.kind === "tx")) return false;
+    for (const c of d.checks)
+      if (c && (c.kind === "checkfn" || c.kind === "tx" || c.kind === "schemacheck" || c.kind === "refine" ||
+              typeof c.fn === "function" || typeof c.when === "function" || c.check === "properties" || c.check === "property")) return false;
   const rec = (x: any) => x && typeof x === "object" && x._def && !_definite(x, stack);
   for (const k in d) {
     const desc = Object.getOwnPropertyDescriptor(d, k);
@@ -151,10 +154,13 @@ export const z = {
   promise: <T extends ZodTypeAny>(inner: T) =>
     new ZodPromise<T>({ type: "promise", ctor: Promise, name: "promise", inner }),
   /** Schema for functions, optionally validating args/return. */
-  function: (opts?: { input?: ZodTypeAny[]; output?: ZodTypeAny }) =>
+  function: (opts?: { input?: any; output?: ZodTypeAny }) =>
     new ZodFunction({
-      type: "function", ctor: Function, name: "function",
-      args: opts?.input ?? null, ret: opts?.output ?? null,
+      type: "function", name: "function",
+      input: Array.isArray(opts?.input)
+        ? new ZodTuple({ type: "tuple", items: opts.input, rest: null } as any)
+        : (opts?.input ?? null),
+      output: opts?.output ?? null,
     }),
   /** Run a transform on the input before validating with the given schema. */
   preprocess: <T extends ZodTypeAny>(fn: (v: unknown, ctx: any) => unknown, schema: T) =>
@@ -611,17 +617,10 @@ export const z = {
   /** deepPartial on an object schema */
   deepPartial: <T extends ZodTypeAny>(s: T) => (s as any).deepPartial?.() ?? _deepPartial(s),
   /** shape passthrough helper */
-  /** property checks for .check(): each validates value[key] against the schema */
-  properties: <T extends ZodRawShape>(shape: T): any[] =>
-    Object.entries(shape).map(([k, s]) => ({
-      kind: "checkfn",
-      fn: (payload: any) => {
-        const r = (s as any)._run(payload.value?.[k]);
-        if (!r.ok) for (const i of r.issues) payload.issues.push({ ...i, path: [k, ...(i.path ?? [])] });
-      },
-    })),
-  /** single-property shape helper */
-  property: <T extends ZodTypeAny>(key: string, s: T): Record<string, T> => ({ [key]: s }),
+  /** a _zod-shaped check asserting each declared key on the payload value */
+  properties: (shape: any, params?: any): any => _mkPropCheck(shape, params),
+  /** single-key variant of properties() */
+  property: (key: PropertyKey, schema: any, params?: any): any => _mkPropertyCheck(key, schema, params),
   /** compile a schema eagerly (returns the schema) */
   compile: <T extends ZodTypeAny>(s: T, opts?: { strict?: boolean }): T => {
     if (opts?.strict) {
@@ -641,8 +640,13 @@ export const z = {
       };
       walk(s);
     }
-    (s as any)._compile();
-    try { ((s as any)._def.bag ??= {}).validator ??= { definite: _definite(s) }; } catch { }
+    try {
+      const det = _definite(s);
+      ((s as any)._def.bag ??= {}).validator ??= { definite: det };
+      // callback-bearing schemas stay on the runtime path — the bytecode
+      // emitter can't express them and shouldn't try
+      if (det !== false) (s as any)._compile();
+    } catch { }
     return s;
   },
   /** memoize a schema factory */
@@ -808,6 +812,7 @@ export const util = {
 export const core = {
   $ZodError, $ZodRealError: ZodRealError, ZodError, ZodRealError,
   $ZodType: ZodType, $ZodPipe: ZodPipe, $ZodCodec: ZodCodec, $ZodTransform: ZodTransform,
+  $ZodCheckProperties: ZodCheckProperties, $ZodCheckProperty: ZodCheckProperty,
   $ZodAsyncError: AsyncCheckError,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _encode: _encodeFn, _encodeAsync: _encodeAsyncFn,

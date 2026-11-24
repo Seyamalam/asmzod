@@ -139,6 +139,8 @@ function _hasFxWalk(inst: any, stack: Set<any>): boolean {
   const d = inst._def ?? inst._zod?.def ?? {};
   const kind = d.kind ?? d.type;
   if (_FX_KINDS.has(kind) && typeof d.fn === "function") hit = true;
+  // function schemas implement() their payload in JS — no engine opcode
+  if (!hit && d.type === "function") hit = true;
   if (!hit) {
     const see = (v: any): boolean => _isSchema(v) && _hasFxWalk(v, stack);
     const seeList = (v: any): boolean => Array.isArray(v) && v.some(see);
@@ -603,8 +605,126 @@ function _pathGet(data: any, path: any[] | undefined): any {
   return v;
 }
 
+// engine/flat issues carry no inst — the owner resolves by walking the schema
+// def along the issue path; unions/intersections are ambiguous → keep `cur`.
+// wrappers delegate their parse to the inner schema in zod, so the owner is
+// the innermost non-wrapper along the path
+const _OWNER_WRAP = new Set([
+  "optional", "exactoptional", "nullable", "nonoptional", "default", "catch",
+  "prefault", "readonly", "lazy", "refine", "transform", "branded",
+]);
+function _ownerInner(s: any): any {
+  const d = s?._def;
+  if (!d || !_OWNER_WRAP.has(d.type)) return s;
+  const inner = d.inner ?? (typeof d.getter === "function" ? d.getter() : undefined);
+  return inner === undefined ? s : _ownerInner(inner);
+}
+
+// check-originated issues carry a zod-style check instance — a `$ZodCheck*`
+// trait makes finalizeIssue defer to a pre-stamped `schema` instead of
+// overwriting it with inst, and the class name mirrors zod's check classes
+const _CHECK_CLS = new Map<string, any>();
+function _checkClsName(c: any): string {
+  switch (c?.kind) {
+    case "min": return "$ZodCheckMinLength";
+    case "max": return "$ZodCheckMaxLength";
+    case "length": return "$ZodCheckLengthEquals";
+    case "size":
+      return c.exact !== undefined ? "$ZodCheckSizeEquals"
+        : c.min !== undefined ? "$ZodCheckMinSize" : "$ZodCheckMaxSize";
+    case "multipleOf": return "$ZodCheckMultipleOf";
+    case "gt": case "gte": return "$ZodCheckGreaterThan";
+    case "lt": case "lte": return "$ZodCheckLessThan";
+    case "int": case "safeInt": case "finite": return "$ZodCheckNumberFormat";
+    case "regex": return "$ZodCheckRegex";
+    case "includes": return "$ZodCheckIncludes";
+    case "startsWith": return "$ZodCheckStartsWith";
+    case "endsWith": return "$ZodCheckEndsWith";
+    case "mime": return "$ZodCheckMimeType";
+    case "lowercase": return "$ZodCheckLowerCase";
+    case "uppercase": return "$ZodCheckUpperCase";
+    case "checkfn": case "schemacheck": case "refine": case "superrefine":
+    case "meta": return "$ZodCheck";
+    case "tx": case "transform": return "$ZodCheckOverwrite";
+    case "property": return "$ZodCheckProperty";
+    case "properties": return "$ZodCheckProperties";
+    default: return "$ZodCheckStringFormat";
+  }
+}
+function _checkInst(c: any): any {
+  const name = _checkClsName(c);
+  let cls = _CHECK_CLS.get(name);
+  if (!cls) {
+    cls = new Function(`return class ${name} {}`)();
+    _CHECK_CLS.set(name, cls);
+  }
+  const inst = new cls();
+  inst._zod = { def: c, traits: new Set(["$ZodCheck"]) };
+  return inst;
+}
+
+// which check record in `d.checks` produced this flat issue — bounds and
+// format names disambiguate; returns undefined for schema-originated codes
+function _checkOwner(d: any, i: any): any {
+  const checks = d?.checks;
+  if (!Array.isArray(checks) || !i) return undefined;
+  for (const c of checks) {
+    if (!c || typeof c !== "object") continue;
+    const k = c.kind;
+    const bound = c.value ?? c.min ?? c.exact ?? c.max;
+    if (i.code === "too_small" && (k === "min" || k === "gte" || k === "length" || k === "size") && bound === i.minimum) return c;
+    if (i.code === "too_big" && (k === "max" || k === "lte" || k === "length" || k === "size") && bound === i.maximum) return c;
+    if (i.code === "invalid_format" && (c.fmt === i.format || c.format === i.format || k === i.format)) return c;
+    if (i.code === "not_multiple_of" && k === "multipleOf" && c.value === i.divisor) return c;
+    if (i.code === "custom" && (k === "checkfn" || k === "refine" || k === "superrefine" || k === "schemacheck")) return c;
+  }
+  return undefined;
+}
+
+// a pipe/codec at path end is ambiguous — the flat path can't say which side
+// emitted; check-record match decides, then expected-type match, else `in`
+function _ownerFinal(s: any, i: any): any {
+  const d = s?._def;
+  if (!d || (d.type !== "pipe" && d.type !== "codec")) return s;
+  const out = _ownerInner(d.out), inn = _ownerInner(d.in);
+  if (_checkOwner(out?._def, i)) return _ownerFinal(out, i);
+  if (_checkOwner(inn?._def, i)) return _ownerFinal(inn, i);
+  if (i?.expected === out?._def?.type) return _ownerFinal(out, i);
+  return _ownerFinal(inn, i);
+}
+
+function _ownerAtPath(root: any, i: any): any {
+  const path = i?.path;
+  let cur = _ownerInner(root);
+  if (!Array.isArray(path)) return _ownerFinal(cur, i);
+  for (const seg of path) {
+    const d = cur?._def;
+    if (!d) return cur;
+    let next: any;
+    switch (d.type) {
+      case "object": next = d.shape?.[seg]; break;
+      case "array": next = d.element; break;
+      case "tuple": next = d.items?.[seg] ?? d.rest; break;
+      case "record": case "map": case "set": next = d.valueType; break;
+      case "pipe": case "codec": next = d.out; break;
+      case "union": case "discunion": case "xor": case "intersection": return cur;
+      default: next = d.inner ?? (typeof d.getter === "function" ? d.getter() : undefined);
+    }
+    if (!next) return cur;
+    cur = _ownerInner(next);
+  }
+  return _ownerFinal(cur, i);
+}
+
 function _stampTree(i: any, inst: any, data: any): void {
-  i.inst ??= inst;
+  if (i.inst === undefined) {
+    const owner = _ownerAtPath(inst, i);
+    const chk = _checkOwner(owner?._def, i);
+    if (chk) {
+      i.inst = _checkInst(chk);
+      i.schema ??= owner;
+    } else i.inst = owner;
+  }
   if (!("input" in i)) i.input = _pathGet(data, i.path);
   if (Array.isArray(i.errors))
     for (const a of i.errors) for (const j of a) _stampTree(j, inst, data);
@@ -983,14 +1103,20 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const { minLen, maxLen, exactLen } = carrierDef;
       const sized = [...checks, { kind: "_arrsize", minLen, maxLen, exactLen, _minMsg: carrierDef._minMsg, _maxMsg: carrierDef._maxMsg }];
       const stripped = new Base({ ...carrierDef, checks: [], minLen: undefined, maxLen: undefined, exactLen: undefined });
+      (stripped as any).__synth = true;
       const r2 = baseResult ?? stripped._run(data);
       return this._runChecksTS(data, sized, r2, stripped);
     }
-    const r = baseResult ?? new Base({ ...carrierDef, checks: [] })._run(data);
+    const base = baseResult ? undefined : new Base({ ...carrierDef, checks: [] });
+    if (base) (base as any).__synth = true;
+    const r = baseResult ?? (base as any)._run(data);
     // zod: a failed base implicitly aborts the payload — only `when`-gated
     // checks still evaluate (length/size bounds on values carrying the field)
     let v = r.ok ? r.value : data;
     const issues: ZodIssue[] = r.ok ? [] : [...r.issues];
+    // the checkless base stands in for this schema — zod has no synthetic, so
+    // issues it emitted attribute to the carrier, not the stand-in
+    for (const i of issues) if ((i as any).inst?.__synth === true) (i as any).inst = this;
     const whenOK = (c: any): boolean => {
       if (c?.kind === "min" || c?.kind === "max" || c?.kind === "length")
         return v != null && (v as any).length !== undefined;
@@ -1000,6 +1126,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     for (let i = 0; i < checks.length; i++) {
       const c = checks[i];
       if (!r.ok && !whenOK(c)) continue;
+      // `when` gates the record against the payload, checked at run time
+      if (typeof c?.when === "function" && c.when({ value: v, issues }) === false) continue;
       if (typeof c === "function" || c.kind === "checkfn") {
         const fn = typeof c === "function" ? c : c.fn;
         const payload = { value: v, issues: [] as any[] };
@@ -1053,7 +1181,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           return { ok: true as const, value: v };
         }
         if (nv === false) {
-          const i: any = { code: "custom", input: v, path: [], message: "Invalid input" };
+          const i: any = { code: "custom", input: v, path: [] };
           const e = c.error ?? c.message;
           if (e !== undefined) i.message = typeof e === "function" ? e(i) : e;
           if (c.abort === true) i.continue = false;
@@ -1138,6 +1266,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       if (!rr.ok) {
         const mine = r.ok ? rr.issues : rr.issues.filter((i: any) => i.code !== "invalid_type");
         for (const i of mine) {
+          // check-originated: inst is the check, schema the carrier — otherwise
+          // finalizeIssue rewrites schema to the synthetic base
+          (i as any).inst = _checkInst(c);
+          (i as any).schema ??= this;
           if (c.error !== undefined) (i as any).message = typeof c.error === "function" ? c.error(i) : c.error;
           if (c.abort === true) (i as any).continue = false;
         }
@@ -1285,6 +1417,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         // onattach callbacks write _zod.bag contributions on the clone
         if (o._zod && typeof o._zod === "object" && o._zod.def && o._zod.def.type === undefined) {
           const rec: any = { ...(o._zod.def ?? {}), fn: o._zod.check, _onattach: o._zod.onattach };
+          // _zod.check takes the payload ({value, issues}) — route like checkfn
+          if (typeof rec.fn === "function" && rec.kind === undefined) rec.kind = "checkfn";
           checks.push(rec);
           continue;
         }
@@ -1340,8 +1474,20 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return {
       version: 1 as const, vendor: "zod",
       validate: (v: unknown) => {
-        const r = self.safeParse(v);
-        return r.success ? { value: r.data } : { issues: r.error.issues };
+        try {
+          const r = self.safeParse(v);
+          return r.success ? { value: r.data } : { issues: r.error.issues };
+        } catch (e) {
+          // async-capable schemas validate through the async runner; a sync
+          // throw inside a check becomes a rejected promise per the spec
+          if (e instanceof AsyncCheckError)
+            return self.safeParseAsync(v).then((r) => r.success ? { value: r.data } : { issues: r.error.issues });
+          return Promise.reject(e);
+        }
+      },
+      jsonSchema: {
+        input: (params?: any) => (self as any).toJSONSchema({ ...params, io: "input" }),
+        output: (params?: any) => (self as any).toJSONSchema({ ...params, io: "output" }),
       },
     };
   }
@@ -1439,7 +1585,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         if (cv != null && typeof cv === "object" && (cv as any).__azRefine) {
           // a suspended pipe-refine resolved false — emit its custom issue
           const rc = (cv as any).__azRefine;
-          const i: any = { code: "custom", input: cur, path: p ?? [], message: "Invalid input" };
+          const i: any = { code: "custom", input: cur, path: p ?? [] };
           const e = rc.error ?? rc.message;
           if (e !== undefined) i.message = typeof e === "function" ? e(i) : e;
           cIssues.push(i);
@@ -1522,7 +1668,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const res = await st.fn(cur);
       return res ? { value: root, issues: [] } : {
         value: root,
-        issues: [{ code: "custom", path: [...(p ?? []), ...(st.ipath ?? [])], message: st.msg ?? "Invalid input", inst: st.inst, schema: st.schema } as ZodIssue],
+        issues: [{ code: "custom", path: [...(p ?? []), ...(st.ipath ?? [])], ...(st.msg !== undefined ? { message: st.msg } : {}), inst: st.inst, schema: st.schema } as ZodIssue],
       };
     };
     const allIssues: ZodIssue[] = [];
@@ -2503,9 +2649,13 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     }
     // zod's payload is best-effort: fields that parsed stay in `value` so
     // when-checks and downstream effects see the partial object
-    return issues.length
+    const res: any = issues.length
       ? { ok: false as const, issues, aborted: isAborted(issues), value: out }
       : { ok: true as const, value: out };
+    // the object's own .check records evaluate on the finished payload
+    if (this._def.checks?.length)
+      return this._runChecksTS(view, this._def.checks, res, this._def);
+    return res;
   }
   strict() { return new ZodObject({ ...this._def, mode: "strict", catchall: new ZodNever({ type: "never" }) }); }
   strip() { return new ZodObject({ ...this._def, mode: "strip", catchall: undefined }); }
@@ -3469,6 +3619,10 @@ export class ZodInstanceof<T> extends ZodType<T> {
     });
     return ZodType.prototype.check.call(base, ...args);
   }
+  // asserts declared properties in place — same as .check(z.properties())
+  properties(shape: any, params?: any): any {
+    return this.check(_mkPropCheck(shape, params));
+  }
 }
 
 export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output"]>, Promise<T["_input"]>> {
@@ -3487,43 +3641,78 @@ export class ZodPromise<T extends ZodTypeAny> extends ZodType<Promise<T["_output
 
 export class ZodFunction<A extends ZodTypeAny[] = [], R extends ZodTypeAny = ZodAny>
   extends ZodType<(...args: any[]) => any, (...args: any[]) => any> {
-  constructor(_def: any = { type: "function", ctor: Function, name: "function", args: null, ret: null }) {
+  constructor(_def: any = { type: "function", name: "function", input: null, output: null }) {
     super(); this._def = _def;
   }
+  // `.input(args[])` wraps the list in a tuple; a bare schema passes through
+  input(...args: any[]): any {
+    const [a, rest] = args;
+    const argSchema = _isSchema(a)
+      ? a
+      : new ZodTuple({ type: "tuple", items: a ?? [], rest: rest ?? null } as any);
+    return new ZodFunction({ ...this._def, input: argSchema });
+  }
+  args(...args: any[]): any { return (this as any).input(args); }
+  output(o: any): any {
+    return new ZodFunction({ ...this._def, output: o });
+  }
+  returns(o: any): any { return this.output(o); }
+  private _attach(fn: any): any {
+    // an implemented function carries the schema's internals as a
+    // non-enumerable own property — `(fn)._zod === schema._zod`
+    Object.defineProperty(fn, "_zod", {
+      value: this._zod, enumerable: false, writable: false, configurable: false,
+    });
+    return fn;
+  }
   implement(fn: (...args: any[]) => any): (...args: any[]) => any {
-    const { args, ret } = this._def as { args: A | null; ret: R | null };
-    if (!args && !ret) return fn;
-    const argSchema: any = _isSchema(args) ? args : args ? new ZodTuple({ type: "tuple", items: args, rest: null } as any) : null;
-    return (...callArgs: any[]) => {
+    const argSchema: any = this._def.input ?? this._def.args;
+    const ret: any = this._def.output ?? this._def.ret;
+    // an anonymous function preserves `this` for method implementations
+    return this._attach(function (this: any, ...callArgs: any[]) {
+      let parsedArgs = callArgs;
       if (argSchema) {
         const ar = argSchema.safeParse(callArgs);
         if (!ar.success) throw new ZodError(ar.error.issues);
+        parsedArgs = ar.data;
       }
-      const out = fn(...callArgs);
+      const out = Reflect.apply(fn, this, parsedArgs);
       if (ret) {
         const rr = ret.safeParse(out);
         if (!rr.success) throw new ZodError(rr.error.issues);
         return (rr as any).data;
       }
       return out;
-    };
+    });
   }
   implementAsync(fn: (...args: any[]) => Promise<any>): (...args: any[]) => Promise<any> {
-    const { args, ret } = this._def as { args: A | null; ret: R | null };
-    const argSchema: any = _isSchema(args) ? args : args ? new ZodTuple({ type: "tuple", items: args, rest: null } as any) : null;
-    return async (...callArgs: any[]) => {
+    const argSchema: any = this._def.input ?? this._def.args;
+    const ret: any = this._def.output ?? this._def.ret;
+    return this._attach(async function (this: any, ...callArgs: any[]) {
+      let parsedArgs = callArgs;
       if (argSchema) {
-        const ar = argSchema.safeParse(callArgs);
+        const ar = await argSchema.safeParseAsync(callArgs);
         if (!ar.success) throw new ZodError(ar.error.issues);
+        parsedArgs = ar.data;
       }
-      const out = await fn(...callArgs);
+      const out = await Reflect.apply(fn, this, parsedArgs);
       if (ret) {
         const rr = await (ret as any).safeParseAsync(out);
         if (!rr.success) throw new ZodError(rr.error.issues);
         return (rr as any).data;
       }
       return out;
-    };
+    });
+  }
+  protected override _runImpl(data: unknown) {
+    if (typeof data !== "function")
+      return { ok: false as const, aborted: true,
+        issues: [{ code: "invalid_type", expected: "function", input: data, path: [], message: "Expected function" } as any] };
+    // a promise output means the wrapper must parse async (zod dispatches
+    // on the output schema's type, not on the wrapped fn's asyncness)
+    const outDef = this._def.output ?? this._def.ret;
+    const impl = outDef?._def?.type === "promise" ? this.implementAsync : this.implement;
+    return { ok: true as const, value: impl.call(this, data as (...args: any[]) => any) };
   }
 }
 
@@ -3532,14 +3721,21 @@ export class ZodCustom<T> extends ZodType<T> {
   protected override _runImpl(data: unknown) {
     const fn = this._def.fn as ((v: unknown) => boolean) | undefined;
     if (fn !== undefined) {
-      if (fn(data)) return { ok: true as const, value: data };
-      return {
-        ok: false as const, aborted: this._def.abort === true,
-        issues: [{ code: "custom", input: data, path: [],
-          ...(this._def.abort ? { continue: false } : {}) }] as any[],
-      };
+      const r = fn(data)
+        ? { ok: true as const, value: data }
+        : { ok: false as const, aborted: this._def.abort === true,
+            issues: [{ code: "custom", input: data, path: [],
+              ...(this._def.abort ? { continue: false } : {}) }] as any[] };
+      // checks appended by .check()/.properties() evaluate after the predicate
+      if (this._def.checks?.length)
+        return this._runChecksTS(data, this._def.checks, r, this._def);
+      return r;
     }
     return super._runImpl(data);
+  }
+  // instanceof.check() lands here — .properties() must chain the same way
+  properties(shape: any, params?: any): any {
+    return this.check(_mkPropCheck(shape, params));
   }
 }
 
@@ -3882,13 +4078,8 @@ export function visit(schema: any, fnOrHandlers: any): any {
       case "optional": case "exactOptional": case "nullable": case "default":
       case "prefault": case "catch": case "readonly": case "nonoptional":
       case "promise": case "success": case "refine": case "coerce_str":
-      case "coerce_num": case "coerce_bool": case "coerce_bigint": {
-        const old = d.innerType ?? d.inner;
-        if (old === undefined) return s;
-        const m = run(old);
-        return m === old ? s : clone(s, { ...d, innerType: m });
-      }
-      case "instof": case "promise": {
+      case "coerce_num": case "coerce_bool": case "coerce_bigint":
+      case "instof": {
         const old = d.innerType ?? d.inner;
         if (old === undefined) return s;
         const m = run(old);
@@ -3913,6 +4104,50 @@ export function visit(schema: any, fnOrHandlers: any): any {
     }
   }
   return run(schema);
+}
+
+// zod's $ZodCheckProperties — a _zod-shaped check object that asserts the
+// declared keys on the payload value; issues prefix the key
+export class ZodCheckProperties {
+  _zod: any;
+  constructor(_def: any) {
+    const def = _def;
+    let entries: [PropertyKey, any][] | undefined;
+    const checkFn = (payload: any) => {
+      const input = payload.value;
+      // the base already typed the value — only nullish is rejected here
+      if (input == null) {
+        payload.issues.push({ code: "invalid_type", expected: "object", input, path: [] });
+        return;
+      }
+      // key+schema snapshot together at first run (zod's mutation semantics)
+      entries ??= Reflect.ownKeys(def.shape).map((k) => [k, (def.shape as any)[k]] as [PropertyKey, any]);
+      for (const [key, schema] of entries) {
+        const mark = pendingAsync.length;
+        const r = (schema as any)._run((input as any)[key]);
+        for (let j = mark; j < pendingAsync.length; j++)
+          (pendingAsync[j] as any).path = [key, ...((pendingAsync[j] as any).path ?? [])];
+        if (!r.ok)
+          payload.issues.push(...r.issues.map((i: any) => {
+            const ni = { ...i, path: [key, ...(i.path ?? [])] };
+            if (defaultedIssues.has(i)) defaultedIssues.add(ni);
+            return ni;
+          }));
+      }
+    };
+    this._zod = { def, check: checkFn, traits: new Set([ZodCheckProperties]) };
+    // `[...z.properties(shape)]` spreads the check itself
+    Object.defineProperty(this, Symbol.iterator, {
+      value: function* () { yield this; }, enumerable: false, writable: true, configurable: true,
+    });
+  }
+}
+export class ZodCheckProperty extends ZodCheckProperties {}
+export function _mkPropCheck(shape: any, params?: any): any {
+  return new ZodCheckProperties({ check: "properties", shape, ...(params ?? {}) });
+}
+export function _mkPropertyCheck(key: PropertyKey, schema: any, params?: any): any {
+  return new ZodCheckProperty({ check: "property", property: key, schema, shape: { [key]: schema }, ...(params ?? {}) });
 }
 
 /** Every nested object's properties made optional, wrappers preserved. */
