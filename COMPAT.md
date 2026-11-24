@@ -1,5 +1,9 @@
 # Compatibility contract
 
+Upstream suite: **1628/1628** zod classic tests pass (all 91 files —
+`packages/zod/src/v4/classic/tests` run against `src/index.ts` via a
+vitest alias harness, `zod/mini` mapped to `src/mini.ts`).
+
 Drop-in target: `zod@4` (latest). The suite in `test/diff.test.ts` runs
 identical schemas + inputs through AsmZod and real Zod and compares:
 

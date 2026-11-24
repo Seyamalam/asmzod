@@ -6,27 +6,27 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 
 | workload | asmzod | zod4 | ratio |
 |---|---|---|---|
-| small-obj     x50k | 0.29µs | 0.11µs | 2.69x |
-| array-2000     x40 | 315.77µs | 107.91µs | 2.93x |
-| deep+arr500   x400 | 5.43µs | 18.25µs | **0.30x — faster** |
-| union-mixed   x30k | 0.20µs | 0.12µs | 1.75x |
-| disc-union    x30k | 0.22µs | 0.09µs | 2.44x |
-| record-200   x2000 | 15.21µs | 16.99µs | **0.90x — faster** |
-| tuple        x30k | 0.15µs | 0.15µs | **0.97x — faster** |
-| str-checks   x30k | 0.16µs | 0.12µs | 1.29x |
-| strict-obj   x30k | 1.35µs | 0.18µs | 7.57x |
-| lazy-rec     x30k | 0.38µs | 0.27µs | 1.41x |
-| opt/null/def x30k | 0.21µs | 0.12µs | 1.77x |
-| fail-issues  x10k | 2.75µs | 0.44µs | 6.30x |
-| str-email    x30k | 0.11µs | 0.11µs | **1.00x — par** |
-| str-email-f  x10k | 1.16µs | 0.26µs | 4.38x |
-| emoji        x30k | 0.14µs | 0.07µs | 2.13x |
-| coerce-num   x30k | 0.10µs | 0.05µs | 2.12x |
-| refine+trans x30k | 0.14µs | 0.15µs | **0.93x — faster** |
-| msgwrap      x30k | 0.09µs | 0.04µs | 2.03x |
-| msgwrap-fail x10k | 1.20µs | 0.09µs | 13.43x |
-| int-safe     x30k | 0.09µs | 0.12µs | **0.77x — faster** |
-| date         x30k | 0.20µs | 0.05µs | 4.38x |
+| small-obj     x50k | 0.53µs | 0.12µs | 4.48x |
+| array-2000     x40 | 473µs | 118µs | 4.01x |
+| deep+arr500   x400 | 9.10µs | 20.38µs | **0.45x — faster** |
+| union-mixed   x30k | 0.33µs | 0.19µs | 1.79x |
+| disc-union    x30k | 0.47µs | 0.10µs | 4.74x |
+| record-200   x2000 | 69µs | 21µs | 3.36x |
+| tuple        x30k | 0.69µs | 0.20µs | 3.52x |
+| str-checks   x30k | 0.28µs | 0.15µs | 1.82x |
+| strict-obj   x30k | 1.42µs | 0.21µs | 6.73x |
+| lazy-rec     x30k | 2.27µs | 0.18µs | 12.68x |
+| opt/null/def x30k | 0.44µs | 0.12µs | 3.54x |
+| fail-issues  x10k | 3.55µs | 0.60µs | 5.96x |
+| str-email    x30k | 0.21µs | 0.11µs | 1.90x |
+| str-email-f  x10k | 2.21µs | 0.35µs | 6.40x |
+| emoji        x30k | 1.38µs | 0.10µs | 13.8x |
+| coerce-num   x30k | 0.23µs | 0.06µs | 4.07x |
+| refine+trans x30k | 0.59µs | 0.21µs | 2.85x |
+| msgwrap      x30k | 0.22µs | 0.06µs | 3.94x |
+| msgwrap-fail x10k | 1.43µs | 0.09µs | 15.9x |
+| int-safe     x30k | 0.26µs | 0.15µs | 1.73x |
+| date         x30k | 0.28µs | 0.05µs | 5.6x |
 
 ## Where the time goes
 
