@@ -677,6 +677,9 @@ _aznapi_parse:
 .Lnm_issues: .ascii "issues\0"
 .Lnm_code:  .ascii "code\0"
 .Lnm_exc:   .ascii "exc\0"
+.Lnm_test:  .ascii "test\0"
+.Lnv_regex: .ascii "regex\0"
+.Lnk_pattern: .ascii "pattern\0"
 .Lnm_azres: .ascii "~azres\0"
     .p2align 2
 
@@ -1413,7 +1416,8 @@ _az_issue_size_n:
     add x0, x27, #2
     mov x2, x20
     ldr x3, [sp, #LN_A]
-    bl _az_run_strchecks
+    mov x4, x28
+    bl _azn_strmixed        // per-check walker — regex via napi re.test
     cmp x0, #0
     b.ne .Ln_ret
 .Ln_str_ok:
@@ -2871,6 +2875,143 @@ _azn_encval:
 .Ln_io_punt:
     mov x0, #-10
     b .Ln_ret
+
+// ============ mixed string-check walker ============
+// _azn_strmixed(x0=chkptr, x1=n, x2=strptr, x3=strlen, x4=strval)
+// Like az_run_strchecks but regex (cbid 0x0A) calls re.test via N-API
+// instead of the FFI cb table. -> 0 ok / -2 invalid / hard codes
+_azn_strmixed:
+    stp x29, x30, [sp, #-160]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    // NOTE: x21/x22 are the shared issue-arena cursor/base — do NOT save+restore
+    // them here; issue emissions inside must advance the global cursor.
+    stp x23, x24, [sp, #48]
+    mov x19, x0               // cursor
+    mov x20, x1               // n
+    stp x2, x3, [sp, #64]     // strptr, strlen
+    str x4, [sp, #80]         // strval napi_value
+    str xzr, [sp, #88]        // failed
+.Lnsm_loop:
+    cbz x20, .Lnsm_done
+    ldrb w9, [x19]            // cbid
+    ldr x10, [x19, #1]        // msglen
+    add x11, x19, #9
+    add x12, x11, x10         // params
+    str w9, [sp, #96]
+    stp x11, x10, [sp, #104]  // msgptr,msglen
+    str x12, [sp, #120]       // params
+    // stride
+    mov x13, #0               // psize
+    cmp w9, #4
+    b.lo .Lnsm_p8
+    cmp w9, #7
+    b.lo .Lnsm_pfmt
+    cmp w9, #10
+    b.ls .Lnsm_pvar
+    cmp w9, #11
+    b.eq .Lnsm_p8
+    b .Lnsm_padv
+.Lnsm_p8:
+    mov x13, #8
+    b .Lnsm_padv
+.Lnsm_pfmt:
+    cmp w9, #5
+    b.ne .Lnsm_padv
+    mov x13, #1
+    b .Lnsm_padv
+.Lnsm_pvar:
+    cmp w9, #10
+    b.eq .Lnsm_prx
+    ldr x13, [x12]
+    add x13, x13, #8          // [u64 len][bytes]
+    b .Lnsm_padv
+.Lnsm_prx:
+    ldr x13, [x12, #8]
+    add x13, x13, #16         // [u64 cbid][u64 srclen][src]
+.Lnsm_padv:
+    add x14, x12, x13         // next = params + psize
+    ldr x9, [sp, #96]
+    cmp w9, #10
+    b.eq .Lnsm_regex
+    // non-regex: run the single check via the shared walker
+    mov x0, x19
+    mov x1, #1
+    ldr x2, [sp, #64]
+    ldr x3, [sp, #72]
+    str x14, [sp, #128]       // next
+    bl _az_run_strchecks
+    ldr x14, [sp, #128]
+    cmp x0, #-2
+    b.ne .Lnsm_hard
+    mov x9, #1
+    str x9, [sp, #88]
+    b .Lnsm_next
+.Lnsm_hard:
+    cbnz x0, .Lnsm_out        // -4 etc
+    b .Lnsm_next
+.Lnsm_regex:
+    str x14, [sp, #128]
+    ldr x12, [sp, #120]       // params
+    ldr x9, [x12]             // cbid
+    mov x10, #1024
+    cmp x9, x10
+    b.hs .Lnsm_punt
+    AZ_ADR x10, _azn_cbregex
+    ldr x9, [x10, x9, lsl #3]
+    cbz x9, .Lnsm_punt
+    str x9, [sp, #136]        // regex obj
+    mov x0, x26
+    mov x1, x9
+    AZ_ADR x2, .Lnm_test
+    add x3, sp, #144
+    bl AZ_NAPI(napi_get_named_property)
+    cbnz x0, .Lnsm_punt
+    ldr x0, [sp, #144]        // test fn
+    ldr x1, [sp, #136]        // recv = regex
+    ldr x2, [sp, #80]         // arg = strval
+    add x3, sp, #144
+    bl _azn_callcb1
+    cbnz x0, .Lnsm_out        // -11 / -10
+    ldr x0, [sp, #144]
+    bl _azn_truthy
+    cmp x0, #-10
+    b.eq .Lnsm_punt
+    cbnz w0, .Lnsm_rnext
+    // regex miss -> invalid_string{validation:"regex", pattern:src}
+    ldr x12, [sp, #120]
+    ldr x7, [x12, #8]         // srclen
+    add x6, x12, #16          // src
+    AZ_ADR x0, .Lnv_regex
+    mov x1, #5
+    ldp x2, x3, [sp, #104]    // msgptr,msglen
+    AZ_ADR x4, .Lnk_pattern
+    mov x5, #7
+    bl _az_issue_invstr
+    cbnz x0, .Lnsm_out
+    mov x9, #1
+    str x9, [sp, #88]
+.Lnsm_rnext:
+    ldr x14, [sp, #128]
+.Lnsm_next:
+    mov x19, x14
+    sub x20, x20, #1
+    b .Lnsm_loop
+.Lnsm_punt:
+    mov x0, #-10
+    b .Lnsm_out
+.Lnsm_done:
+    ldr x9, [sp, #88]
+    cbz x9, .Lnsm_ok
+    mov x0, #-2
+    b .Lnsm_out
+.Lnsm_ok:
+    mov x0, #0
+.Lnsm_out:
+    ldp x19, x20, [sp, #16]
+    ldp x23, x24, [sp, #48]
+    ldp x29, x30, [sp], #160
+    ret
 
 // ============ JS callback support ============
 // _azn_callcb1(x0=fn, x1=recv, x2=arg, x3=outslot) -> 0 / -10 / -11 (pending exc)

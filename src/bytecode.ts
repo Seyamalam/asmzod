@@ -69,7 +69,6 @@ function emitStrChecks(w: BW, checks: any[]) {
         w.u64(b.length); w.raw(b); break;
       }
       case "regex": {
-        cbUnsafe = true;
         w.u64(regId(reg.regex, c.regex));
         // embed /src/flags so the engine can emit zod's `pattern` issue field
         const src = enc.encode(`/${c.regex.source}/${c.regex.flags}`);
