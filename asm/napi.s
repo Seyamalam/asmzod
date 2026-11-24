@@ -948,6 +948,14 @@ _azn_recvname:
     bl AZ_NAPI(napi_get_prototype)
     ldr x1, [sp, #64]
     cbz x1, .Lrn_plain
+    // null-proto objects come back as the JS null value — no ctor lookup
+    mov x0, x26
+    add x2, sp, #96
+    bl AZ_NAPI(napi_typeof)
+    ldr w9, [sp, #96]
+    cmp w9, #NAPI_NULL
+    b.eq .Lrn_plain
+    ldr x1, [sp, #64]
     str x1, [sp, #88]          // proto
     mov x0, x26
     add x1, sp, #64
@@ -3508,10 +3516,12 @@ _azn_truthy:
     mov x0, x26
     add x1, sp, #LN_A
     bl AZ_NAPI(napi_create_object)
+    cbnz x0, .Ln_obj_unsup
     mov x0, x26
     mov x1, x28
     add x2, sp, #LN_K
     bl AZ_NAPI(napi_get_property_names)
+    cbnz x0, .Ln_obj_unsup
     mov x0, x26
     ldr x1, [sp, #LN_K]
     add x2, sp, #LN_L
@@ -3820,6 +3830,15 @@ _azn_is_proto_obj:
     cbnz x0, .Lpo_err
     ldr x9, [sp, #40]
     cbz x9, .Lpo_yes           // null proto -> plain
+    // Object.create(null): get_prototype returns the JS null value (nonzero
+    // handle) — check typeof so it's still treated as plain.
+    mov x0, x26
+    ldr x1, [sp, #40]
+    add x2, sp, #80
+    bl AZ_NAPI(napi_typeof)
+    ldr w9, [sp, #80]
+    cmp w9, #NAPI_NULL
+    b.eq .Lpo_yes
     mov x0, x26
     add x1, sp, #48
     bl AZ_NAPI(napi_get_global)

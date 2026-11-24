@@ -713,7 +713,8 @@ _az_run_numchecks:
     fabs d2, d0
     fcmp d2, d1
     b.hs .Lnc_int_fail
-    b .Lnc_next0
+    // zod's int() is format "safeint": |x| <= 2^53-1 too
+    b .Lnc_safelimit
 .Lnc_int_fail:
     // invalid_type expected "int" (+format:"safeint" via normalizer)
     AZ_ADR x0, .Lty_integer
@@ -791,41 +792,57 @@ _az_run_numchecks:
     frintm d1, d0
     fcmp d0, d1
     b.ne .Lnc_int_fail
+.Lnc_safelimit:
     mov x9, #0x433FFFFFFFFFFFFF  // 2^53-1
     fmov d1, x9
     fabs d2, d0
     fcmp d2, d1
     b.ls .Lnc_next0
-    // too_small/too_big bound 2^53-1
-    mov x9, #0x433FFFFFFFFFFFFF
-    str x9, [sp, #116]
+    // too_small/too_big bound +-2^53-1, origin "int", note about safe range
+    mov x0, #9                   // too_big
     fcmp d0, #0.0
-    AZ_ADR x1, amn_lte
-    mov x2, #37
-    mov x0, #9
-    b.pl .Lnc_safe_b
-    AZ_ADR x1, amn_gte
-    mov x2, #40
-    mov x0, #8
-.Lnc_safe_b:
-    mov w4, #1
-    b .Lnc_boundfail2
-.Lnc_boundfail2:
+    b.pl .Lnc_sb_dir
+    mov x0, #8                   // too_small
+    mov x9, #0xC33FFFFFFFFFFFFF  // bound f64 = -(2^53-1)
+.Lnc_sb_dir:
+    str x9, [sp, #116]
     str x0, [sp, #88]
-    stp x1, x2, [sp, #96]
-    str w4, [sp, #112]
-    ldp x6, x7, [sp, #56]
-    b .Lnc_bf_have
-    add x0, sp, #128
+    ldp x1, x2, [sp, #56]        // custom msg
+    bl _az_issue_begin
+    cbnz x0, .Lnc_retx
+    ldr x10, [sp, #88]
+    cmp x10, #9
+    b.eq .Lnc_sb_max
+    AZ_ADR x0, ak_minimum
+    b .Lnc_sb_k
+.Lnc_sb_max:
+    AZ_ADR x0, ak_maximum
+.Lnc_sb_k:
+    mov x1, #7
     ldr d0, [sp, #116]
-    mov x3, #0
-    mov x4, #0
-    bl _az_msg_f64
-    mov x6, x0
-    add x0, sp, #128
-    mov x7, x6
-    mov x6, x0
-    b .Lnc_bf_have
+    bl _az_issue_f_f64
+    cbnz x0, .Lnc_retx
+    AZ_ADR x0, ak_type
+    mov x1, #4
+    AZ_ADR x2, .Lty_integer
+    mov x3, #3
+    bl _az_issue_f_str
+    cbnz x0, .Lnc_retx
+    AZ_ADR x0, ak_inclusive
+    mov x1, #9
+    mov w2, #1
+    bl _az_issue_f_bool
+    cbnz x0, .Lnc_retx
+    AZ_ADR x0, .Lk_note
+    mov x1, #4
+    AZ_ADR x2, .Ls_intnote
+    mov x3, #47
+    bl _az_issue_f_str
+    cbnz x0, .Lnc_retx
+    bl _az_issue_commit
+    mov x9, #1
+    str x9, [sp, #400]
+    b .Lnc_next0
 
 .Lnc_next0:
     ldr x27, [sp, #72]
@@ -1113,6 +1130,8 @@ _az_is_url:
 .Lty_number:   .ascii "number"
 .Lty_bigint:   .ascii "bigint"
 .Lty_integer:  .ascii "int"
+.Lk_note:      .ascii "note"
+.Ls_intnote:   .ascii "Integers must be within the safe integer range."
 .Lk_multof:    .ascii "divisor"
 .Lv_email:     .ascii "email"
 .Lv_uuid:      .ascii "uuid"
