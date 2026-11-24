@@ -27,6 +27,12 @@ _azn_errbuf:    .space 1048576   // 1MB err arena
 _azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
 _azn_lazytab:   .space 32768      // 4096 resolved lazy-subblob data ptrs
 _azn_ctortab:   .space 8192       // 1024 constructor napi_values for instanceof
+_azn_cbrefine:  .space 8192       // refine[cbid] napi_values
+_azn_cbtransform: .space 8192
+_azn_cbcustom:  .space 8192
+_azn_cbregex:   .space 8192
+_azn_undef:     .space 8          // cached undefined value (per parse)
+_azn_pendingexc: .space 8         // exception value when a cb throws
 _azn_obuf:      .space 8388608   // 8MB staged child results (return-input-if-unchanged)
 _azn_obuf_end:  .space 8
 _azn_ocur:      .space 8
@@ -113,6 +119,19 @@ _napi_register_module_v1:       // alias for internal Mach-O-style refs
     mov x1, x20
     AZ_ADR x2, .Lnm_initctor
     bl AZ_NAPI(napi_set_named_property)
+    // create "initCb" fn
+    mov x0, x19
+    AZ_ADR x1, .Lnm_initcb
+    mov x2, #6
+    AZ_ADR x3, _aznapi_initcb
+    mov x4, #0
+    add x5, sp, #32
+    bl AZ_NAPI(napi_create_function)
+    ldr x3, [sp, #32]
+    mov x0, x19
+    mov x1, x20
+    AZ_ADR x2, .Lnm_initcb
+    bl AZ_NAPI(napi_set_named_property)
     mov x0, x20
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #64
@@ -121,6 +140,7 @@ _napi_register_module_v1:       // alias for internal Mach-O-style refs
 .Lnm_init:  .ascii "init\0"
 .Lnm_initlazy: .ascii "initLazy\0"
 .Lnm_initctor: .ascii "initCtor\0"
+.Lnm_initcb: .ascii "initCb\0"
     .p2align 2
 
 // ================= init(cbTableBuf) -> true =================
@@ -303,7 +323,126 @@ _aznapi_initctor:
     ldp x29, x30, [sp], #160
     ret
 
-// ================= parse(blobTA, value) =================// ================= parse(blobTA, value) =================
+// ================= initCb([refine[],transform[],custom[],regex[]]) =================
+_azn_loadtab:                    // (x0=env, x1=arr, x2=tab) -> 0 / -1
+    stp x29, x30, [sp, #-96]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    mov x19, x0
+    mov x20, x1
+    mov x21, x2
+    mov x0, x19
+    mov x1, x20
+    add x2, sp, #48
+    bl AZ_NAPI(napi_get_array_length)
+    cbnz x0, .Llt_fail
+    ldr w9, [sp, #48]
+    mov x10, #1024
+    cmp x9, x10
+    b.hi .Llt_fail
+    str x9, [sp, #56]
+    str xzr, [sp, #64]
+.Llt_loop:
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #56]
+    cmp x9, x10
+    b.hs .Llt_done
+    mov x0, x19
+    mov x1, x20
+    ldr x2, [sp, #64]
+    add x3, sp, #72
+    bl AZ_NAPI(napi_get_element)
+    cbnz x0, .Llt_fail
+    ldr x9, [sp, #64]
+    ldr x10, [sp, #72]
+    str x10, [x21, x9, lsl #3]
+    add x9, x9, #1
+    str x9, [sp, #64]
+    b .Llt_loop
+.Llt_done:
+    mov x0, #0
+    b .Llt_ret
+.Llt_fail:
+    mov x0, #-1
+.Llt_ret:
+    ldp x19, x20, [sp, #16]
+    ldp x21, x22, [sp, #32]
+    ldp x29, x30, [sp], #96
+    ret
+
+_aznapi_initcb:
+    stp x29, x30, [sp, #-160]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    mov x19, x0
+    mov x20, x1
+    mov x9, #1
+    str x9, [sp, #112]
+    mov x0, x19
+    mov x1, x20
+    add x2, sp, #112
+    add x3, sp, #96
+    mov x4, #0
+    mov x5, #0
+    bl AZ_NAPI(napi_get_cb_info)
+    str xzr, [sp, #128]           // i
+.Licb_loop:
+    ldr x9, [sp, #128]
+    cmp x9, #4
+    b.hs .Licb_done
+    mov x0, x19
+    ldr x1, [sp, #96]
+    ldr x2, [sp, #128]
+    add x3, sp, #120
+    bl AZ_NAPI(napi_get_element)
+    cbnz x0, .Licb_fail
+    ldr x9, [sp, #128]
+    cbnz x9, .Licb_n0
+    AZ_ADR x21, _azn_cbrefine
+    b .Licb_tab
+.Licb_n0:
+    cmp x9, #1
+    b.ne .Licb_n1
+    AZ_ADR x21, _azn_cbtransform
+    b .Licb_tab
+.Licb_n1:
+    cmp x9, #2
+    b.ne .Licb_n2
+    AZ_ADR x21, _azn_cbcustom
+    b .Licb_tab
+.Licb_n2:
+    AZ_ADR x21, _azn_cbregex
+.Licb_tab:
+    mov x0, x19
+    ldr x1, [sp, #120]
+    mov x2, x21
+    bl _azn_loadtab
+    cbnz x0, .Licb_fail
+    ldr x9, [sp, #128]
+    add x9, x9, #1
+    str x9, [sp, #128]
+    b .Licb_loop
+.Licb_done:
+    mov x0, x19
+    mov x1, #1
+    add x2, sp, #96
+    bl AZ_NAPI(napi_get_boolean)
+    ldr x0, [sp, #96]
+    b .Licb_ret
+.Licb_fail:
+    mov x0, x19
+    add x1, sp, #96
+    bl AZ_NAPI(napi_get_undefined)
+    ldr x0, [sp, #96]
+.Licb_ret:
+    ldp x19, x20, [sp, #16]
+    ldp x21, x22, [sp, #32]
+    ldp x29, x30, [sp], #160
+    ret
+
+// ================= parse(blobTA, value) =================// ================= parse(blobTA, value) =================// ================= parse(blobTA, value) =================
 // -> value | {ok:false,err} | undefined(fallback)
 _aznapi_parse:
     stp x29, x30, [sp, #-256]!
@@ -343,6 +482,12 @@ _aznapi_parse:
     AZ_ADR x9, _azn_cbtab
     ldr x24, [x9]
     cbz x24, .Lnparse_undef   // init() never ran
+    mov x0, x26
+    add x1, sp, #192
+    bl AZ_NAPI(napi_get_undefined)
+    ldr x9, [sp, #192]
+    AZ_ADR x10, _azn_undef
+    str x9, [x10]
     AZ_ADR x20, _azn_scratch
     AZ_ADR x9, _azn_obuf
     AZ_ADR x10, _azn_ocur
@@ -361,6 +506,8 @@ _aznapi_parse:
     b.eq .Lnparse_ok
     cmp x0, #-2
     b.eq .Lnparse_fail
+    cmp x0, #-11
+    b.eq .Lnparse_exc
     b .Lnparse_undef          // -10 fallback / -4 enospc
 .Lnparse_ok:
     // success returns the output value bare — no {ok,value} wrapper
@@ -442,6 +589,39 @@ _aznapi_parse:
     bl AZ_NAPI(napi_set_named_property)
     ldr x0, [sp, #144]
     b .Lnparse_ret
+.Lnparse_exc:
+    // {~azres, ok:null, code:-11, exc:pendingExc} — a callback threw; JS rethrows
+    mov x0, x26
+    add x1, sp, #144
+    bl AZ_NAPI(napi_create_object)
+    mov x0, x26
+    add x1, sp, #152
+    bl AZ_NAPI(napi_get_null)
+    ldr x1, [sp, #144]
+    AZ_ADR x2, .Lnm_ok
+    ldr x3, [sp, #152]
+    mov x0, x26
+    bl AZ_NAPI(napi_set_named_property)
+    ldr x0, [sp, #144]
+    bl _azn_mark_res
+    mov x0, #-11
+    scvtf d0, x0
+    mov x0, x26
+    add x1, sp, #152
+    bl AZ_NAPI(napi_create_double)
+    ldr x1, [sp, #144]
+    AZ_ADR x2, .Lnm_code
+    ldr x3, [sp, #152]
+    mov x0, x26
+    bl AZ_NAPI(napi_set_named_property)
+    AZ_ADR x9, _azn_pendingexc
+    ldr x3, [x9]
+    ldr x1, [sp, #144]
+    AZ_ADR x2, .Lnm_exc
+    mov x0, x26
+    bl AZ_NAPI(napi_set_named_property)
+    ldr x0, [sp, #144]
+    b .Lnparse_ret
 .Lnparse_undef:
     // dbg: return {ok:null, code:status} — JS treats ok===null as fallback
     str x0, [sp, #104]
@@ -482,6 +662,7 @@ _aznapi_parse:
 .Lnm_err:   .ascii "err\0"
 .Lnm_issues: .ascii "issues\0"
 .Lnm_code:  .ascii "code\0"
+.Lnm_exc:   .ascii "exc\0"
 .Lnm_azres: .ascii "~azres\0"
     .p2align 2
 
@@ -570,6 +751,12 @@ _aznapi_run:
     b.eq .Ln_lazy
     cmp w9, #0x1b
     b.eq .Ln_instof
+    cmp w9, #0x0f
+    b.eq .Ln_refine
+    cmp w9, #0x10
+    b.eq .Ln_transform
+    cmp w9, #0x22
+    b.eq .Ln_custom
     cmp w9, #0x21
     b.eq .Ln_sym
     cmp w9, #0x23
@@ -2661,6 +2848,174 @@ _azn_encval:
     b .Ln_ret
 .Ln_io_punt:
     mov x0, #-10
+    b .Ln_ret
+
+// ============ JS callback support ============
+// _azn_callcb1(x0=fn, x1=recv, x2=arg, x3=outslot) -> 0 / -10 / -11 (pending exc)
+_azn_callcb1:
+    stp x29, x30, [sp, #-64]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    mov x19, x3
+    mov x9, x0
+    str x2, [sp, #32]          // argv[0]
+    mov x0, x26
+    mov x2, x9
+    mov x3, #1
+    add x4, sp, #32
+    mov x5, x19
+    bl AZ_NAPI(napi_call_function)
+    cbz x0, .Lcc_ok
+    mov x0, x26
+    add x1, sp, #40
+    bl AZ_NAPI(napi_is_exception_pending)
+    ldrb w9, [sp, #40]
+    cbz w9, .Lcc_err
+    mov x0, x26
+    add x1, sp, #48
+    bl AZ_NAPI(napi_get_and_clear_last_exception)
+    ldr x9, [sp, #48]
+    AZ_ADR x10, _azn_pendingexc
+    str x9, [x10]
+    mov x0, #-11
+    b .Lcc_ret
+.Lcc_err:
+    mov x0, #-10
+    b .Lcc_ret
+.Lcc_ok:
+    mov x0, #0
+.Lcc_ret:
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #64
+    ret
+
+// _azn_truthy(x0=val) -> w0: 0/1, or x0=-10 on napi failure
+_azn_truthy:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    mov x9, x0
+    mov x0, x26
+    mov x1, x9
+    add x2, sp, #16
+    bl AZ_NAPI(napi_coerce_to_bool)
+    cbnz x0, .Lty_err
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #24
+    bl AZ_NAPI(napi_get_value_bool)
+    cbnz x0, .Lty_err
+    ldrb w0, [sp, #24]
+    ldp x29, x30, [sp], #48
+    ret
+.Lty_err:
+    mov x0, #-10
+    ldp x29, x30, [sp], #48
+    ret
+
+// ============ 0x0F REFINE ============
+// [op][field(8)][cbid(8)][msglen(8)][msg]
+.Ln_refine:
+    add x9, x27, #1
+    ldr x0, [x9]
+    add x0, x9, x0
+    mov x1, x28
+    add x2, sp, #LN_G
+    bl _aznapi_run
+    cbnz x0, .Ln_ret
+    ldr x9, [x27, #9]
+    mov x10, #1024
+    cmp x9, x10
+    b.hs .Ln_cb_punt
+    AZ_ADR x10, _azn_cbrefine
+    ldr x10, [x10, x9, lsl #3]
+    cbz x10, .Ln_cb_punt
+    mov x0, x10
+    AZ_ADR x9, _azn_undef
+    ldr x1, [x9]
+    ldr x2, [sp, #LN_G]
+    add x3, sp, #LN_H
+    bl _azn_callcb1
+    cbnz x0, .Ln_ret
+    ldr x0, [sp, #LN_H]
+    bl _azn_truthy
+    cmp x0, #-10
+    b.eq .Ln_cb_punt
+    cbz w0, .Ln_rf_fail
+    ldr x9, [sp, #LN_G]
+    str x9, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_rf_fail:
+    mov x0, #2               // custom
+    ldr x2, [x27, #17]
+    add x1, x27, #25
+    bl _az_issue_begin
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    mov x0, #-2
+    b .Ln_ret
+.Ln_cb_punt:
+    mov x0, #-10
+    b .Ln_ret
+
+// ============ 0x10 TRANSFORM ============
+// [op][field(8)][cbid(8)][inner]
+.Ln_transform:
+    add x9, x27, #1
+    ldr x0, [x9]
+    add x0, x9, x0
+    mov x1, x28
+    add x2, sp, #LN_G
+    bl _aznapi_run
+    cbnz x0, .Ln_ret
+    ldr x9, [x27, #9]
+    mov x10, #1024
+    cmp x9, x10
+    b.hs .Ln_cb_punt
+    AZ_ADR x10, _azn_cbtransform
+    ldr x10, [x10, x9, lsl #3]
+    cbz x10, .Ln_cb_punt
+    mov x0, x10
+    AZ_ADR x9, _azn_undef
+    ldr x1, [x9]
+    ldr x2, [sp, #LN_G]
+    mov x3, x19              // transformed result -> outslot
+    bl _azn_callcb1
+    b .Ln_ret
+
+// ============ 0x22 CUSTOM ============
+// [op][cbid(8)][msglen(8)][msg]
+.Ln_custom:
+    ldr x9, [x27, #1]
+    mov x10, #1024
+    cmp x9, x10
+    b.hs .Ln_cb_punt
+    AZ_ADR x10, _azn_cbcustom
+    ldr x10, [x10, x9, lsl #3]
+    cbz x10, .Ln_cb_punt
+    mov x0, x10
+    AZ_ADR x9, _azn_undef
+    ldr x1, [x9]
+    mov x2, x28
+    add x3, sp, #LN_H
+    bl _azn_callcb1
+    cbnz x0, .Ln_ret
+    ldr x0, [sp, #LN_H]
+    bl _azn_truthy
+    cmp x0, #-10
+    b.eq .Ln_cb_punt
+    cbz w0, .Ln_cu_fail
+    str x28, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_cu_fail:
+    mov x0, #2
+    ldr x2, [x27, #9]
+    add x1, x27, #17
+    bl _az_issue_begin
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    mov x0, #-2
     b .Ln_ret
 
 // ============ 0x08 DISCRIMINATED UNION ============

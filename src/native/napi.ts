@@ -14,6 +14,7 @@ interface AzNapi {
   init(cbTable: Uint8Array): boolean;
   initLazy(blobs: Uint8Array[]): boolean;
   initCtor(ctors: unknown[]): boolean;
+  initCb(tables: unknown[][]): boolean;
   parse(blob: Uint8Array, value: unknown): { ok: true; value: unknown } | { ok: false; err: ArrayBuffer } | { ok: null; code: number } | undefined;
 }
 
@@ -32,6 +33,17 @@ let ctorCount = 0;
 function ensureCtor(a: AzNapi) {
   while (ctorCount < reg.ctor.length && ctorCount < 1024) ctorCount++;
   if (ctorCount) a.initCtor(reg.ctor.slice(0, ctorCount));
+}
+
+let cbLens = [0, 0, 0, 0];
+function ensureCb(a: AzNapi) {
+  const sets: unknown[][] = [reg.refine, reg.transform, reg.custom, reg.regex];
+  let dirty = false;
+  for (let i = 0; i < 4; i++) {
+    const n = Math.min(sets[i].length, 1024);
+    if (n !== cbLens[i]) { cbLens[i] = n; dirty = true; }
+  }
+  if (dirty) a.initCb(sets.map((s) => s.slice(0, 1024)));
 }
 
 let addon: AzNapi | null | undefined;
@@ -74,12 +86,16 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
   }
   ensureLazy(a);
   ensureCtor(a);
+  ensureCb(a);
   const r = a.parse(blob, value);
   // success returns the raw output value; failure/fallback objects carry
   // the ~azres marker so an object result containing `ok` can't collide.
   const res = (r as any)?.[RES];
   if (res !== true) return { ok: true, value: r };
-  if ((r as any).ok === null) return null;
+  if ((r as any).ok === null) {
+    if ((r as any).code === -11) throw (r as any).exc; // a JS callback threw
+    return null;
+  }
   // fast path: addon built the issue array natively
   if (r.issues !== undefined)
     return { ok: false, issues: finishIssues((r.issues as any[]).map(normalizeIssue)) };

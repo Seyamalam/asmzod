@@ -108,12 +108,6 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     return { success: false, error: new ZodError(r.issues) };
   }
 
-  parseAsync(_: unknown): Promise<Output> {
-    return Promise.reject(new Error("asmzod: parseAsync is not supported (synchronous engine)"));
-  }
-  safeParseAsync(_: unknown): Promise<SafeParseResult<Output>> {
-    return Promise.reject(new Error("asmzod: safeParseAsync is not supported (synchronous engine)"));
-  }
   async parseAsync(data: unknown): Promise<Output> {
     const r = await this.safeParseAsync(data);
     if (!r.success) throw new ZodError(r.error.issues);
