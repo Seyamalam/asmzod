@@ -21,7 +21,7 @@ const lazyBlobs: Uint8Array[] = [];
 
 function ensureLazy(a: AzNapi) {
   if (reg.lazy.length === lazyCount) return;
-  while (lazyCount < reg.lazy.length && lazyCount < 1024) {
+  while (lazyCount < reg.lazy.length && lazyCount < 4096) {
     lazyBlobs.push(reg.lazy[lazyCount++]()); // compiles the subschema once (cached)
   }
   if (lazyBlobs.length) a.initLazy(lazyBlobs);

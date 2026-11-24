@@ -32,6 +32,7 @@ const NUM_CHECK: Record<string, number> = {
 // are the only ones reachable through the N-API handler set — refine/lazy/
 // coerce/custom opcodes fall back at dispatch anyway)
 let cbUnsafe = false;
+const lazyThunks = new Map<() => unknown, () => Uint8Array>();
 
 export function compile(schema: SchemaLike): Compiled {
   const w = new BW();
@@ -328,10 +329,16 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): voi
 
     case "lazy": {
       w.u8(0x1a);
-      let blob: Uint8Array | null = null;
-      const getter = d.getter;
-      const cbid = regId(reg.lazy, () => (blob ??= compile(getter()).blob));
-      w.u64(cbid);
+      // one thunk per getter — recursive schemas must map to ONE cbid so
+      // the N-API lazytab resolves the subschema to a stable blob ptr
+      let th = lazyThunks.get(d.getter);
+      if (!th) {
+        let blob: Uint8Array | null = null;
+        const getter = d.getter;
+        th = () => (blob ??= compile(getter()).blob);
+        lazyThunks.set(d.getter, th);
+      }
+      w.u64(regId(reg.lazy, th));
       return;
     }
 

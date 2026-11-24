@@ -25,7 +25,7 @@ _azn_cbtab:     .quad 0          // cb table ptr (from init())
     .p2align 3
 _azn_errbuf:    .space 1048576   // 1MB err arena
 _azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
-_azn_lazytab:   .space 8192       // 1024 resolved lazy-subblob data ptrs
+_azn_lazytab:   .space 32768      // 4096 resolved lazy-subblob data ptrs
 _azn_obuf:      .space 8388608   // 8MB staged child results (return-input-if-unchanged)
 _azn_obuf_end:  .space 8
 _azn_ocur:      .space 8
@@ -166,9 +166,9 @@ _aznapi_initlazy:
     bl _napi_get_array_length
     cbnz x0, .Lil_fail
     ldr w9, [sp, #120]
-    mov x10, #1024
+    mov x10, #4096
     cmp x9, x10
-    b.hs .Lil_fail            // >1024 lazy schemas -> bail
+    b.hi .Lil_fail            // >4096 lazy schemas -> bail
     str x9, [sp, #128]        // n
     str xzr, [sp, #136]       // i
 .Lil_loop:
@@ -2530,7 +2530,7 @@ _azn_encval:
 // [op][u64 cbid] — lazytab[cbid] holds the precompiled sub-blob data ptr
 .Ln_lazy:
     ldr x9, [x27, #1]
-    mov x10, #1024
+    mov x10, #4096
     cmp x9, x10
     b.hs .Ln_lazy_punt
     AZ_ADR x10, _azn_lazytab
