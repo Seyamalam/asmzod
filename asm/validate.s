@@ -1423,6 +1423,8 @@ _az_strtoi:
     ldr x9, [x28, #1]          // n elems
     str x9, [sp, #40]
     str xzr, [sp, #72]         // failed = 0
+    mov x9, #-1
+    str x9, [sp, #104]         // deferred too_small limit (-1 = none)
     // elem node
     add x9, x27, #1
     ldr x10, [x9]
@@ -1437,19 +1439,9 @@ _az_strtoi:
     b.eq .Lar_chkmax
     cmp x12, x10
     b.hs .Lar_chkmax
-    // too_small array min
-    str x10, [sp, #80]
-    mov x7, #0             // default msg -> TS normalizer
-    mov x0, #8
-    AZ_ADR x1, .Lty_array
-    mov x2, #5
-    ldr x3, [sp, #80]
-    ucvtf d0, x3
-    fmov x3, d0
-    mov w4, #1
-    ldrb w5, [x27, #25]        // exactLen flag
-    bl _az_issue_size
-    cbnz x0, .Lv_ret
+    // too_small array min — zod orders item issues first, so defer the
+    // size issue until the element loop has run
+    str x10, [sp, #104]
     mov x9, #1
     str x9, [sp, #72]          // failed
 .Lar_chkmax:
@@ -1470,10 +1462,14 @@ _az_strtoi:
     fmov x3, d0
     mov w4, #1
     ldrb w5, [x27, #25]        // exactLen flag
+    AZ_ADR x9, az_nc_flag      // too_big is non-continuable: it aborts
+    mov w10, #1                // the node, so downstream checks don't run
+    strb w10, [x9]
     bl _az_issue_size
+    AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
     cbnz x0, .Lv_ret
-    mov x9, #1
-    str x9, [sp, #72]
+    b .Lv_invalid              // zod precheks the upper bound — no elements parse
 .Lar_size_done:
     // init loop state
     str x20, [sp, #32]         // saved pair pos
@@ -1573,6 +1569,25 @@ _az_strtoi:
     add x20, x20, x9
     b .Lv_ret
 .Lar_fail_pop:
+    // emit a deferred too_small — it lands after every element issue,
+    // matching zod's item-issues-then-size ordering
+    ldr x9, [sp, #104]
+    mov x10, #-1
+    cmp x9, x10
+    b.eq .Lar_fp0
+    str x9, [sp, #80]
+    mov x7, #0
+    mov x0, #8
+    AZ_ADR x1, .Lty_array
+    mov x2, #5
+    ldr x3, [sp, #80]
+    ucvtf d0, x3
+    fmov x3, d0
+    mov w4, #1
+    ldrb w5, [x27, #25]        // exactLen flag
+    bl _az_issue_size
+    cbnz x0, .Lv_ret
+.Lar_fp0:
     ldr x9, [sp, #40]
     mov x10, #40
     mul x9, x9, x10

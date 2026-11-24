@@ -59,6 +59,9 @@ function checkMsg(w: BW, msg: string | undefined) {
 }
 
 function emitStrChecks(w: BW, checks: any[]) {
+  // refine defs carry a `_zod`-shaped mirror record for core compat — not a
+  // compilable check; skip anything without a kind
+  checks = checks.filter((c) => c && c.kind !== undefined);
   w.u8(checks.length);
   for (const c of checks) {
     const code = STR_CHECK[c.kind];

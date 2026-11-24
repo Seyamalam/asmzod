@@ -6,8 +6,8 @@ import {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
-  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess, ZodPrefault,
-  ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema, _zodPattern,
+  ZodStringbool, ZodXor, ZodFile, ZodCodec, ZodTransform, ZodPreprocess, ZodPrefault, STRINGBOOL_TRUE, STRINGBOOL_FALSE,
+  ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema, _zodPattern, AsyncCheckError,
   deepPartial as _deepPartial,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _mkEncode as _encodeFn, _mkEncodeAsync as _encodeAsyncFn,
@@ -85,6 +85,36 @@ const mk = (Cls: any, type: string, params: any, checks: any[] = []): any => {
   if (fns.length) s = s.check(...fns);
   return s;
 };
+
+// definite = a synchronous rejection is proof of runtime rejection: no node in
+// the graph can suspend, transform, or run a user callback. Format fns and
+// min/max check records don't count — they're compiled predicates.
+function _definite(s: any, stack = new Set<any>()): boolean {
+  if (!s || typeof s !== "object" || stack.has(s)) return true;
+  const d = s._def;
+  if (!d) return true;
+  stack.add(s);
+  const kind = d.kind ?? d.type;
+  if (kind === "lazy" || kind === "custom" || kind === "catch" || kind === "transform" ||
+    kind === "refine" || kind === "superrefine" || kind === "effects" || kind === "pipe" ||
+    kind === "codec" || kind === "function" || kind === "promise" || kind === "instof") return false;
+  if (Array.isArray(d.checks))
+    for (const c of d.checks) if (c && (c.kind === "checkfn" || c.kind === "tx")) return false;
+  const rec = (x: any) => x && typeof x === "object" && x._def && !_definite(x, stack);
+  for (const k in d) {
+    const desc = Object.getOwnPropertyDescriptor(d, k);
+    if (!desc) continue;
+    let v: any;
+    if (desc.get) {
+      try { v = d[k]; } catch { return false; }
+    } else v = desc.value;
+    if (typeof v === "function") return false;
+    if (rec(v) || (Array.isArray(v) && v.some(rec))) return false;
+    if (v && typeof v === "object" && !Array.isArray(v))
+      for (const sv of Object.values(v)) if (rec(sv)) return false;
+  }
+  return true;
+}
 
 export const z = {
   /** Create a string schema. */
@@ -180,7 +210,17 @@ export const z = {
   xor: <T extends ZodTypeAny[]>(options: [...T], params?: any) =>
     new ZodXor<T>({ type: "union", options, error: params }),
   /** Parses boolean-ish strings ("true"/"yes"/"on"/"0"/"off"/...) to booleans. */
-  stringbool: (params?: any) => new ZodStringbool({ type: "stringbool", error: params }),
+  stringbool: (params?: any) => {
+    const cs = params?.case ?? "insensitive";
+    const norm = (a: string[]) => (cs === "insensitive" ? a.map((x) => x.toLowerCase()) : a);
+    const truthy = norm(params?.truthy ?? [...STRINGBOOL_TRUE]);
+    const falsy = norm(params?.falsy ?? [...STRINGBOOL_FALSE]);
+    return new ZodStringbool({
+      type: "stringbool", truthy, falsy, case: cs,
+      bag: { truthy, falsy, case: cs },
+      error: typeof params === "string" ? params : (params?.error ?? params?.message),
+    });
+  },
   /** File schema with .min/.max/.size (bytes) and .mime checks. */
   file: (params?: any) => mk(ZodFile, "file", params),
   /** Bidirectional codec: parse via decode (in->out), .encode() via encode. */
@@ -429,8 +469,8 @@ export const z = {
   parse: _parse(ZodError) as any,
   safeParseAsync: _safeParseAsync(ZodError) as any,
   parseAsync: _parseAsync(ZodError) as any,
-  validate: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params).success,
-  validateAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
+  validate: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.validate(data, params),
+  validateAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data, params).then((r) => r.success),
   /** codec decode — same as parse on codecs */
   decode: _parse(ZodError) as any,
   decodeAsync: _parseAsync(ZodError) as any,
@@ -574,7 +614,7 @@ export const z = {
         seen.add(sc);
         const d = sc._def;
         if (!d) return;
-        if (d.type === "lazy") throw new Error("z.compile does not support cyclic schemas; this schema must use the runtime parser");
+        if (d.type === "lazy") return;
         if (d.shape && Object.getOwnPropertySymbols(d.shape).length)
           throw new Error("z.compile does not support symbol-keyed object fields; this schema must use the runtime parser");
         for (const k of ["shape", "inner", "in", "out", "element", "keyType", "valueType", "catchall", "options", "items", "getter"])
@@ -583,6 +623,7 @@ export const z = {
       walk(s);
     }
     (s as any)._compile();
+    try { ((s as any)._def.bag ??= {}).validator ??= { definite: _definite(s) }; } catch { }
     return s;
   },
   /** memoize a schema factory */
@@ -631,7 +672,7 @@ export const z = {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodPromise, ZodFunction, ZodStringbool,
-  ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform, ZodPreprocess, ZodPrefault,
+  ZodXor, ZodFile, ZodCodec, ZodAlgoFormat, ZodTransform, ZodPreprocess, ZodPrefault, STRINGBOOL_TRUE, STRINGBOOL_FALSE,
   NEVER,
   ZodIssueCode: {
     invalid_type: "invalid_type",
@@ -696,6 +737,7 @@ function $constructor(name: string, init: (inst: any, def: any) => void) {
 export const core = {
   $ZodError, $ZodRealError: ZodRealError, ZodError, ZodRealError,
   $ZodType: ZodType, $ZodPipe: ZodPipe, $ZodCodec: ZodCodec, $ZodTransform: ZodTransform,
+  $ZodAsyncError: AsyncCheckError,
   _parse, _safeParse, _parseAsync, _safeParseAsync,
   _encode: _encodeFn, _encodeAsync: _encodeAsyncFn,
   _safeEncode: _safeEncodeFn, _safeEncodeAsync: _safeEncodeAsyncFn,

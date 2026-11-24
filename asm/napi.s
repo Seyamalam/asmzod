@@ -2809,18 +2809,16 @@ _azn_encval:
     ldr w9, [sp, #LN_A]       // u32 out-param
     str x9, [sp, #LN_A]       // n
     str xzr, [sp, #LN_H]      // failed-any
+    mov x13, #-1
+    str x13, [sp, #LN_I]      // deferred too_small limit (-1 = none)
     ldr x10, [x27, #9]        // min (u64, -1 = absent)
     cmp x10, #-1
     b.eq .Ln_arr_chkmax
     cmp x9, x10
     b.hs .Ln_arr_chkmax
-    mov x0, #0
-    mov x1, x10
-    ldr x2, [sp, #LN_A]
-    ldrb w3, [x27, #25]
-    AZ_ADR x4, .Ls_array
-    mov x5, #5
-    bl _az_issue_size_n
+    // defer the too_small emit until after the element loop — zod orders
+    // item issues first, size issue last
+    str x10, [sp, #LN_I]
     mov x9, #1
     str x9, [sp, #LN_H]
 .Ln_arr_chkmax:
@@ -2836,9 +2834,15 @@ _azn_encval:
     ldrb w3, [x27, #25]
     AZ_ADR x4, .Ls_array
     mov x5, #5
+    AZ_ADR x9, az_nc_flag      // too_big is non-continuable: it aborts the
+    mov w10, #1                // node before any element parses
+    strb w10, [x9]
     bl _az_issue_size_n
-    mov x9, #1
-    str x9, [sp, #LN_H]
+    AZ_ADR x9, az_nc_flag
+    strb wzr, [x9]
+    cmp x0, #-2
+    b.eq .Ln_ret
+    b .Ln_arr_failed
 .Ln_arr_lenok:
     // staging reservation: obuf[ocur .. ocur+n*8)
     AZ_ADR x9, _azn_ocur
@@ -2950,6 +2954,21 @@ _azn_encval:
     mov x0, #-10              // staging exhausted — whole parse falls back
     b .Ln_ret
 .Ln_arr_failed:
+    // emit a deferred too_small — after every element issue, matching
+    // zod's item-issues-then-size ordering
+    ldr x9, [sp, #LN_I]
+    cmp x9, #-1
+    b.eq .Ln_arr_fret
+    mov x0, #0
+    mov x1, x9
+    ldr x2, [sp, #LN_A]
+    ldrb w3, [x27, #25]
+    AZ_ADR x4, .Ls_array
+    mov x5, #5
+    bl _az_issue_size_n
+    cmp x0, #-2
+    b.eq .Ln_ret
+.Ln_arr_fret:
     mov x0, #-2
     b .Ln_ret
 .Ln_arr_fail:

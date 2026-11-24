@@ -16,6 +16,9 @@ const pendingRefineIssues: any[] = [];
 // stages queue here and safeParseAsync replays them sequentially —
 // transforms rewrite a moving value, refines gate on it.
 let asyncMode = false;
+// validate() walks with abort-early semantics — the first issue stops the
+// container walk (between children, never inside one)
+let earlyAbort = false;
 const pendingAsync: { type: string; fn: (v: unknown, ctx?: any) => unknown; msg?: string; cbid?: number; ipath?: any[] }[] = [];
 // the per-call parse ctx — catch callbacks finalize their issues against it
 let RUN_CTX: any;
@@ -210,7 +213,7 @@ function _memoRun(sch: any, data: unknown, empty: () => any, run: (out: any) => 
 }
 const isThenable = (v: unknown): v is Promise<unknown> =>
   !!v && typeof (v as any).then === "function";
-class AsyncCheckError extends Error {
+export class AsyncCheckError extends Error {
   constructor() { super("Encountered Promise during synchronous parse. Use .parseAsync() instead."); }
 }
 // engine-invoked cb wrapper: a thenable result means the check is async
@@ -717,6 +720,8 @@ export const _decodeAsync = _parseAsync;
 export const _safeDecode = _safeParse;
 export const _safeDecodeAsync = _safeParseAsync;
 
+const _boundKeys = new WeakMap<object, string[]>();
+
 export abstract class ZodType<Output = unknown, Input = Output> {
   readonly _output!: Output;
   readonly _input!: Input;
@@ -746,13 +751,24 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   private _recChecked = false;
   constructor() {
     ensureDefaultMemoizer();
-    // zod's $constructor binds proto methods onto each instance — detached
-    // `schema.parse` keeps `this`
-    for (const k of ["parse", "parseAsync", "safeParse", "safeParseAsync", "spa",
-                     "encode", "decode", "encodeAsync", "decodeAsync"]) {
-      const m = (this as any)[k];
-      if (typeof m === "function") (this as any)[k] = m.bind(this);
+    // zod's $constructor binds every proto method onto each instance —
+    // detached `schema.parse`/`schema.optional` keeps `this` (zod#5870)
+    const proto = Object.getPrototypeOf(this);
+    let keys = _boundKeys.get(proto);
+    if (!keys) {
+      keys = [];
+      let p: any = proto;
+      while (p && p !== Object.prototype) {
+        for (const k of Object.getOwnPropertyNames(p)) {
+          if (k === "constructor") continue;
+          const desc = Object.getOwnPropertyDescriptor(p, k);
+          if (desc?.value !== undefined && typeof desc.value === "function") keys.push(k);
+        }
+        p = Object.getPrototypeOf(p);
+      }
+      _boundKeys.set(proto, keys);
     }
+    for (const k of keys) (this as any)[k] = (this as any)[k].bind(this);
   }
 
   protected _hasFx(): boolean { return _hasFxWalk(this, new Set()); }
@@ -935,6 +951,18 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   protected _runChecksTS(data: unknown, checks: any[], baseResult?: any, carrier?: any): { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] } {
     const Base = (carrier?.constructor ?? this.constructor) as any;
     const carrierDef = carrier?._def ?? this._def;
+    // zod's array flow: checks evaluate on the payload before elements walk —
+    // a rewriting check (tx) changes what the size bounds see, so when tx
+    // records exist the bounds leave the engine node and evaluate here, in
+    // check order, on the rewritten value
+    if (carrierDef.type === "array" && checks.some((c) => c?.kind === "tx") &&
+        (carrierDef.minLen !== undefined || carrierDef.maxLen !== undefined || carrierDef.exactLen !== undefined)) {
+      const { minLen, maxLen, exactLen } = carrierDef;
+      const sized = [...checks, { kind: "_arrsize", minLen, maxLen, exactLen, _minMsg: carrierDef._minMsg, _maxMsg: carrierDef._maxMsg }];
+      const stripped = new Base({ ...carrierDef, checks: [], minLen: undefined, maxLen: undefined, exactLen: undefined });
+      const r2 = baseResult ?? stripped._run(data);
+      return this._runChecksTS(data, sized, r2, stripped);
+    }
     const r = baseResult ?? new Base({ ...carrierDef, checks: [] })._run(data);
     // zod: a failed base implicitly aborts the payload — only `when`-gated
     // checks still evaluate (length/size bounds on values carrying the field)
@@ -969,6 +997,25 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           return { ok: true as const, value: v };
         }
         v = nv;
+        continue;
+      }
+      // array bounds deferred behind a rewriting check — evaluated on the
+      // rewritten payload, in check order; a too_big here is an ordinary
+      // (continuable) check failure since the rewrite ended the gate
+      if (c.kind === "_arrsize") {
+        const len = Array.isArray(v) ? v.length : undefined;
+        const emit = (code: string, lim: number, exact: boolean, msg?: string) => issues.push({
+          code, origin: "array", [code === "too_small" ? "minimum" : "maximum"]: lim,
+          inclusive: true, exact, path: [],
+          message: msg ?? `Too ${code === "too_small" ? "small" : "big"}: expected array to have ${code === "too_small" ? ">=" : "<="}${lim} items`,
+        });
+        if (len !== undefined) {
+          if (c.exactLen !== undefined && len !== c.exactLen) emit(len < c.exactLen ? "too_small" : "too_big", c.exactLen, true, c._minMsg);
+          else {
+            if (c.minLen !== undefined && len < c.minLen) emit("too_small", c.minLen, false, c._minMsg);
+            if (c.maxLen !== undefined && len > c.maxLen) emit("too_big", c.maxLen, false, c._maxMsg);
+          }
+        }
         continue;
       }
       // format records carrying a JS predicate (url/jwt/base64/uuid-version/
@@ -1065,19 +1112,21 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   refine(fn: (v: Output) => boolean, message?: any): ZodEffects<this, Output> {
     const p = _checkParams(message);
-    return new ZodEffects({
+    const def: any = {
       type: "refine", inner: this,
       cbid: regId(reg.refine, guardAsync(fn as (v: unknown) => unknown)),
       fn, kind: "refine", message: p.message, error: p.error,
       path: p.path, params: p.params, abort: p.abort, when: p.when,
-    });
+    };
+    Object.defineProperty(def, "checks", { value: [{ _zod: { def } }], enumerable: false, writable: true, configurable: true });
+    return new ZodEffects(def);
   }
   refinement(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
     return this.refine(fn, message);
   }
   superRefine(fn: (v: Output, ctx: { addIssue: (i: any) => void }) => void, params?: any): ZodEffects<this, Output> {
     const p = _checkParams(params);
-    return new ZodEffects({
+    const def: any = {
       type: "refine", inner: this,
       cbid: regId(reg.refine, guardAsync(((v: unknown) => {
         let ok = true;
@@ -1088,7 +1137,9 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       }) as (v: unknown) => unknown)),
       fn, kind: "superrefine", message: undefined, when: p.when, abort: p.abort,
       error: p.error, path: p.path, params: p.params,
-    });
+    };
+    Object.defineProperty(def, "checks", { value: [{ _zod: { def } }], enumerable: false, writable: true, configurable: true });
+    return new ZodEffects(def);
   }
   transform<N>(fn: (v: Output) => N): ZodPipe<this, ZodTransform> {
     return new ZodPipe({ type: "pipe", in: this, out: new ZodTransform(fn as (v: unknown) => unknown) });
@@ -1179,6 +1230,17 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
   safeParseAsync(data: unknown, params?: any): Promise<SafeParseResult<Output>> {
     return _safeParseAsync(ZodRealError)(this, data, params);
+  }
+
+  validate(data: unknown, params?: any): boolean {
+    const prev = earlyAbort;
+    earlyAbort = true;
+    try { return this.safeParse(data, params).success; }
+    finally { earlyAbort = prev; }
+  }
+
+  async validateAsync(data: unknown, params?: any): Promise<boolean> {
+    return (await this.safeParseAsync(data, params)).success;
   }
 
   // async run producing a raw {ok,value|issues} result — the public
@@ -2115,7 +2177,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     // JS-callback effects anywhere below need TS-level orchestration — the
     // engine skips a node's own checks once its children fail, while zod runs
     // them on the best-effort payload
-    if (this._hasFx()) {
+    if (this._hasFx() || earlyAbort) {
       const rr = this._runTSObj(input);
       _stampIss(rr, this, data);
       return rr;
@@ -2203,13 +2265,14 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
       } else {
         out[k] = val;
       }
+      if (earlyAbort && isAborted(issues)) break;
     }
     const extra = Object.keys(view).filter((k) => !consumed.has(k));
     if (d.mode === "strict" && extra.length) {
       issues.push({ code: "unrecognized_keys", keys: extra, path: [] } as any);
     } else if (d.mode === "passthrough") {
       for (const k of extra) if (k !== "__proto__") out[k] = view[k];
-    } else if (d.catchall) {
+    } else if (d.catchall && !(earlyAbort && isAborted(issues))) {
       for (const k of extra) {
         if (k === "__proto__") continue;
         const mark = pendingAsync.length;
@@ -2338,14 +2401,28 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
     return r;
   }
   private _runArrImpl(data: unknown) {
+    // rewriting checks precede the element walk in zod — route through
+    // _runChecksTS so tx transforms land before the size bounds evaluate
+    if ((this._def.checks as any[])?.some((c) => c?.kind === "tx")) return super._runImpl(data);
     // recursive-capable subtree: the engine can't close a reference cycle,
     // so recursive arrays validate per-element at TS level through the memo
-    if (!this._hasFx() && !(MEMO && Array.isArray(data) && this._isRec())) return super._runImpl(data);
+    if (!this._hasFx() && !earlyAbort && !(MEMO && Array.isArray(data) && this._isRec())) return super._runImpl(data);
     if (!Array.isArray(data)) return super._runImpl(data);
     const el = this._def.element as any;
     const d = this._def;
     return _memoRun(this, data, () => new Array(data.length), (out: any[]) => {
       const issues: any[] = [];
+      // zod precheks the upper bound before any element runs — a too_big
+      // payload aborts with no item issues and no downstream checks
+      const over = d.exactLen !== undefined ? (data.length > d.exactLen ? d.exactLen : undefined)
+        : (d.maxLen !== undefined && data.length > d.maxLen ? d.maxLen : undefined);
+      if (over !== undefined) {
+        const msg = d.exactLen !== undefined ? d._minMsg : d._maxMsg;
+        issues.push({ code: "too_big", origin: "array", maximum: over, inclusive: true,
+          exact: d.exactLen !== undefined, path: [],
+          message: msg ?? `Too big: expected array to have <=${over} items` });
+        return { ok: false as const, issues, aborted: true };
+      }
       for (let i = 0; i < data.length; i++) {
         const mark = pendingAsync.length;
         const r = el._run(data[i]);
@@ -2353,6 +2430,7 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
           (pendingAsync[j] as any).path = [i, ...((pendingAsync[j] as any).path ?? [])];
         if (r.ok) out[i] = r.value;
         else for (const iss of r.issues) issues.push({ ...iss, path: [i, ...(iss.path ?? [])] });
+        if (earlyAbort && isAborted(issues)) break;
       }
       const lenIssue = (code: string, lim: number, exact: boolean, msg?: string) => issues.push({
         code, origin: "array", [code === "too_small" ? "minimum" : "maximum"]: lim,
@@ -2396,7 +2474,7 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
     // optoutStart, so optoutStart===n means the engine path is equivalent
     let optinStart = n; while (optinStart > 0 && items[optinStart - 1]?._zod?.optin !== undefined) optinStart--;
     let optoutStart = n; while (optoutStart > 0 && items[optoutStart - 1]?._zod?.optout === "optional") optoutStart--;
-    if (optoutStart === n && !this._hasFx() && !(MEMO && Array.isArray(data) && this._isRec()))
+    if (optoutStart === n && !this._hasFx() && !earlyAbort && !(MEMO && Array.isArray(data) && this._isRec()))
       return super._runImpl(data);
     if (!Array.isArray(data)) return super._runImpl(data);
     return _memoRun(this, data, () => new Array(Math.max(data.length, optoutStart)), (out) => {
@@ -2416,6 +2494,8 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
       // work queues exactly like zod's parallel itemResults
       const stageMarks: number[] = [];
       const results: any[] = new Array(n);
+      // fixed items parse as a unit — an abort inside the unit doesn't skip
+      // later items, but it does keep `rest` (separate children) from running
       for (let i = 0; i < n; i++) {
         const mark = pendingAsync.length;
         stageMarks[i] = mark;
@@ -2424,9 +2504,10 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
           (pendingAsync[j] as any).path = [i, ...((pendingAsync[j] as any).path ?? [])];
         results[i] = r;
       }
+      const tupleAborted = earlyAbort && results.some((r) => r && !r.ok && isAborted(r.issues));
       stageMarks[n] = pendingAsync.length;
       // rest validates input.slice(items.length) — every fixed index present
-      if (rest) {
+      if (rest && !tupleAborted) {
         for (let i = n; i < data.length; i++) {
           const mark = pendingAsync.length;
           const r = rest._run(data[i]);
@@ -2434,6 +2515,7 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
             (pendingAsync[j] as any).path = [i, ...((pendingAsync[j] as any).path ?? [])];
           if (!r.ok) for (const iss of r.issues) issues.push({ ...iss, path: [i, ...(iss.path ?? [])] });
           out[i] = r.ok ? r.value : (r as any).value;
+          if (earlyAbort && !r.ok && isAborted(r.issues)) break;
         }
       }
       // handleTupleResults: ordered walk — absent optin==="optional" slots
@@ -2722,6 +2804,11 @@ export function _encode(s: any, v: any): any {
       // backward direction: defaults are decode-only — the raw value goes
       // through inner validation, so undefined earns invalid_type
       return _encode(d.inner ?? d.innerType, v);
+    case "stringbool": {
+      if (v === true) return (s as any)._lists().t[0];
+      if (v === false) return (s as any)._lists().f[0];
+      throw new ZodError([{ code: "invalid_type", expected: "boolean", input: v, path: [], message: "Invalid input: expected boolean" } as any]);
+    }
     case "catch": return _encode(d.inner ?? d.innerType, v);
     case "readonly": case "brand": case "success":
       return _encode(d.inner ?? d.innerType, v);
@@ -2794,6 +2881,9 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
       // zod sets into the payload map unconditionally — payload values are
       // the raw key/value on failure
       out.set(kr.ok ? kr.value : k, vr.ok ? vr.value : v);
+      // an entry parses as a unit — the stop lands between entries, so the
+      // key/value pair of the aborting entry has already fully run
+      if (earlyAbort && isAborted(issues)) break;
     }
     return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
   }
@@ -2817,6 +2907,7 @@ export class ZodSet<V extends ZodTypeAny>
       const r = (valueType as any)._run(v);
       if (r.ok) out.add(r.value);
       else issues.push(...r.issues);
+      if (earlyAbort && isAborted(issues)) break;
     }
     return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
   }
@@ -2984,7 +3075,10 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
         });
       for (const k of both) if (!aggregated.includes(k) && keyIssues.has(k)) issues.push(keyIssues.get(k));
     }
-    if (issues.length) return { ok: false as const, issues, aborted: isAborted(issues) };
+    // aborted payloads bail before the merge; continuable issues don't settle
+    // the walk — the interpreter reaches the merge and throws on conflict
+    const hardFail = isAborted(issues);
+    if (issues.length && hardFail) return { ok: false as const, issues, aborted: true };
     // a side that failed only via reconciled key issues still contributes its
     // parsed-so-far value; effects results carry it, plain objects recover it
     // by re-running on the input minus that side's rejected keys
@@ -3011,6 +3105,7 @@ export class ZodIntersection<A extends ZodTypeAny, B extends ZodTypeAny> extends
     const merged = _mergeValues(valueFor(this._def.left, l, "l"), valueFor(this._def.right, r, "r"));
     if (!merged.valid)
       throw new Error(`Unmergable intersection. Error path: ${JSON.stringify(merged.mergeErrorPath)}`);
+    if (issues.length) return { ok: false as const, issues, aborted: false, value: merged.data } as any;
     return { ok: true as const, value: merged.data };
   }
 }
@@ -3167,24 +3262,33 @@ export { ZodError, type ZodIssue };
 
 // ---------- zod 4 factories beyond the compiled core (TS layer) ----------
 
-const STRINGBOOL_TRUE = new Set(["true", "1", "yes", "on", "y", "enabled"]);
-const STRINGBOOL_FALSE = new Set(["false", "0", "no", "off", "n", "disabled"]);
+export const STRINGBOOL_TRUE = new Set(["true", "1", "yes", "on", "y", "enabled"]);
+export const STRINGBOOL_FALSE = new Set(["false", "0", "no", "off", "n", "disabled"]);
 
 export class ZodStringbool extends ZodType<boolean, unknown> {
-  constructor(_def: any) { super(); this._def = _def; }
+  constructor(_def: any) {
+    super();
+    this._def = _def;
+    (this as any)._zod.bag = { truthy: _def.truthy, falsy: _def.falsy, case: _def.case };
+  }
+  _lists(): { t: string[]; f: string[] } {
+    const d = this._def;
+    const t = d.truthy ?? [...STRINGBOOL_TRUE];
+    const f = d.falsy ?? [...STRINGBOOL_FALSE];
+    if (d.case === "sensitive") return { t, f };
+    return { t: t.map((x: string) => x.toLowerCase()), f: f.map((x: string) => x.toLowerCase()) };
+  }
   protected override _runImpl(data: unknown) {
     if (typeof data !== "string")
       return { ok: false as const, issues: [typeIssue("string", data)], aborted: true };
-    const s = data.toLowerCase();
-    if (STRINGBOOL_TRUE.has(s)) return { ok: true as const, value: true };
-    if (STRINGBOOL_FALSE.has(s)) return { ok: true as const, value: false };
-    const values = [...STRINGBOOL_TRUE, ...STRINGBOOL_FALSE];
+    const { t, f } = this._lists();
+    const s = this._def.case === "sensitive" ? data : data.toLowerCase();
+    if (t.includes(s)) return { ok: true as const, value: true };
+    if (f.includes(s)) return { ok: true as const, value: false };
+    const values = [...(this._def.truthy ?? [...STRINGBOOL_TRUE]), ...(this._def.falsy ?? [...STRINGBOOL_FALSE])];
     return {
       ok: false as const, aborted: true,
-      issues: [{
-        code: "invalid_value", expected: "stringbool", values,
-        path: [], message: `Invalid option: expected one of ${values.map((v) => `"${v}"`).join("|")}`,
-      }] as any[],
+      issues: [{ code: "invalid_value", expected: "stringbool", values, path: [], inst: this, schema: this }] as any[],
     };
   }
 }
@@ -3249,6 +3353,8 @@ export class ZodFile extends ZodType<File, File> {
 // plus single-check runs against a plain string base
 function _encChecks(v: any, checks: any[] | undefined): any {
   for (const c of checks ?? []) {
+    // `_zod`-shaped mirror records on refine defs aren't runnable checks
+    if (c && typeof c === "object" && c.kind === undefined && c.fn === undefined) continue;
     if (c?.kind === "tx") v = c.tx(v);
     else if (typeof c?.fn === "function") {
       const nv = c.fn(v);

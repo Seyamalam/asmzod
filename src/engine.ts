@@ -378,13 +378,20 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
         throw FAILED;
       }
       const before = c.issues.length;
-      if (min !== -1n && BigInt(v.length) < min) sizeFail(c, "too_small", "array", min, true, exact, undefined);
-      if (max !== -1n && BigInt(v.length) > max) sizeFail(c, "too_big", "array", max, true, exact, undefined);
+      // zod precheks the upper bound before any element runs — a too_big
+      // payload is non-continuable: no item issues, no downstream checks
+      if (max !== -1n && BigInt(v.length) > max) {
+        sizeFail(c, "too_big", "array", max, true, exact, undefined, true);
+        throw FAILED;
+      }
       const out: unknown[] = new Array(v.length);
       for (let i = 0; i < v.length; i++) {
         const res = atKey(c, i, () => tryValidate(new R(r.b, epos), v[i], c));
         if (res.ok) out[i] = res.value;
       }
+      // item issues precede the size issue — zod emits too_small after the
+      // element walk, too_big is precheked before it
+      if (min !== -1n && BigInt(v.length) < min) sizeFail(c, "too_small", "array", min, true, exact, undefined);
       if (c.issues.length !== before) throw FAILED;
       return out;
     }
