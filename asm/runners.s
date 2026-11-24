@@ -496,8 +496,25 @@ _az_run_strchecks:
     ldr w9, [sp, #80]
     cmp w9, #0x0B
     b.eq .Lsc_lc_scan
-    // uppercase: any 'a'-'z' -> bad
+    // uppercase: any 'a'-'z' -> bad. NEON screen 16B/iter, scalar tail.
 .Lsc_uc_scan:
+    sub x11, x15, x16
+    cmp x11, #16
+    b.lo .Lsc_uc_sc
+    movi v8.16b, #'a'
+    movi v9.16b, #26
+.Lsc_uc_v:
+    ldr q0, [x14, x16]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b   // 0xFF per 'a'-'z' byte
+    umaxv b2, v1.16b
+    umov w11, v2.b[0]
+    cbnz w11, .Lsc_case_bad
+    add x16, x16, #16
+    sub x11, x15, x16
+    cmp x11, #16
+    b.hs .Lsc_uc_v
+.Lsc_uc_sc:
     cmp x16, x15
     b.hs .Lsc_case_done
     ldrb w11, [x14, x16]
@@ -507,8 +524,25 @@ _az_run_strchecks:
     b.ls .Lsc_case_bad
 .Lsc_uc_n:
     add x16, x16, #1
-    b .Lsc_uc_scan
+    b .Lsc_uc_sc
 .Lsc_lc_scan:
+    sub x11, x15, x16
+    cmp x11, #16
+    b.lo .Lsc_lc_sc
+    movi v8.16b, #'A'
+    movi v9.16b, #26
+.Lsc_lc_v:
+    ldr q0, [x14, x16]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b
+    umaxv b2, v1.16b
+    umov w11, v2.b[0]
+    cbnz w11, .Lsc_case_bad
+    add x16, x16, #16
+    sub x11, x15, x16
+    cmp x11, #16
+    b.hs .Lsc_lc_v
+.Lsc_lc_sc:
     cmp x16, x15
     b.hs .Lsc_case_done
     ldrb w11, [x14, x16]
@@ -518,7 +552,7 @@ _az_run_strchecks:
     b.ls .Lsc_case_bad
 .Lsc_lc_n:
     add x16, x16, #1
-    b .Lsc_lc_scan
+    b .Lsc_lc_sc
 .Lsc_case_bad:
     mov w10, #1
 .Lsc_case_done:

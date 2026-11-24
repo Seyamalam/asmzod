@@ -17,13 +17,13 @@
 - [x] 14. Shared issue-shape dictionary across parseMany failures
 
 ## K — SIMD string checks (NEON)
-- [ ] 15. UTF-16 length counting via NEON
-- [ ] 16. lowercase/uppercase ASCII check vectorized
-- [ ] 17. HEX check via NEON nibble classification
-- [ ] 18. BASE64 alphabet via vtbl nibble lookup
-- [ ] 19. NANOID/CUID2/ULID alphabets via NEON
+- [x] 15. UTF-16 length counting via NEON
+- [x] 16. lowercase/uppercase ASCII check vectorized
+- [x] 17. HEX check via NEON nibble classification
+- [x] 18. BASE64 alphabet via vtbl nibble lookup
+- [x] 19. NANOID/CUID2/ULID alphabets via NEON
 - [ ] 20. Email fast screen via NEON
-- [ ] 21. UUID hex-digit runs vectorized
+- [x] 21. UUID hex-digit runs vectorized
 - [ ] 22. startsWith/endsWith/includes long-needle NEON
 - [ ] 23. Object key-name compares via NEON (≥16B)
 - [ ] 24. Enum/literal string compares vectorized

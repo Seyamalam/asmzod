@@ -9,8 +9,34 @@
     .globl _az_utf16_units
     AZ_HIDDEN _az_utf16_units
 _az_utf16_units:
-    mov x9, #0               // units
+    // units = bytes - continuation bytes (0x80-0xBF). NEON: count
+    // continuations 16B/iter via (b-0x80) unsigned< 0x40
     mov x10, #0              // i
+    mov x9, #0               // units
+    cmp x1, #32
+    b.lo .Luu_tail0
+    movi v8.16b, #0x80
+    movi v9.16b, #0x40
+    movi v4.16b, #0          // cont accumulator
+.Luu_simd:
+    ldr q0, [x0, x10]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b   // 0xFF per continuation
+    sub v4.16b, v4.16b, v1.16b
+    add x10, x10, #16
+    sub x11, x1, x10
+    cmp x11, #16
+    b.hs .Luu_simd
+    uaddlv h4, v4.16b
+    fmov w11, h4
+    sub x9, x10, x11         // simd units = bytes - continuations
+.Luu_tail0:
+    mov x10, x9              // scalar tail resumes at byte = units+conts
+    // recompute byte index: units so far + conts — we have x10 already at
+    // the right byte offset only if x9==0; for the simd path byte index
+    // IS x10 (loop left it at first tail byte). Just use x10 and keep
+    // counting from x9.
+    b .Luu_loop
 .Luu_loop:
     cmp x10, x1
     b.hs .Luu_done
@@ -237,13 +263,72 @@ _az_is_email:
 _az_is_uuid:
     cmp x1, #36
     b.ne .Luid_no
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    mov x9, x0                 // keep ptr in x9 — .Luid_scan clobbers x0
+    // NEON: 3 masked 16B scans — hex digits everywhere, '-' allowed only
+    // at mask positions {8,13} / {18,23} / {23} (loads at 0, 16, 20)
+    movi v8.16b, #'0'
+    movi v9.16b, #10
+    movi v10.16b, #'A'
+    movi v11.16b, #'a'
+    movi v12.16b, #6
+    movi v13.16b, #'-'
+    movi v15.16b, #0
+    AZ_ADR x11, .Luid_mA
+    ldr q14, [x11]
+    ldr q0, [x9]
+    bl .Luid_scan
+    cbnz w0, .Luid_fail
+    AZ_ADR x11, .Luid_mB
+    ldr q14, [x11]
+    ldr q0, [x9, #16]
+    bl .Luid_scan
+    cbnz w0, .Luid_fail
+    AZ_ADR x11, .Luid_mC
+    ldr q14, [x11]
+    ldr q0, [x9, #20]
+    bl .Luid_scan
+    cbnz w0, .Luid_fail
+    // version nibble at pos 14
+    cbz x2, .Luid_ver
+    ldrb w14, [x9, #14]
+    sub w15, w14, #'0'
+    cmp w15, w2
+    b.ne .Luid_fail
+.Luid_ver:
+    mov w0, #1
+    ldp x29, x30, [sp], #32
+    ret
+.Luid_fail:
+    mov w0, #0
+    ldp x29, x30, [sp], #32
+    ret
+// .Luid_scan: q0=bytes, q14=dash-mask -> w0=1 if any invalid
+.Luid_scan:
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b    // 0-9
+    sub v2.16b, v0.16b, v10.16b
+    cmhi v2.16b, v12.16b, v2.16b   // A-F
+    sub v3.16b, v0.16b, v11.16b
+    cmhi v3.16b, v12.16b, v3.16b   // a-f
+    orr v1.16b, v1.16b, v2.16b
+    orr v1.16b, v1.16b, v3.16b
+    cmeq v4.16b, v0.16b, v13.16b   // '-'
+    and v4.16b, v4.16b, v14.16b    // '-' only at mask positions
+    orr v1.16b, v1.16b, v4.16b
+    cmeq v4.16b, v1.16b, v15.16b
+    umaxv b4, v4.16b
+    umov w0, v4.b[0]
+    ret
+.Luid_slow:
     mov x9, #0
     mov x10, #0              // group idx 0..4
     // group lengths
     AZ_ADR x11, .Luid_groups
 .Luid_grp:
     cmp x10, #5
-    b.hs .Luid_ver
+    b.hs .Luid_sver
     ldrb w12, [x11, x10]     // group len
     mov x13, #0
 .Luid_hex:
@@ -278,20 +363,24 @@ _az_is_uuid:
 .Luid_grp_end:
     add x10, x10, #1
     cmp x10, #5
-    b.hs .Luid_ver
+    b.hs .Luid_sver
     // expect '-'
     ldrb w14, [x0, x9]
     cmp w14, #'-'
     b.ne .Luid_no
     add x9, x9, #1
     b .Luid_grp
-.Luid_ver:
+.Luid_sver:
     mov w0, #1
     ret
 .Luid_no:
     mov w0, #0
     ret
     AZ_RODATA
+    .p2align 4
+.Luid_mA: .byte 0,0,0,0,0,0,0,0,0xff,0,0,0,0,0xff,0,0   // pos 8,13
+.Luid_mB: .byte 0,0,0xff,0,0,0,0,0xff,0,0,0,0,0,0,0,0   // pos 18,23 (base 16)
+.Luid_mC: .byte 0,0,0,0xff,0,0,0,0,0,0,0,0,0,0,0,0,0    // pos 23 (base 20)
 .Luid_groups: .byte 8,4,4,4,12
     .text
 
@@ -301,6 +390,40 @@ _az_is_uuid:
 _az_is_ulid:
     cmp x1, #26
     b.ne .Lul_no
+    // 26 bytes = two overlapping 16B loads (0 and 10)
+    movi v8.16b, #'0'
+    movi v9.16b, #10
+    movi v10.16b, #'A'
+    movi v11.16b, #26
+    movi v12.16b, #'I'
+    movi v13.16b, #'L'
+    movi v14.16b, #'O'
+    movi v15.16b, #'U'
+    mov x9, #0
+.Lul_v:
+    ldr q0, [x0, x9]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b      // digit
+    sub v2.16b, v0.16b, v10.16b
+    cmhi v2.16b, v11.16b, v2.16b     // A-Z
+    cmeq v3.16b, v0.16b, v12.16b     // I
+    cmeq v4.16b, v0.16b, v13.16b     // L
+    cmeq v5.16b, v0.16b, v14.16b     // O
+    cmeq v6.16b, v0.16b, v15.16b     // U
+    orr v3.16b, v3.16b, v4.16b
+    orr v3.16b, v3.16b, v5.16b
+    orr v3.16b, v3.16b, v6.16b       // ILOU mask
+    bic v2.16b, v2.16b, v3.16b       // letter & !ILOU
+    orr v1.16b, v1.16b, v2.16b       // valid
+    movi v7.16b, #0
+    cmeq v7.16b, v1.16b, v7.16b      // FF where invalid
+    umaxv b7, v7.16b
+    umov w11, v7.b[0]
+    cbnz w11, .Lul_no
+    cmp x9, #10
+    b.eq .Lul_yes
+    mov x9, #10
+    b .Lul_v
     mov x9, #0
 .Lul_l:
     cmp x9, #26
@@ -341,6 +464,38 @@ _az_is_ulid:
 _az_is_nanoid:
     cmp x1, #21
     b.ne .Lnn_no
+    // 21 bytes = two overlapping 16B loads (0 and 5)
+    movi v8.16b, #'0'
+    movi v9.16b, #10
+    movi v10.16b, #'A'
+    movi v11.16b, #'a'
+    movi v12.16b, #26
+    movi v13.16b, #'_'
+    movi v14.16b, #'-'
+    movi v15.16b, #0
+    mov x9, #0
+.Lnn_v:
+    ldr q0, [x0, x9]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b      // 0-9
+    sub v2.16b, v0.16b, v10.16b
+    cmhi v2.16b, v12.16b, v2.16b     // A-Z
+    sub v3.16b, v0.16b, v11.16b
+    cmhi v3.16b, v12.16b, v3.16b     // a-z
+    cmeq v4.16b, v0.16b, v13.16b     // _
+    cmeq v5.16b, v0.16b, v14.16b     // -
+    orr v1.16b, v1.16b, v2.16b
+    orr v1.16b, v1.16b, v3.16b
+    orr v4.16b, v4.16b, v5.16b
+    orr v1.16b, v1.16b, v4.16b
+    cmeq v6.16b, v1.16b, v15.16b
+    umaxv b6, v6.16b
+    umov w11, v6.b[0]
+    cbnz w11, .Lnn_no
+    cmp x9, #5
+    b.eq .Lnn_yes
+    mov x9, #5
+    b .Lnn_v
     mov x9, #0
 .Lnn_l:
     cmp x9, #21
@@ -389,6 +544,30 @@ _az_is_cuid2:
     b.hi .Lcu_no
     mov x9, #1
 .Lcu_l:
+    sub x11, x1, x9
+    cmp x11, #16
+    b.lo .Lcu_sc
+    movi v8.16b, #'0'
+    movi v9.16b, #10
+    movi v10.16b, #'a'
+    movi v11.16b, #26
+    movi v12.16b, #0
+.Lcu_v:
+    ldr q0, [x0, x9]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b
+    sub v2.16b, v0.16b, v10.16b
+    cmhi v2.16b, v11.16b, v2.16b
+    orr v1.16b, v1.16b, v2.16b
+    cmeq v3.16b, v1.16b, v12.16b
+    umaxv b3, v3.16b
+    umov w11, v3.b[0]
+    cbnz w11, .Lcu_no
+    add x9, x9, #16
+    sub x11, x1, x9
+    cmp x11, #16
+    b.hs .Lcu_v
+.Lcu_sc:
     cmp x9, x1
     b.hs .Lcu_yes
     ldrb w11, [x0, x9]
@@ -403,7 +582,7 @@ _az_is_cuid2:
     b.hi .Lcu_no
 .Lcu_ok:
     add x9, x9, #1
-    b .Lcu_l
+    b .Lcu_sc
 .Lcu_yes:
     mov w0, #1
     ret
@@ -418,13 +597,58 @@ _az_is_base64:
     cbz x1, .Lb64_no
     and x9, x1, #3
     cbnz x9, .Lb64_no
-    mov x9, #0
-.Lb64_l:
-    cmp x9, x1
-    b.hs .Lb64_yes
-    ldrb w11, [x0, x9]
+    // body = len minus trailing '=' (max 2). SIMD alphabet-scan body,
+    // then pad bytes must all be '='.
+    mov x13, x1               // body end
+    sub x10, x1, #1
+    ldrb w11, [x0, x10]
     cmp w11, #'='
-    b.eq .Lb64_pad
+    b.ne .Lb64_body
+    sub x13, x13, #1
+    sub x10, x1, #2
+    ldrb w11, [x0, x10]
+    cmp w11, #'='
+    b.ne .Lb64_body
+    sub x13, x13, #1
+.Lb64_body:
+    mov x9, #0
+    cmp x13, #16
+    b.lo .Lb64_l
+    movi v8.16b, #'A'
+    movi v9.16b, #26
+    movi v10.16b, #'a'
+    movi v11.16b, #'0'
+    movi v12.16b, #10
+    movi v13.16b, #'+'
+    movi v14.16b, #'/'
+    movi v15.16b, #0
+.Lb64_v:
+    ldr q0, [x0, x9]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b    // A-Z
+    sub v2.16b, v0.16b, v10.16b
+    cmhi v2.16b, v9.16b, v2.16b    // a-z
+    sub v3.16b, v0.16b, v11.16b
+    cmhi v3.16b, v12.16b, v3.16b   // 0-9
+    cmeq v4.16b, v0.16b, v13.16b   // '+'
+    cmeq v5.16b, v0.16b, v14.16b   // '/'
+    orr v1.16b, v1.16b, v2.16b
+    orr v1.16b, v1.16b, v3.16b
+    orr v4.16b, v4.16b, v5.16b
+    orr v1.16b, v1.16b, v4.16b
+    cmeq v4.16b, v1.16b, v15.16b   // FF where NOT base64
+    umaxv b4, v4.16b
+    umov w11, v4.b[0]
+    cbnz w11, .Lb64_no
+    add x9, x9, #16
+    sub x11, x13, x9
+    cmp x11, #16
+    b.hs .Lb64_v
+    b .Lb64_l
+.Lb64_l:
+    cmp x9, x13
+    b.hs .Lb64_pad
+    ldrb w11, [x0, x9]
     cmp w11, #'0'
     b.lo .Lb64_c
     cmp w11, #'9'
@@ -449,11 +673,8 @@ _az_is_base64:
     add x9, x9, #1
     b .Lb64_l
 .Lb64_pad:
-    // '=' allowed only as last 1-2 chars
-    sub x10, x1, x9
-    cmp x10, #2
-    b.hi .Lb64_no
-    // rest must all be '='
+    // pad region [x13, x1) must be all '='
+    mov x9, x13
 .Lb64_pl:
     cmp x9, x1
     b.hs .Lb64_yes
@@ -475,6 +696,33 @@ _az_is_base64:
 _az_is_hex:
     cbz x1, .Lhx_no
     mov x9, #0
+    cmp x1, #16
+    b.lo .Lhx_l
+    // NEON: in-range(b,'0','9') | ('A','F') | ('a','f') per byte
+    movi v8.16b, #'0'
+    movi v9.16b, #10
+    movi v10.16b, #'A'
+    movi v11.16b, #'a'
+    movi v12.16b, #6
+    movi v13.16b, #0
+.Lhx_v:
+    ldr q0, [x0, x9]
+    sub v1.16b, v0.16b, v8.16b
+    cmhi v1.16b, v9.16b, v1.16b    // digit
+    sub v2.16b, v0.16b, v10.16b
+    cmhi v2.16b, v12.16b, v2.16b   // A-F
+    sub v3.16b, v0.16b, v11.16b
+    cmhi v3.16b, v12.16b, v3.16b   // a-f
+    orr v1.16b, v1.16b, v2.16b
+    orr v1.16b, v1.16b, v3.16b
+    cmeq v4.16b, v1.16b, v13.16b   // FF where NOT hex
+    umaxv b4, v4.16b
+    umov w11, v4.b[0]
+    cbnz w11, .Lhx_no
+    add x9, x9, #16
+    sub x11, x1, x9
+    cmp x11, #16
+    b.hs .Lhx_v
 .Lhx_l:
     cmp x9, x1
     b.hs .Lhx_yes
