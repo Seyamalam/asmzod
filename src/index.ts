@@ -7,11 +7,11 @@ import {
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
   ZodStringbool, ZodXor, ZodFile, ZodCodec,
-  ZodAlgoFormat, luhnCheck, ibanCheck, _encode,
+  ZodAlgoFormat, luhnCheck, ibanCheck, _encode, _encodeScoped, isRecursiveSchema,
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
-import { configure, setErrorMap, getErrorMap } from "./shared.ts";
+import { configure, setErrorMap, getErrorMap, config as _sharedConfig, globalConfig as _globalConfig, memoizerFactory as _memoizerFactory } from "./shared.ts";
 
 export * from "./schema.ts";
 export * from "./error.ts";
@@ -290,7 +290,7 @@ export const z = {
   hostname: (p?: string) => new ZodString().hostname(p),
   httpUrl: (p?: string) => new ZodString().httpUrl(p),
   /** Set global config params (e.g. customError) like z.config in zod 4. */
-  config: (opts: any) => configure(opts),
+  config: (opts?: any) => _sharedConfig(opts),
   /** Set the global error map. */
   setErrorMap: (fn?: (i: any) => string | undefined) => setErrorMap(fn),
   getErrorMap: () => getErrorMap(),
@@ -353,8 +353,8 @@ export const z = {
   safeDecode: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParse(data, params),
   safeDecodeAsync: <T extends ZodTypeAny>(s: T, data: unknown, params?: any) => s.safeParseAsync(data),
   /** codec encode — backward-direction traversal over the schema graph */
-  encode: <T extends ZodTypeAny>(s: T, data: unknown): unknown => _encode(s, data),
-  encodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown): Promise<unknown> => _encode(s, data),
+  encode: <T extends ZodTypeAny>(s: T, data: unknown): unknown => _encodeScoped(s, data),
+  encodeAsync: async <T extends ZodTypeAny>(s: T, data: unknown): Promise<unknown> => _encodeScoped(s, data),
   safeEncode: <T extends ZodTypeAny>(s: T, data: unknown) => {
     try {
       if (typeof (s as any).encode === "function") return { success: true, data: (s as any).encode(data) };
@@ -572,12 +572,47 @@ const HASH_LENS = {
 (z as any).ZodRealError = ZodRealError;
 import { toJSONSchema } from "./jsonschema.ts";
 (z as any).toJSONSchema = toJSONSchema;
+const globalConfig: any = _globalConfig;
+const _config = _sharedConfig;
+
+// $constructor builds user-defined schema classes; $ZodType.init installs
+// the _zod internals a custom parse needs. Our engines drive these through
+// the TS-level _run shim, so memoized cycles close through them too.
+const $ZodType = {
+  init(inst: any, def: any) {
+    inst._zod = {
+      def,
+      traits: new Set([inst.constructor]),
+      run: (payload: any, ctx: any) => inst._zod.parse(payload, ctx),
+      parse: (payload: any) => payload,
+    };
+  },
+};
+function $constructor(name: string, init: (inst: any, def: any) => void) {
+  const cls = class {
+    _zod: any;
+    constructor(def: any) { init(this, def); }
+    _run(data: unknown) {
+      const payload = { value: data, issues: [] as any[] };
+      const r = this._zod.parse(payload, {});
+      return r.issues.length
+        ? { ok: false as const, issues: r.issues }
+        : { ok: true as const, value: r.value, memo: r.memo };
+    }
+  };
+  Object.defineProperty(cls, "name", { value: name });
+  return cls;
+}
+
 // z.core — the v4/core namespace: error classes + error walkers
 export const core = {
   $ZodError, $ZodRealError: ZodRealError, ZodError, ZodRealError,
   flattenError: _flattenError, formatError: _formatError,
   treeifyError: _treeifyError, prettifyError: _prettifyError,
   toDotPath: _toDotPath,
+  isRecursiveSchema: (s: any) => isRecursiveSchema(s),
+  config: _config, globalConfig, memoizer: _memoizerFactory,
+  $constructor, $ZodType,
 };
 (z as any).core = core;
 

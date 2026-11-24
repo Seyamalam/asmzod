@@ -5,7 +5,7 @@ import * as napiBackend from "./native/napi.ts";
 import { parsedTypeName, defaultMessage, applyErrorMaps } from "./shared.ts";
 import { encodeValue, type HostTable } from "./codec.ts";
 import { ZodError, type ZodIssue } from "./error.ts";
-import { msgFns, paramMsg } from "./shared.ts";
+import { msgFns, paramMsg, ensureDefaultMemoizer } from "./shared.ts";
 
 // issues added via ctx.addIssue inside superRefine callbacks during the
 // in-flight engine run; _run splices them over the engine's `custom` slots
@@ -17,6 +17,129 @@ const pendingRefineIssues: any[] = [];
 // transforms rewrite a moving value, refines gate on it.
 let asyncMode = false;
 const pendingAsync: { type: string; fn: (v: unknown, ctx?: any) => unknown; msg?: string; cbid?: number; ipath?: any[] }[] = [];
+
+// ——— cyclic-data memoizer (port of zod's core/memoizer.ts) ———
+export class ZodCyclicError extends Error {
+  constructor() {
+    super("Cannot parse a reference cycle that closes through a transform");
+    this.name = "ZodCyclicError";
+  }
+}
+interface _MemoEntry { value: unknown; issues: any[] | null }
+// per top-level parse call — keyed on schema then input object
+let MEMO: { buckets: WeakMap<any, WeakMap<object, _MemoEntry>>; backEdges?: WeakSet<object> } | undefined;
+
+const _REC_NONE = 0, _REC_ASSUMED = 1, _REC_PROVEN = 2;
+const _recCache = new WeakMap<object, boolean>();
+
+// whether this schema's subtree contains a reference cycle; same answer
+// lattice as zod — unresolvable getter edges count as ASSUMED, never cached
+const _isSchema = (c: any): boolean => c instanceof ZodType || c?._zod?.def !== undefined;
+
+function _isRecWalk(inst: any, stack: Set<object>, resolve: boolean): number {
+  const cached = _recCache.get(inst);
+  if (cached !== undefined) return cached ? _REC_PROVEN : _REC_NONE;
+  if (stack.has(inst)) return _REC_PROVEN;
+  stack.add(inst);
+  let result = _REC_NONE;
+  const check = (c: any) => {
+    if (result !== _REC_PROVEN && _isSchema(c)) {
+      const a = _isRecWalk(c, stack, resolve);
+      if (a > result) result = a;
+    }
+  };
+  const shapeWalk = (sh: object, spread: boolean): number => {
+    let a = _REC_NONE;
+    for (const key of Reflect.ownKeys(sh)) {
+      const desc = Object.getOwnPropertyDescriptor(sh, key)!;
+      if (spread && !desc.enumerable) continue;
+      // a getter mints a fresh subtree per read — can't follow, count as cycle
+      const c = desc.get ? _REC_ASSUMED
+        : _isSchema(desc.value) ? _isRecWalk(desc.value, stack, resolve) : _REC_NONE;
+      if (c > a) a = c;
+    }
+    return a;
+  };
+  const merge = (a: number) => { if (a > result) result = a; };
+  const d = inst._def ?? inst._zod?.def ?? {};
+  switch (d.type) {
+    case "object": {
+      merge(shapeWalk(d.shape ?? {}, true));
+      check(d.catchall);
+      break;
+    }
+    case "array": check(d.element); break;
+    case "tuple": for (const el of d.items ?? []) check(el); check(d.rest); break;
+    case "record": case "map": check(d.keyType); check(d.valueType); break;
+    case "set": check(d.valueType); break;
+    case "union": case "discunion": case "discriminatedUnion": case "xor":
+      for (const el of d.options ?? []) check(el);
+      break;
+    case "intersect": case "intersection": check(d.left); check(d.right); break;
+    case "optional": case "nullable": case "default": case "prefault":
+    case "catch": case "readonly": case "nonoptional": case "promise":
+    case "success": case "effects": case "transform": case "refine": case "superrefine":
+      check(d.inner);
+      break;
+    case "pipe": case "codec": check(d.in); check(d.out); break;
+    case "function": check(d.input); check(d.output); break;
+    case "lazy": {
+      // a resolved lazy edge is followed exactly once, with resolution off
+      const inner = d._cachedInner ?? (resolve ? (d._cachedInner = d.getter?.()) : undefined);
+      merge(inner ? _isRecWalk(inner, stack, false) : _REC_ASSUMED);
+      break;
+    }
+    default: {
+      // unknown kinds: scan data-own def values for child schemas
+      for (const key in d) {
+        const desc = Object.getOwnPropertyDescriptor(d, key);
+        if (!desc || desc.get) continue;
+        const v = desc.value;
+        if (_isSchema(v)) check(v);
+        else if (Array.isArray(v)) for (const el of v) check(el);
+      }
+    }
+  }
+  stack.delete(inst);
+  if (result !== _REC_ASSUMED) _recCache.set(inst, result === _REC_PROVEN);
+  return result;
+}
+
+function _cloneIssues(iss: any[]): any[] {
+  return iss.map((i) => (i.path ? { ...i, path: i.path.slice() } : { ...i }));
+}
+// zod's public variant — resolves deferred edges on the walk path
+export function isRecursiveSchema(inst: any): boolean {
+  return _isRecWalk(inst, new Set(), true) !== _REC_NONE;
+}
+
+function _memoBucket(sch: any): WeakMap<object, _MemoEntry> {
+  let b = MEMO!.buckets.get(sch);
+  if (!b) { b = new WeakMap(); MEMO!.buckets.set(sch, b); }
+  return b;
+}
+// replay a completed entry or hand back the in-flight container
+function _memoHit(e: _MemoEntry): any {
+  if (e.issues === null) {
+    (MEMO!.backEdges ??= new WeakSet()).add(e.value as object);
+    return { ok: true as const, value: e.value, memo: true };
+  }
+  return e.issues.length
+    ? { ok: false as const, issues: _cloneIssues(e.issues) }
+    : { ok: true as const, value: e.value };
+}
+const _isRef = (v: unknown): v is object => v !== null && typeof v === "object";
+// wraps a container's run: hit → replay/back-edge, miss → pre-alloc + fill
+function _memoRun(sch: any, data: unknown, empty: () => any, run: (out: any) => any): any {
+  const hit = _memoBucket(sch).get(data as object);
+  if (hit) return _memoHit(hit);
+  const out = empty();
+  const entry: _MemoEntry = { value: out, issues: null };
+  _memoBucket(sch).set(data as object, entry);
+  const r = run(out);
+  entry.issues = r.ok ? [] : _cloneIssues(r.issues ?? []);
+  return r;
+}
 const isThenable = (v: unknown): v is Promise<unknown> =>
   !!v && typeof (v as any).then === "function";
 class AsyncCheckError extends Error {
@@ -205,6 +328,20 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   readonly _input!: Input;
   _def!: any;
   __zod: any;
+  private _rec: boolean | undefined;
+  private _recChecked = false;
+  constructor() { ensureDefaultMemoizer(); }
+
+  // latched recursion check — ASSUMED answers count as recursive for the
+  // current parse without being cached, matching zod's memoizer latch
+  protected _isRec(): boolean {
+    if (this._rec !== undefined) return this._rec;
+    const w = _isRecWalk(this, new Set(), false);
+    if (w === _REC_NONE) { this._rec = false; return false; }
+    if (w === _REC_PROVEN || this._recChecked) this._rec = true;
+    else this._recChecked = true;
+    return true;
+  }
 
   get _zod(): any {
     let z = this.__zod;
@@ -217,8 +354,15 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       innerType: inner,
       bag: { ...(this._def.bag ?? {}) },
       deferred: this._def.deferred,
-      run: (v: any) => this._run(v),
-      parse: (v: any) => this._run(v),
+      // payload-shaped like zod's internals: {value, issues} in, mutated back
+      run: (payload: any, _ctx?: any) => {
+        const r = this._run(payload.value);
+        payload.value = r.ok ? r.value : payload.value;
+        if ((r as any).issues) payload.issues.push(...(r as any).issues);
+        if ((r as any).memo) payload.memo = true;
+        return payload;
+      },
+      parse: (payload: any, ctx?: any) => this._zod.run(payload, ctx),
       toJSONSchema: () => (this as any).toJSONSchema?.(),
       check: (...args: any[]) => (this as any).check(...args),
     };
@@ -330,16 +474,24 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   parse(data: unknown, params?: any): Output {
-    const r = this._run(data);
-    if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); throw new ZodError(r.issues); }
-    return r.value as Output;
+    const prev = MEMO;
+    MEMO = { buckets: new WeakMap() };
+    try {
+      const r = this._run(data);
+      if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); throw new ZodError(r.issues); }
+      return r.value as Output;
+    } finally { MEMO = prev; }
   }
 
   safeParse(data: unknown, params?: any): SafeParseResult<Output> {
-    const r = this._run(data);
-    if (r.ok) return { success: true, data: r.value as Output };
-    applyErrorMaps(r.issues, params?.error ?? params);
-    return { success: false, error: new ZodError(r.issues) };
+    const prev = MEMO;
+    MEMO = { buckets: new WeakMap() };
+    try {
+      const r = this._run(data);
+      if (r.ok) return { success: true, data: r.value as Output };
+      applyErrorMaps(r.issues, params?.error ?? params);
+      return { success: false, error: new ZodError(r.issues) };
+    } finally { MEMO = prev; }
   }
 
   async parseAsync(data: unknown): Promise<Output> {
@@ -349,7 +501,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   decode(data: unknown, params?: any): any { return this.parse(data, params); }
-  encode(data: unknown): any { return _encode(this, data); }
+  encode(data: unknown): any { return _encodeScoped(this, data); }
   async decodeAsync(data: unknown): Promise<any> { return this.parseAsync(data); }
   async encodeAsync(data: unknown): Promise<any> { return this.encode(data); }
   /** zod's wrapper unwrap — the single inner schema, undefined elsewhere */
@@ -502,11 +654,14 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   async safeParseAsync(data: unknown, params?: any): Promise<SafeParseResult<Output>> {
     asyncMode = true;
     pendingAsync.length = 0;
+    const prevMemo = MEMO;
+    MEMO = { buckets: new WeakMap() };
     let r: { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] };
     try {
       r = this._run(data);
     } finally {
       asyncMode = false;
+      MEMO = prevMemo;
     }
     if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); return { success: false, error: new ZodError(r.issues) }; }
     if (!pendingAsync.length) return { success: true, data: r.value as Output };
@@ -812,18 +967,50 @@ export class ZodDate extends ZodType<Date> {
 export class ZodOptional<T extends ZodTypeAny> extends ZodType<T["_output"] | undefined, T["_input"] | undefined> {
   constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
+  protected override _run(data: unknown) {
+    if (this._isRec()) {
+      if (data === undefined) return { ok: true as const, value: undefined };
+      return (this._def.inner as any)._run(data);
+    }
+    return super._run(data);
+  }
 }
 export class ZodNullable<T extends ZodTypeAny> extends ZodType<T["_output"] | null, T["_input"] | null> {
   constructor(_def: any) { super(); this._def = _def; }
   unwrap() { return this._def.inner as T; }
+  protected override _run(data: unknown) {
+    if (this._isRec()) {
+      if (data === null) return { ok: true as const, value: null };
+      return (this._def.inner as any)._run(data);
+    }
+    return super._run(data);
+  }
 }
 export class ZodDefault<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"] | undefined> {
   constructor(_def: any) { super(); this._def = _def; }
   removeDefault() { return this._def.inner as T; }
+  protected override _run(data: unknown) {
+    if (this._isRec()) {
+      const v = data === undefined
+        ? (typeof this._def.value === "function" ? this._def.value() : this._def.value)
+        : data;
+      return (this._def.inner as any)._run(v);
+    }
+    return super._run(data);
+  }
 }
 export class ZodCatch<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
   removeCatch() { return this._def.inner as T; }
+  protected override _run(data: unknown) {
+    if (this._isRec()) {
+      const r = (this._def.inner as any)._run(data);
+      if (r.ok) return r;
+      const v = typeof this._def.value === "function" ? this._def.value() : this._def.value;
+      return { ok: true as const, value: v };
+    }
+    return super._run(data);
+  }
 }
 export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<N, T["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
@@ -886,6 +1073,12 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
     if (kind !== "transform" && kind !== "superrefine" && kind !== "refine")
       return super._run(data);
     const ir = (this._def.inner as any)._run(data);
+    // back-edge hit: the value is an in-flight container — its own parse owns
+    // the checks, and a transform's output can't exist in time to bind
+    if ((ir as any).memo) {
+      if (kind === "transform") throw new ZodCyclicError();
+      return { ok: true as const, value: ir.value, memo: true };
+    }
     if (ir.ok === false && ((ir as any).aborted ?? isAborted(ir.issues))) return ir;
     // inner failed non-aborted: zod keeps running the check chain on the
     // parsed-so-far payload — re-run inner minus its unrecognized keys to get
@@ -904,6 +1097,9 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
       }
     }
     const fn = this._def.fn as (v: unknown, ctx?: any) => unknown;
+    // a transform fed a node a back-edge already resolved to can't mirror
+    // the cycle — its output is allocated after the input, never before
+    if (kind === "transform" && MEMO?.backEdges?.has(base)) throw new ZodCyclicError();
     const queue = () => {
       if (!asyncMode) throw new AsyncCheckError();
       pendingAsync.push({ type: kind, fn, msg: this._def.message, ipath: this._def.path });
@@ -936,6 +1132,13 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
 }
 export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<B["_output"], A["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
+
+  protected override _run(data: unknown) {
+    if (!(MEMO && _isRef(data) && this._isRec())) return super._run(data);
+    const ir = (this._def.in as any)._run(data);
+    if (!ir.ok) return ir;
+    return (this._def.out as any)._run(ir.value);
+  }
 }
 export class ZodBranded<T extends ZodTypeAny, B extends string> extends ZodType<T["_output"] & { __brand: B }, T["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
@@ -948,6 +1151,60 @@ export type ZodRawShape = { [k: string]: ZodTypeAny };
 // can run inherited setters; defineProperty does neither (zod's putProp)
 const _putProp = (t: any, k: PropertyKey, v: any) =>
   Object.defineProperty(t, k, { value: v, enumerable: true, writable: true, configurable: true });
+
+// a key whose value is not settled yet — self-caching so every read after
+// the first gets the same one, then redefines itself as a data property so
+// walks see the resolved edge (zod's deferProp/defineLazy)
+const _deferProp = (t: any, k: PropertyKey, getter: () => any): void => {
+  const EVAL: any = Symbol("evaluating");
+  let value: any;
+  Object.defineProperty(t, k, {
+    enumerable: true, configurable: true,
+    get() {
+      if (value === EVAL) return undefined;
+      if (value === undefined) {
+        value = EVAL;
+        const v = getter();
+        value = v;
+        Object.defineProperty(this, k, { value: v, writable: true, enumerable: true, configurable: true });
+      }
+      return value;
+    },
+    set(nv: any) {
+      Object.defineProperty(this, k, { value: nv, writable: true, enumerable: true, configurable: true });
+    },
+  });
+};
+
+// mirror a schema's shape into a plain object — getter entries become
+// deferred props that read the SOURCE's resolved shape on first access,
+// so builders never invoke recursive getters (zod's mirrorShape)
+const _mirrorShape = (
+  target: any, src: any, keys: PropertyKey[],
+  wrap?: ((v: any, k: PropertyKey) => any) | null,
+): void => {
+  const raw = src._def.shape;
+  for (const key of keys) {
+    const desc = Object.getOwnPropertyDescriptor(raw, key);
+    if (!desc || !desc.enumerable) continue;
+    if (desc.get) {
+      _deferProp(target, key, () => {
+        const v = src._def.shape[key];
+        return wrap ? wrap(v, key) : v;
+      });
+    } else _putProp(target, key, wrap ? wrap(desc.value, key) : desc.value);
+  }
+};
+
+// plain-shape variant for caller-passed extension objects
+const _mirrorProps = (target: any, source: Record<PropertyKey, any>): void => {
+  for (const key of Reflect.ownKeys(source)) {
+    const desc = Object.getOwnPropertyDescriptor(source, key)!;
+    if (!desc.enumerable) continue;
+    if (desc.get) _deferProp(target, key, () => source[key]);
+    else _putProp(target, key, desc.value);
+  }
+};
 const _shapeKeys = (shape: any): PropertyKey[] =>
   Reflect.ownKeys(shape).filter((k) => Object.getOwnPropertyDescriptor(shape, k)?.enumerable);
 const _maskedKeys = (shape: any, mask: any): PropertyKey[] => {
@@ -978,8 +1235,13 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
         get() {
           if (resolved === undefined) {
             resolved = {};
-            for (const k of _shapeKeys(rawShape))
-              Object.defineProperty(resolved, k, Object.getOwnPropertyDescriptor(rawShape, k)!);
+            for (const k of _shapeKeys(rawShape)) {
+              const desc = Object.getOwnPropertyDescriptor(rawShape, k)!;
+              // getter keys become self-caching deferred props — invoked once
+              // on first access, then a data property the recursion walk follows
+              if (desc.get) _deferProp(resolved, k, () => rawShape[k]);
+              else Object.defineProperty(resolved, k, desc);
+            }
           }
           return resolved;
         },
@@ -1012,7 +1274,12 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
         input = merged;
       }
     }
+    // recursive-capable subtree — cyclic input can only loop through lazy or
+    // getter edges, and the engine can't close a reference cycle, so these
+    // validate per-field at TS level through the parse memo
     const syms = Reflect.ownKeys(shape).filter((k): k is symbol => typeof k === "symbol");
+    if (MEMO && _isRef(data) && !Array.isArray(data) && this._isRec())
+      return _memoRun(this, data, () => ({}), (out) => this._runTSObj(input, out));
     try {
       const r = super._run(input);
       if (!syms.length) return r;
@@ -1021,7 +1288,7 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
       if (input !== null && typeof input === "object") {
         for (const k of syms) {
           const fd: any = shape[k];
-          if (!(fd instanceof ZodType))
+          if (!_isSchema(fd))
             throw new Error(`Invalid element at key "${String(k)}"`);
           const present = k in (input as any);
           if (!present && fd._def?.type === "exactOptional") continue;
@@ -1052,19 +1319,19 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
   // engine semantics replayed per-field in TS — runs every field through
   // _run so effects/codec subgraphs work and queued async stages get the
   // field-key path prefix the replay needs
-  private _runTSObj(view: any): any {
+  private _runTSObj(view: any, out?: any): any {
     const d = this._def;
     const shape = d.shape;
     if (view === null || typeof view !== "object" || Array.isArray(view))
       return { ok: false as const, issues: [typeIssue("object", view)], aborted: true };
     const issues: any[] = [];
-    const out: any = {};
+    out ??= {};
     const consumed = new Set<PropertyKey>();
     for (const k of _shapeKeys(shape)) {
       consumed.add(k);
       if (k === "__proto__") continue;
       const f = shape[k];
-      if (!(f instanceof ZodType)) throw new Error(`Invalid element at key "${String(k)}"`);
+      if (!_isSchema(f)) throw new Error(`Invalid element at key "${String(k)}"`);
       const present = k in view;
       if (!present && f._def?.type === "exactOptional") continue;
       const mark = pendingAsync.length;
@@ -1121,31 +1388,29 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
   pick<K extends keyof T>(mask: Record<K, true>) {
     if (this._def.checks?.length) throw new Error(".pick() cannot be used on object schemas containing refinements");
     const shape: any = {};
-    for (const k of _maskedKeys(this._def.shape, mask)) _putProp(shape, k, this._def.shape[k]);
+    _mirrorShape(shape, this, _maskedKeys(this._def.shape, mask));
     return new ZodObject({ ...this._def, shape, checks: [] }) as ZodObject<Pick<T, K>>;
   }
   omit<K extends keyof T>(mask: Record<K, true>) {
     if (this._def.checks?.length) throw new Error(".omit() cannot be used on object schemas containing refinements");
     const omitted = new Set(_maskedKeys(this._def.shape, mask));
     const shape: any = {};
-    for (const k of _shapeKeys(this._def.shape)) if (!omitted.has(k)) _putProp(shape, k, this._def.shape[k]);
+    _mirrorShape(shape, this, _shapeKeys(this._def.shape).filter((k) => !omitted.has(k)));
     return new ZodObject({ ...this._def, shape, checks: [] }) as ZodObject<Omit<T, K>>;
   }
   partial(mask?: Record<string, true>) {
     if (this._def.checks?.length) throw new Error(".partial() cannot be used on object schemas containing refinements");
     const sel = mask ? new Set(_maskedKeys(this._def.shape, mask)) : undefined;
     const shape: any = {};
-    for (const k of _shapeKeys(this._def.shape))
-      _putProp(shape, k, sel && !sel.has(k) ? this._def.shape[k] : this._def.shape[k].optional());
+    _mirrorShape(shape, this, _shapeKeys(this._def.shape),
+      (v, k) => (sel && !sel.has(k) ? v : new ZodOptional({ type: "optional", inner: v })));
     return new ZodObject({ ...this._def, shape, checks: [] });
   }
   required(mask?: Record<string, true>) {
     const sel = mask ? new Set(_maskedKeys(this._def.shape, mask)) : undefined;
     const shape: any = {};
-    for (const k of _shapeKeys(this._def.shape)) {
-      const s = this._def.shape[k];
-      _putProp(shape, k, sel && !sel.has(k) ? s : new ZodNonOptional({ inner: s }));
-    }
+    _mirrorShape(shape, this, _shapeKeys(this._def.shape),
+      (v, k) => (sel && !sel.has(k) ? v : new ZodNonOptional({ type: "nonoptional", inner: v })));
     return new ZodObject({ ...this._def, shape });
   }
   keyof() { return new ZodEnum({ type: "enum", values: _shapeKeys(this._def.shape) }); }
@@ -1167,8 +1432,8 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
     if (!(b instanceof ZodObject))
       throw new Error("Invalid input to merge: expected an object schema. To merge a plain shape, use `.extend()`.");
     const shape: any = {};
-    for (const k of _shapeKeys(this._def.shape)) _putProp(shape, k, this._def.shape[k]);
-    for (const k of _shapeKeys(b._def.shape)) _putProp(shape, k, b._def.shape[k]);
+    _mirrorShape(shape, this, _shapeKeys(this._def.shape));
+    _mirrorShape(shape, b, _shapeKeys(b._def.shape));
     let res: any = new ZodObject({ ...this._def, shape, catchall: b._def.catchall, checks: [] });
     for (const w of wraps) res = w(res);
     return res as ZodObject<T & any>;
@@ -1180,11 +1445,8 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
   exactPartial() { return this.partial(); }
   private _extend<S extends ZodRawShape>(s: S) {
     const shape: any = {};
-    for (const k of _shapeKeys(this._def.shape)) _putProp(shape, k, this._def.shape[k]);
-    for (const k of Reflect.ownKeys(s)) {
-      const d = Object.getOwnPropertyDescriptor(s, k);
-      if (d?.enumerable) _putProp(shape, k, (s as any)[k]);
-    }
+    _mirrorShape(shape, this, _shapeKeys(this._def.shape));
+    _mirrorProps(shape, s);
     return new ZodObject({ ...this._def, shape });
   }
 }
@@ -1197,12 +1459,73 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
   max(n: number, message?: string) { return new ZodArray({ ...this._def, maxLen: n, _maxMsg: message }); }
   length(n: number, message?: string) { return new ZodArray({ ...this._def, minLen: n, maxLen: n, exactLen: true }); }
   nonempty(message?: string) { return this.min(1, message); }
+
+  protected override _run(data: unknown) {
+    // recursive-capable subtree: the engine can't close a reference cycle,
+    // so recursive arrays validate per-element at TS level through the memo
+    if (!(MEMO && Array.isArray(data) && this._isRec())) return super._run(data);
+    const el = this._def.element as any;
+    const d = this._def;
+    return _memoRun(this, data, () => new Array(data.length), (out: any[]) => {
+      const issues: any[] = [];
+      for (let i = 0; i < data.length; i++) {
+        const mark = pendingAsync.length;
+        const r = el._run(data[i]);
+        for (let j = mark; j < pendingAsync.length; j++)
+          (pendingAsync[j] as any).path = [i, ...((pendingAsync[j] as any).path ?? [])];
+        if (r.ok) out[i] = r.value;
+        else for (const iss of r.issues) issues.push({ ...iss, path: [i, ...(iss.path ?? [])] });
+      }
+      const lenIssue = (code: string, lim: number, exact: boolean, msg?: string) => issues.push({
+        code, origin: "array", [code === "too_small" ? "minimum" : "maximum"]: lim,
+        inclusive: true, exact, path: [],
+        message: msg ?? `Too ${code === "too_small" ? "small" : "big"}: expected array to have ${code === "too_small" ? ">=" : "<="}${lim} items`,
+      });
+      if (d.exactLen !== undefined && data.length !== d.exactLen) lenIssue(data.length < d.exactLen ? "too_small" : "too_big", d.exactLen, true, d._minMsg);
+      else {
+        if (d.minLen !== undefined && data.length < d.minLen) lenIssue("too_small", d.minLen, false, d._minMsg);
+        if (d.maxLen !== undefined && data.length > d.maxLen) lenIssue("too_big", d.maxLen, false, d._maxMsg);
+      }
+      return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
+    });
+  }
 }
 
 export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType<{ [k in keyof Items]: Items[k]["_output"] }> {
   constructor(_def: any) { super(); this._def = _def; }
   rest<R extends ZodTypeAny>(r: R) {
     return new ZodTuple({ ...this._def, rest: r }) as any;
+  }
+
+  protected override _run(data: unknown) {
+    if (!(MEMO && Array.isArray(data) && this._isRec())) return super._run(data);
+    const items: any[] = this._def.items ?? [];
+    const rest = this._def.rest as any;
+    return _memoRun(this, data, () => new Array(data.length), (out) => {
+      const issues: any[] = [];
+      if (!rest && data.length !== items.length) {
+        const lim = items.length;
+        const code = data.length < lim ? "too_small" : "too_big";
+        issues.push({
+          code, origin: "array", [code === "too_small" ? "minimum" : "maximum"]: lim,
+          inclusive: true, exact: true, path: [],
+          message: `Too ${code === "too_small" ? "small" : "big"}: expected array to have ${code === "too_small" ? ">=" : "<="}${lim} items`,
+        });
+        // tuple arity aborts the whole union option it sits under
+        return { ok: false as const, issues, aborted: true };
+      }
+      for (let i = 0; i < data.length; i++) {
+        const it = i < items.length ? items[i] : rest;
+        if (!it) continue;
+        const mark = pendingAsync.length;
+        const r = it._run(data[i]);
+        for (let j = mark; j < pendingAsync.length; j++)
+          (pendingAsync[j] as any).path = [i, ...((pendingAsync[j] as any).path ?? [])];
+        if (r.ok) out[i] = r.value;
+        else for (const iss of r.issues) issues.push({ ...iss, path: [i, ...(iss.path ?? [])] });
+      }
+      return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
+    });
   }
 }
 
@@ -1263,9 +1586,19 @@ export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodTy
     if (data === null || typeof data !== "object" || Array.isArray(data) ||
         data instanceof Map || data instanceof Set || data instanceof Date)
       return { ok: false as const, issues: [typeIssue("record", data)], aborted: true };
+    if (MEMO && this._isRec())
+      return _memoRun(this, data, () => ({}), (out) => this._runRecord(data, out));
+    return this._runRecord(data, {});
+  }
+
+  private _runRecord(data: object, out: any) {
+    const kt = this._def.keyType as any;
+    const vt = this._def.valueType as any;
+    const mode: string = this._def.mode ?? "strict";
+    const partial = this._def.partial === true;
+    const values = _keyUniverse(kt);
     const input = data as any;
     const issues: ZodIssue[] = [];
-    const out: any = {};
     let childAborted = false;
     const runV = (key: PropertyKey, v: any) => {
       const mark = pendingAsync.length;
@@ -1363,6 +1696,13 @@ const CONTINUING_CODES = new Set([
 // backward-direction traversal — zod's direction:"backward": codecs reverse,
 // unions try each option in order, objects encode each declared field, wrappers
 // defer inward, and plain schemas validate forward
+// every top-level encode gets a fresh memo — nested _encode calls share it
+export function _encodeScoped(s: any, v: any): any {
+  const prev = MEMO;
+  MEMO = { buckets: new WeakMap() };
+  try { return _encode(s, v); } finally { MEMO = prev; }
+}
+
 export function _encode(s: any, v: any): any {
   const d = s?._def;
   if (!d) throw new Error("asmzod: encode() requires a schema");
@@ -1386,6 +1726,26 @@ export function _encode(s: any, v: any): any {
       return m.data;
     }
     case "object": {
+      // cyclic input can only close through the encode memo — the encoded
+      // container must be registered before children, same as parse
+      if (MEMO && _isRef(v) && !Array.isArray(v) && (s as any)._isRec?.()) {
+        const hit = _memoBucket(s).get(v);
+        if (hit) {
+          if (hit.issues === null) (MEMO!.backEdges ??= new WeakSet()).add(hit.value as object);
+          return hit.value;
+        }
+        const out: any = {};
+        const entry: _MemoEntry = { value: out, issues: null };
+        _memoBucket(s).set(v as object, entry);
+        for (const k of _shapeKeys(d.shape)) {
+          const ev = _encode(d.shape[k], (v as any)?.[k]);
+          if (ev !== undefined || (v != null && typeof v === "object" && k in v)) out[k] = ev;
+        }
+        if (d.mode === "passthrough" && v != null && typeof v === "object")
+          for (const k of Object.keys(v)) if (!Object.prototype.hasOwnProperty.call(d.shape, k)) out[k] = (v as any)[k];
+        entry.issues = [];
+        return out;
+      }
       const out: any = {};
       for (const k of _shapeKeys(d.shape)) {
         const ev = _encode(d.shape[k], (v as any)?.[k]);
@@ -1426,8 +1786,13 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
 
   protected override _run(data: unknown) {
     if (!(data instanceof Map)) return { ok: false as const, issues: [typeIssue("map", data)], aborted: true };
+    if (MEMO && this._isRec())
+      return _memoRun(this, data, () => new Map(), (out) => this._runMap(data, out));
+    return this._runMap(data, new Map());
+  }
+
+  private _runMap(data: Map<unknown, unknown>, out: Map<any, any>) {
     const { keyType, valueType } = this._def as { keyType: ZodTypeAny; valueType: ZodTypeAny };
-    const out = new Map();
     const issues: ZodIssue[] = [];
     for (const [k, v] of data) {
       const kr = (keyType as any)._run(k);
@@ -1446,8 +1811,13 @@ export class ZodSet<V extends ZodTypeAny>
 
   protected override _run(data: unknown) {
     if (!(data instanceof Set)) return { ok: false as const, issues: [typeIssue("set", data)], aborted: true };
+    if (MEMO && this._isRec())
+      return _memoRun(this, data, () => new Set(), (out) => this._runSet(data, out));
+    return this._runSet(data, new Set());
+  }
+
+  private _runSet(data: Set<unknown>, out: Set<any>) {
     const { valueType } = this._def as { valueType: ZodTypeAny };
-    const out = new Set();
     const issues: ZodIssue[] = [];
     for (const v of data) {
       const r = (valueType as any)._run(v);
@@ -1464,7 +1834,22 @@ export class ZodUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output
 
   // union resolution happens in ZodType._run via the engine's `_u` marker:
   // exactly one non-aborted option surfaces its issues in place of the
-  // invalid_union issue; otherwise per-option errors arrays attach
+  // invalid_union issue; otherwise per-option errors arrays attach.
+  // recursive unions take the same option loop at TS level so a cyclic
+  // input can close through the parse memo
+  protected override _run(data: unknown) {
+    if (!(MEMO && _isRef(data) && this._isRec())) return super._run(data);
+    const opts = this._def.options as any[];
+    const runs = opts.map((o) => o._run(data));
+    const win = runs.find((r) => r.ok);
+    if (win) return win;
+    const survivor = runs.findIndex((r) => !((r as any).aborted ?? isAborted(r.issues)));
+    if (survivor >= 0) return runs[survivor];
+    return {
+      ok: false as const,
+      issues: [{ code: "invalid_union", errors: runs.map((r) => (r as any).issues ?? []), path: [], message: "Invalid input" }] as any[],
+    };
+  }
 }
 
 export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[number]["_output"], T[number]["_input"]> {
@@ -1674,7 +2059,17 @@ export class ZodEnum<T extends string = string> extends ZodType<T> {
 
 export class ZodLazy<T extends ZodTypeAny> extends ZodType<T["_output"], T["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
-  get schema(): T { return this._def.getter(); }
+  // the getter resolves once — a factory that mints fresh schemas per call
+  // still yields a finite schema graph (zod caches def.innerType)
+  get schema(): T { return (this._def._cachedInner ??= this._def.getter()) as T; }
+
+  // the engine's lazy thunk recurses natively — cyclic input can only reach
+  // a lazy through a recursive subtree, which runs at TS level via the memo
+  protected override _run(data: unknown) {
+    if (MEMO && _isRef(data) && this._isRec())
+      return ((this._def._cachedInner ??= this._def.getter()) as any)._run(data);
+    return super._run(data);
+  }
 }
 
 export class ZodInstanceof<T> extends ZodType<T> {

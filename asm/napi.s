@@ -41,6 +41,7 @@ _azn_intern:    .space 2048       // 64 slots x 32B {gen, len, keyptr, napi_valu
 _azn_internkeys:.space 8192        // bump region for interned key bytes
 _azn_interncur: .space 8
 _azn_interngen: .space 8           // generation, bumped per parse — stale slots miss
+_azn_depth:     .space 8         // _aznapi_run recursion depth — return-input is top-level only
 _azn_lazytab:   .space 32768      // 4096 resolved lazy-subblob data ptrs
 _azn_ctortab:   .space 8192       // 1024 constructor napi_values for instanceof
 _azn_cbrefine:  .space 8192       // refine[cbid] napi_values
@@ -1089,6 +1090,10 @@ _aznapi_run:
     mov x27, x0
     mov x28, x1
     mov x19, x2
+    AZ_ADR x9, _azn_depth
+    ldr w10, [x9]
+    add w10, w10, #1
+    str w10, [x9]
     ldrb w9, [x27]
     cmp w9, #0x01
     b.eq .Ln_str
@@ -1209,6 +1214,10 @@ _aznapi_run:
     mov x2, x19
     b _aznapi_run              // tail — stack full, run unwrapped
 .Ln_ret:
+    AZ_ADR x9, _azn_depth
+    ldr w10, [x9]
+    sub w10, w10, #1
+    str w10, [x9]
     ldp x27, x28, [sp, #16]
     ldp x19, x20, [sp, #32]
     ldp x23, x24, [sp, #48]
@@ -2895,6 +2904,10 @@ _azn_encval:
     cbnz x9, .Ln_arr_failed
     ldr x9, [sp, #LN_D]
     cbnz x9, .Ln_arr_mat
+    AZ_ADR x9, _azn_depth
+    ldr w9, [x9]
+    cmp w9, #1
+    b.hi .Ln_arr_mat          // nested — fresh array so siblings don't alias
     str x28, [x19]            // unchanged — return the input array verbatim
     mov x0, #0
     b .Ln_ret
@@ -3342,6 +3355,12 @@ _azn_encval:
 .Ln_obj_wrapup:
     ldr x9, [sp, #LN_I]
     cbnz x9, .Ln_obj_failed
+    // nested runs always build fresh output — returning the input would
+    // alias a shared reference across sibling fields
+    AZ_ADR x9, _azn_depth
+    ldr w9, [x9]
+    cmp w9, #1
+    b.hi .Ln_obj_retout
     // strip mode + all children identical + every declared key present +
     // input has no extra keys -> return the input object, skip the copy
     ldr x9, [sp, #LN_Q]
@@ -3587,6 +3606,10 @@ _azn_encval:
     ldr x9, [sp, #LN_D]
     cmp x9, x10
     b.ne .Ln_tup_new
+    AZ_ADR x9, _azn_depth
+    ldr w9, [x9]
+    cmp w9, #1
+    b.hi .Ln_tup_new          // nested — fresh tuple so siblings don't alias
     str x28, [x19]
     mov x0, #0
     b .Ln_ret

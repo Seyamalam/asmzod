@@ -344,3 +344,19 @@ export function finishIssues(issues: any[]): any[] {
   }
   return issues;
 }
+
+// zod's mutable global config — containers install the default memoizer on
+// construction so `delete z.config().memoizer` restores on next schema init
+export const globalConfig: any = { memoizer: undefined };
+export function config(cfg?: any) {
+  if (cfg) { configure(cfg); Object.assign(globalConfig, cfg); }
+  return globalConfig;
+}
+export const memoizerFactory = () => ({
+  attach(_inst: any) {},
+  alloc(_inst: any, _payload: any, empty: any) { return empty; },
+  guard(_inst: any) {},
+});
+export function ensureDefaultMemoizer(): void {
+  if (!globalConfig.memoizer) globalConfig.memoizer = memoizerFactory();
+}
