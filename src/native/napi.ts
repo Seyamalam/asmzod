@@ -8,7 +8,13 @@ import type { ParseResult } from "./bun.ts";
 // resolve require lazily so the module loads in runtimes without
 // node:module (Cloudflare Workers, browsers) — the addon just never
 // loads there and the portable engine takes over
-const path = new URL("../../asm/asmzod.node", import.meta.url).pathname;
+let path = "";
+try {
+  path = new URL("../../asm/asmzod.node", import.meta.url).pathname;
+} catch {
+  // workerd/bundlers: import.meta.url may not resolve relative fs paths —
+  // req?(path) will fail anyway and the portable engine takes over
+}
 const req: undefined | ((spec: string) => any) =
   (import.meta as any).require ??
   (typeof require === "function" ? require : undefined) ??

@@ -1,7 +1,7 @@
 {
   "name": "asmzod",
   "version": "0.2.0",
-  "description": "Zod-compatible validation \u2014 the validator is hand-written ARM64 assembly (with a portable TS engine for everywhere else)",
+  "description": "Zod-compatible validation — the validator is hand-written ARM64 assembly (with a portable TS engine for everywhere else)",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
@@ -36,6 +36,7 @@
   "devDependencies": {
     "bun-types": "^1.2.0",
     "typescript": "^5.9.0",
+    "wrangler": "^4.167.0",
     "zod": "4"
   },
   "engines": {
