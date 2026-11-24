@@ -11,6 +11,27 @@ import { msgFns, paramMsg } from "./shared.ts";
 // in-flight engine run; _run splices them over the engine's `custom` slots
 const pendingRefineIssues: any[] = [];
 
+// async check support: the engine is synchronous, so callbacks that
+// return thenables can't complete inside it. In async mode, ZodEffects
+// stages queue here and safeParseAsync replays them sequentially —
+// transforms rewrite a moving value, refines gate on it.
+let asyncMode = false;
+const pendingAsync: { type: string; fn: (v: unknown, ctx?: any) => unknown; msg?: string; cbid?: number }[] = [];
+const isThenable = (v: unknown): v is Promise<unknown> =>
+  !!v && typeof (v as any).then === "function";
+class AsyncCheckError extends Error {
+  constructor() { super("Encountered Promise during synchronous parse. Use .parseAsync() instead."); }
+}
+// engine-invoked cb wrapper: a thenable result means the check is async
+// and the engine cannot queue it (nested position) — match zod's sync error
+function guardAsync<F extends (v: any) => any>(fn: F): F {
+  return ((v: unknown) => {
+    const r = fn(v);
+    if (isThenable(r)) throw new AsyncCheckError();
+    return r;
+  }) as F;
+}
+
 export type ParsePath = (string | number)[];
 export interface SafeParseSuccess<T> { success: true; data: T }
 export interface SafeParseFail { success: false; error: ZodError }
@@ -150,8 +171,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   refine(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
     return new ZodEffects({
       type: "refine", inner: this,
-      cbid: regId(reg.refine, fn as (v: unknown) => unknown),
-      message,
+      cbid: regId(reg.refine, guardAsync(fn as (v: unknown) => unknown)),
+      fn, kind: "refine", message,
     });
   }
   refinement(fn: (v: Output) => boolean, message?: string): ZodEffects<this, Output> {
@@ -160,20 +181,21 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   superRefine(fn: (v: Output, ctx: { addIssue: (i: any) => void }) => void): ZodEffects<this, Output> {
     return new ZodEffects({
       type: "refine", inner: this,
-      cbid: regId(reg.refine, ((v: unknown) => {
+      cbid: regId(reg.refine, guardAsync(((v: unknown) => {
         let ok = true;
         fn(v as Output, {
           addIssue: (i: any) => { ok = false; pendingRefineIssues.push(i); },
         });
         return ok;
-      }) as (v: unknown) => unknown),
-      message: undefined,
+      }) as (v: unknown) => unknown)),
+      fn, kind: "superrefine", message: undefined,
     });
   }
   transform<N>(fn: (v: Output) => N): ZodEffects<this, N> {
     return new ZodEffects({
       type: "transform", inner: this,
-      cbid: regId(reg.transform, fn as (v: unknown) => unknown),
+      cbid: regId(reg.transform, guardAsync(fn as (v: unknown) => unknown)),
+      fn, kind: "transform",
     });
   }
   pipe<T extends ZodTypeAny>(target: T): ZodPipe<this, T> {
@@ -245,8 +267,39 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       },
     };
   }
-  async safeParseAsync(data: unknown): Promise<SafeParseResult<Output>> {
-    return this.safeParse(data);
+  async safeParseAsync(data: unknown, params?: any): Promise<SafeParseResult<Output>> {
+    asyncMode = true;
+    pendingAsync.length = 0;
+    let r: { ok: true; value: unknown } | { ok: false; issues: ZodIssue[] };
+    try {
+      r = this._run(data);
+    } finally {
+      asyncMode = false;
+    }
+    if (!r.ok) { applyErrorMaps(r.issues, params?.error ?? params); return { success: false, error: new ZodError(r.issues) }; }
+    if (!pendingAsync.length) return { success: true, data: r.value as Output };
+    let value = r.value;
+    for (const st of pendingAsync) {
+      if (st.type === "transform") {
+        value = await st.fn(value);
+      } else if (st.type === "superrefine") {
+        const pushed: any[] = [];
+        await st.fn(value, { addIssue: (i: any) => pushed.push(i) });
+        if (pushed.length) {
+          const issues = pushed.map(({ path, ...rest }: any) => ({ ...rest, path: path ?? [] }));
+          applyErrorMaps(issues as ZodIssue[], params?.error ?? params);
+          return { success: false, error: new ZodError(issues as ZodIssue[]) };
+        }
+      } else {
+        const res = await st.fn(value);
+        if (!res) {
+          const issues = [{ code: "custom", path: [], message: st.msg ?? "Invalid input" }] as ZodIssue[];
+          applyErrorMaps(issues, params?.error ?? params);
+          return { success: false, error: new ZodError(issues) };
+        }
+      }
+    }
+    return { success: true, data: value as Output };
   }
   // extension: batch-validate through the addon's in-native loop when
   // available; per-element results like a map of safeParse
@@ -531,6 +584,16 @@ export class ZodEffects<T extends ZodTypeAny, N = T["_output"]> extends ZodType<
   constructor(_def: any) { super(); this._def = _def; }
   innerType() { return this._def.inner as T; }
   sourceType() { return this._def.inner as T; }
+
+  // async mode: queue the effect instead of running it — safeParseAsync
+  // replays stages innermost-first so transforms feed outer refinements.
+  protected override _run(data: unknown) {
+    if (!asyncMode) return super._run(data);
+    const ir = (this._def.inner as any)._run(data);
+    if (!ir.ok) return ir;
+    pendingAsync.push({ type: this._def.kind ?? this._def.type, fn: this._def.fn, msg: this._def.message });
+    return ir;
+  }
 }
 export class ZodPipe<A extends ZodTypeAny, B extends ZodTypeAny> extends ZodType<B["_output"], A["_input"]> {
   constructor(_def: any) { super(); this._def = _def; }
@@ -606,6 +669,44 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
 
 export class ZodRecord<K extends ZodTypeAny, V extends ZodTypeAny> extends ZodType<Record<string, V["_output"]>> {
   constructor(_def: any) { super(); this._def = _def; }
+
+  // enum keyType: zod treats the key set as closed. modes —
+  //   "strict":  all enum keys required, unknown keys -> unrecognized_keys
+  //   "partial": enum keys optional, unknown keys -> unrecognized_keys
+  //   "loose":   all enum keys required, unknown keys pass through raw
+  protected override _run(data: unknown) {
+    const kt = this._def.keyType as any;
+    const mode: string = this._def.recordMode ?? "strict";
+    if (kt?._def?.type !== "enum" || kt === null) return super._run(data);
+    if (data === null || typeof data !== "object" || Array.isArray(data) ||
+        data instanceof Map || data instanceof Set || data instanceof Date)
+      return { ok: false as const, issues: [typeIssue("record", data)], aborted: true };
+    const keys: string[] = kt._def.values;
+    const vt = this._def.valueType as any;
+    const issues: ZodIssue[] = [];
+    const out: Record<string, unknown> = {};
+    const unk: string[] = [];
+    for (const k of keys) {
+      if (k in (data as object)) {
+        const r = vt._run((data as any)[k]);
+        if (r.ok) out[k] = r.value;
+        else issues.push(...r.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+      } else if (mode !== "partial") {
+        const r = vt._run(undefined);
+        if (!r.ok) issues.push(...r.issues.map((i: any) => ({ ...i, path: [k, ...(i.path ?? [])] })));
+      }
+    }
+    for (const k of Object.keys(data as object)) {
+      if (keys.includes(k)) continue;
+      if (mode === "loose") out[k] = (data as any)[k];
+      else unk.push(k);
+    }
+    if (unk.length) issues.push({
+      code: "unrecognized_keys", keys: unk, path: [],
+      message: unk.length === 1 ? `Unrecognized key: "${unk[0]}"` : `Unrecognized keys: ${unk.map((k) => `"${k}"`).join(", ")}`,
+    } as any);
+    return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
+  }
 }
 
 // Map/Set: the container walk is JS (can't enumerate a Map in machine
@@ -827,3 +928,99 @@ export type objectInputType<S extends ZodRawShape> = {
 };
 
 export { ZodError, type ZodIssue };
+
+// ---------- zod 4 factories beyond the compiled core (TS layer) ----------
+
+const STRINGBOOL_TRUE = new Set(["true", "1", "yes", "on", "y", "enabled"]);
+const STRINGBOOL_FALSE = new Set(["false", "0", "no", "off", "n", "disabled"]);
+
+export class ZodStringbool extends ZodType<boolean, unknown> {
+  constructor(_def: any) { super(); this._def = _def; }
+  protected override _run(data: unknown) {
+    if (typeof data !== "string")
+      return { ok: false as const, issues: [typeIssue("string", data)], aborted: true };
+    const s = data.toLowerCase();
+    if (STRINGBOOL_TRUE.has(s)) return { ok: true as const, value: true };
+    if (STRINGBOOL_FALSE.has(s)) return { ok: true as const, value: false };
+    const values = [...STRINGBOOL_TRUE, ...STRINGBOOL_FALSE];
+    return {
+      ok: false as const, aborted: true,
+      issues: [{
+        code: "invalid_value", expected: "stringbool", values,
+        path: [], message: `Invalid option: expected one of ${values.map((v) => `"${v}"`).join("|")}`,
+      }] as any[],
+    };
+  }
+}
+
+export class ZodXor<T extends ZodTypeAny[]> extends ZodUnion<T> {
+  protected override _run(data: unknown) {
+    const opts = this._def.options as ZodTypeAny[];
+    const runs = opts.map((o) => (o as any)._run(data));
+    const wins = runs.filter((r: any) => r.ok);
+    if (wins.length === 1) return wins[0];
+    if (wins.length === 0) {
+      return {
+        ok: false as const, aborted: true,
+        issues: [{
+          code: "invalid_union", errors: runs.map((r: any) => r.issues ?? []),
+          path: [], message: "Invalid input",
+        }] as any[],
+      };
+    }
+    return {
+      ok: false as const, aborted: true,
+      issues: [{
+        code: "invalid_union", errors: [], inclusive: false,
+        matches: runs.map((r: any, i: number) => (r.ok ? i : -1)).filter((i: number) => i >= 0),
+        path: [], message: "Invalid input: more than one option matched",
+      }] as any[],
+    };
+  }
+}
+
+export class ZodFile extends ZodType<File, File> {
+  constructor(_def: any) { super(); this._def = _def; }
+  private _c(c: any) { return new ZodFile({ ...this._def, checks: [...(this._def.checks ?? []), c] }); }
+  min(n: number, message?: string) { return this._c({ kind: "min", value: n, message }); }
+  max(n: number, message?: string) { return this._c({ kind: "max", value: n, message }); }
+  size(n: number, message?: string) { return this._c({ kind: "size", value: n, message }); }
+  mime(m: string[], message?: string) { return this._c({ kind: "mime", value: m, message }); }
+  protected override _run(data: unknown) {
+    if (typeof File === "undefined" || !(data instanceof File))
+      return { ok: false as const, issues: [typeIssue("file", data)], aborted: true };
+    const issues: ZodIssue[] = [];
+    for (const c of this._def.checks ?? []) {
+      if (c.kind === "min" && data.size < c.value)
+        issues.push({ code: "too_small", origin: "file", minimum: c.value, inclusive: true, path: [], message: c.message ?? `Too small: expected file to have >=${c.value} bytes` } as any);
+      else if (c.kind === "max" && data.size > c.value)
+        issues.push({ code: "too_big", origin: "file", maximum: c.value, inclusive: true, path: [], message: c.message ?? `Too big: expected file to have <=${c.value} bytes` } as any);
+      else if (c.kind === "size" && data.size !== c.value)
+        issues.push({ code: "invalid_value", values: [c.value], path: [], message: c.message ?? `Invalid input: expected ${c.value}` } as any);
+      else if (c.kind === "mime" && !c.value.some((m: string) => data.type === m || data.type.startsWith(m.split("*")[0])))
+        issues.push({ code: "invalid_value", values: c.value, path: [], message: c.message ?? `Invalid input: expected ${c.value.map((m: string) => `"${m}"`).join(" | ")}` } as any);
+    }
+    return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: data };
+  }
+}
+
+export class ZodCodec<A extends ZodTypeAny, B extends ZodTypeAny>
+  extends ZodType<B["_output"], A["_input"]> {
+  constructor(_def: any) { super(); this._def = _def; }
+  protected override _run(data: unknown) {
+    const ir = (this._def.in as any)._run(data);
+    if (!ir.ok) return ir;
+    const decoded = this._def.transform(ir.value);
+    return (this._def.out as any)._run(decoded);
+  }
+  // encode: validate against B, reverse-transform, validate against A
+  encode(value: B["_output"]): A["_output"] {
+    const r = (this._def.out as any).safeParse(value);
+    if (!r.success) throw new ZodError(r.error.issues);
+    const enc = this._def.reverseTransform(r.data);
+    const er = (this._def.in as any).safeParse(enc);
+    if (!er.success) throw new ZodError(er.error.issues);
+    return er.data as A["_output"];
+  }
+  decode(value: A["_input"]): B["_output"] { return this.parse(value); }
+}

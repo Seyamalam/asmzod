@@ -6,6 +6,7 @@ import {
   ZodIntersection, ZodLiteral, ZodEnum, ZodLazy, ZodInstanceof, ZodCustom,
   ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodEffects, ZodPipe,
   ZodBranded, ZodMap, ZodSet, ZodType, ZodPromise, ZodFunction,
+  ZodStringbool, ZodXor, ZodFile, ZodCodec,
   type ZodTypeAny, type ZodRawShape,
 } from "./schema.ts";
 import { reg, regId } from "./ffi.ts";
@@ -89,6 +90,31 @@ export const z = {
   /** Create a Set schema. */
   set: <V extends ZodTypeAny>(value: V) =>
     new ZodSet<V>({ type: "set", valueType: value }),
+  /** Record where the enum key set is optional; other keys rejected. */
+  partialRecord: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V) =>
+    new ZodRecord<K, V>({ type: "record", keyType: key, valueType: value, recordMode: "partial" }),
+  /** Record where all enum keys are required and other keys pass through. */
+  looseRecord: <K extends ZodTypeAny, V extends ZodTypeAny>(key: K, value: V) =>
+    new ZodRecord<K, V>({ type: "record", keyType: key, valueType: value, recordMode: "loose" }),
+  /** Enum of an object schema's keys. */
+  keyof: <T extends ZodTypeAny>(schema: T) => (schema as any).keyof(),
+  /** Exactly one option must match. */
+  xor: <T extends ZodTypeAny[]>(options: [...T], params?: any) =>
+    new ZodXor<T>({ type: "union", options, error: params }),
+  /** Parses boolean-ish strings ("true"/"yes"/"on"/"0"/"off"/...) to booleans. */
+  stringbool: (params?: any) => new ZodStringbool({ type: "stringbool", error: params }),
+  /** File schema with .min/.max/.size (bytes) and .mime checks. */
+  file: (params?: any) => new ZodFile({ type: "file", checks: [], error: params }),
+  /** Bidirectional codec: parse via decode (in->out), .encode() via encode. */
+  codec: <A extends ZodTypeAny, B extends ZodTypeAny>(
+    inSchema: A, outSchema: B,
+    params: { decode: (v: A["_output"]) => B["_input"]; encode: (v: B["_output"]) => A["_input"] },
+  ) => new ZodCodec<A, B>({
+    type: "codec", in: inSchema, out: outSchema,
+    transform: params.decode, reverseTransform: params.encode,
+  }),
+  /** Check factory for use with .check(...). */
+  check: (fn: (ctx: any) => void) => fn,
 
   /** Try each option in order; first success wins. */
   union: <T extends ZodTypeAny[]>(options: [...T], params?: any) =>
@@ -251,11 +277,6 @@ export const z = {
     duration: (p?: string) => new ZodString().duration(p),
   },
 
-  file: () => new ZodInstanceof<File>({
-    type: "instof",
-    ctor: (globalThis as any).File,
-    name: "file",
-  }),
   templateLiteral: (parts: readonly unknown[]) => {
     // zod4: composes parts into a regex; schemas contribute their pattern
     const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

@@ -37,8 +37,13 @@ same suite through the interpreter.
 
 ## Known gaps
 
-- `parseAsync`/async refinements: the engine is synchronous machine
-  code; async paths throw (same as calling them on a sync-only schema).
-- `z.map`/`z.set` validate at the TS layer (no dedicated opcode).
-- `bigint` checks bounded by i64 (native) — beyond that, portable path.
-- `z.promise`/`z.function` schemas: not implemented.
+- Async checks **nested inside compiled schemas** (e.g.
+  `z.object({f: z.string().refine(async () => true)})`) throw
+  "Encountered Promise during synchronous parse" even in `parseAsync` —
+  the engine cannot suspend mid-walk. Top-level async effects
+  (`schema.refine/transform/superRefine` called directly or at the end
+  of a `.pipe` chain) replay correctly via `safeParseAsync`.
+- `z.map`/`z.set` keys validate per-entry at the TS layer; values run
+  through the engine.
+- `bigint` checks bounded by i64 in the native engines — beyond that,
+  inputs route to the portable engine (same results, slower path).
