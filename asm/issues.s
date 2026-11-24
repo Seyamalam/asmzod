@@ -589,6 +589,7 @@ _az_code_table:
     .quad .Lc10, 28, .Ld10, 28
     .quad .Lc11, 15, .Ld11, 15
     .quad .Lc12, 10, .Ld12, 18
+    .quad .Lc13, 11, .Ld13, 15
 
 // tag names
     .globl _az_tagname_table
@@ -631,6 +632,7 @@ _az_hosttype_table:
 .Lc10: .ascii "invalid_intersection_results"
 .Lc11: .ascii "not_multiple_of"
 .Lc12: .ascii "not_finite"
+.Lc13: .ascii "invalid_key"
 .Ld0:  .ascii "Required"
 .Ld1:  .ascii "Invalid literal value"
 .Ld2:  .ascii "Invalid input"
@@ -644,6 +646,7 @@ _az_hosttype_table:
 .Ld10: .ascii "Invalid intersection results"
 .Ld11: .ascii "Not a multiple"
 .Ld12: .ascii "Number must be finite"
+.Ld13: .ascii "Invalid key ..."
 .Lt0:  .ascii "undefined"
 .Lt1:  .ascii "null"
 .Lt2:  .ascii "boolean"

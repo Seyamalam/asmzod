@@ -152,6 +152,7 @@ export function defaultMessage(i: any): string {
       return "Invalid input";
     case "invalid_intersection_results": return "Invalid intersection results";
     case "invalid_date": return "Invalid date";
+    case "invalid_key": return `Invalid key in ${i.origin}`;
     case "custom": return "Invalid input";
     default: return "Invalid input";
   }
@@ -209,4 +210,22 @@ export function normalizeIssue(i: any): any {
   }
   delete out._keepReceived;
   return out;
+}
+
+// engines emit record-key failures as a flat stream: inner key-schema issues
+// followed by an `invalid_key` wrapper carrying `_k` = child count. Fold the
+// children under their wrapper (zod nests them as `issues`).
+export function finishIssues(issues: any[]): any[] {
+  let cut = false;
+  for (let i = 0; i < issues.length; i++) {
+    const k = (issues[i] as any)._k;
+    if (k === undefined) continue;
+    delete (issues[i] as any)._k;
+    if (k > 0) {
+      (issues[i] as any).issues = issues.splice(i - k, k);
+      i -= k;
+      cut = true;
+    }
+  }
+  return issues;
 }

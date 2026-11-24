@@ -2,7 +2,7 @@
 // directly inside asmzod.node. No value encoding, no output decode —
 // only the cold issue path crosses as an ArrayBuffer.
 import { decodeValueAt, type HostTable } from "../codec.ts";
-import { normalizeIssue } from "../shared.ts";
+import { normalizeIssue, finishIssues } from "../shared.ts";
 import type { ParseResult } from "./bun.ts";
 
 import { createRequire } from "node:module";
@@ -38,10 +38,14 @@ export function initNapi(cbTable: ArrayBuffer): boolean {
 
 // -> ParseResult, or null when the schema needs the FFI path (callbacks,
 // unions, records, transforms, ... anything aznapi_run doesn't cover).
+let napiOff: boolean | undefined;
 export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsafe?: boolean): ParseResult | null {
   const a = loadNapi();
   if (!a || cbUnsafe) return null;
-  try { if ((globalThis as any).process?.env?.AZ_NAPI === "0") return null; } catch { /* ok */ }
+  if (napiOff === undefined) {
+    try { napiOff = (globalThis as any).process?.env?.AZ_NAPI === "0"; } catch { napiOff = false; }
+  }
+  if (napiOff) return null;
   if (!cbInit) {
     // cbtab is only read by callback opcodes, which always fall back first;
     // a nonzero dummy table satisfies the ctx check.
@@ -62,5 +66,5 @@ export function parse(blob: Uint8Array, value: unknown, hosts: HostTable, cbUnsa
     issues.push(normalizeIssue(v));
     cur = np;
   }
-  return { ok: false, issues };
+  return { ok: false, issues: finishIssues(issues) };
 }

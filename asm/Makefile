@@ -1,7 +1,8 @@
 # Dual-target build: Mach-O dylib on macOS, ELF .so on Linux.
 UNAME  := $(shell uname -s)
 ASMSRC := $(wildcard *.s)
-OBJ    := $(ASMSRC:.s=.o)
+OBJ    := $(filter-out napi.o,$(ASMSRC:.s=.o))
+NOBJ   := $(OBJ) napi.o
 
 ifeq ($(UNAME),Darwin)
 OUT     := libasmzod.dylib
@@ -30,8 +31,8 @@ else
 NLDFLAGS := -shared -Bsymbolic
 endif
 
-$(NODE): $(OBJ)
-	clang $(NLDFLAGS) -o $@ $(OBJ)
+$(NODE): $(NOBJ)
+	clang $(NLDFLAGS) -o $@ $(NOBJ)
 
 napi: $(NODE)
 
@@ -39,6 +40,6 @@ napi: $(NODE)
 	clang $(ASFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) $(OUT) $(NODE)
+	rm -f $(OBJ) napi.o $(OUT) $(NODE)
 
 .PHONY: clean napi

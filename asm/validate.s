@@ -1295,6 +1295,8 @@ _az_strtoi:
 .Lty_array:     .ascii "array"
 .Lk_expected2:  .ascii "expected"
 .Lk_received2:  .ascii "received"
+.Lk_origin:      .ascii "origin"
+.Lk_k:           .ascii "_k"
 .Lk_options:    .ascii "options"
 .Lk_u:          .ascii "_u"
 .Lm_litpre:     .ascii "Invalid input: expected "
@@ -1789,6 +1791,8 @@ _az_strtoi:
     b .Lrc_kc
 .Lrc_kcd:
     // keyval ptr = x0 (reserve ret); x1 = keyval, x0 = keynode
+    ldr x9, [x22]              // issue_count before key run
+    str x9, [sp, #136]
     mov x1, x0
     ldr x0, [sp, #80]
     bl _az_validate
@@ -1798,6 +1802,31 @@ _az_strtoi:
     b.ne .Lv_ret
     mov x9, #1
     str x9, [sp, #72]
+    // wrap: invalid_key{origin:"record",_k:delta,path:[key]}
+    ldr x0, [sp, #104]         // kptr
+    ldr x1, [sp, #96]          // klen
+    bl _az_path_push_key
+    mov x0, #13
+    mov x1, #0
+    mov x2, #0
+    bl _az_issue_begin
+    cbnz x0, .Lv_ret
+    AZ_ADR x0, .Lk_origin
+    mov x1, #6
+    AZ_ADR x2, .Lex_record
+    mov x3, #6
+    bl _az_issue_f_str
+    cbnz x0, .Lv_ret
+    ldr x9, [x22]
+    ldr x10, [sp, #136]
+    sub x10, x9, x10
+    ucvtf d0, x10
+    AZ_ADR x0, .Lk_k
+    mov x1, #2
+    bl _az_issue_f_f64
+    cbnz x0, .Lv_ret
+    bl _az_issue_commit
+    bl _az_path_pop
     b .Lrc_next
 .Lrc_vval:
     ldr x0, [sp, #104]         // kptr

@@ -1,7 +1,7 @@
 // native/bun.ts — libasmzod binding via bun:ffi, callback table, parse driver
 import { dlopen, ptr, JSCallback, read, toArrayBuffer } from "bun:ffi";
 import { decodeAt, encodeValue, view, setMemBackend, type HostTable } from "../codec.ts";
-import { reg, normalizeIssue } from "../shared.ts";
+import { reg, normalizeIssue, finishIssues } from "../shared.ts";
 
 setMemBackend({
   view: (p, n) => new Uint8Array(toArrayBuffer(p, 0, n)),
@@ -231,7 +231,7 @@ export function parse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): Pa
         issues.push(normalizeIssue(v));
         cur = np;
       }
-      return { ok: false, issues };
+      return { ok: false, issues: finishIssues(issues) };
     }
     throw new Error(`asmzod: engine error ${status}`);
   }

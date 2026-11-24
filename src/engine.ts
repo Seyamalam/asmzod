@@ -484,7 +484,11 @@ function validate(r: R, v: unknown, c: Ctx): unknown {
         if (kp !== fk) { // key schema present (kp==fk only if offset 0 — actually check)
           const rr = new R(r.b); rr.pos = kp;
           const kr = tryValidate(rr, k, c);
-          if (!kr.ok) { c.issues.length = save; pushIssue(c, "invalid_key", {}); continue; }
+          if (!kr.ok) {
+            const inner = c.issues.splice(save);
+            atKey(c, k, () => pushIssue(c, "invalid_key", { origin: "record", issues: inner }));
+            continue;
+          }
           c.issues.length = save;
         }
         const res = atKey(c, k, () => tryValidate(new R(r.b, vp), (v as any)[k], c));

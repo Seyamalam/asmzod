@@ -5,7 +5,7 @@
 //   4. portable TS interpreter          (Node, Deno, Cloudflare Workers, browsers)
 // AZ_ENGINE=portable forces the interpreter (useful for differential testing).
 import type { HostTable } from "./codec.ts";
-import { reg, regId, normalizeIssue } from "./shared.ts";
+import { reg, regId, normalizeIssue, finishIssues } from "./shared.ts";
 import { portableParse } from "./engine.ts";
 
 export { reg, regId };
@@ -46,5 +46,5 @@ export const engineVersion = backend?.version ?? 0;
 export function engineParse(blob: Uint8Array, input: Uint8Array, hosts: HostTable): ParseResult {
   if (backend) return backend.parse(blob, input, hosts);
   const r = portableParse(blob, input, hosts);
-  return r.ok ? { ok: true, value: r.value } : { ok: false, issues: r.issues.map(normalizeIssue) };
+  return r.ok ? { ok: true, value: r.value } : { ok: false, issues: finishIssues(r.issues.map(normalizeIssue)) };
 }

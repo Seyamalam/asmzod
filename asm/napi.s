@@ -24,7 +24,7 @@ _azn_cbtab:     .quad 0          // cb table ptr (from init())
     .bss
     .p2align 3
 _azn_errbuf:    .space 1048576   // 1MB err arena
-_azn_scratch:   .space 2097152   // 2MB string scratch
+_azn_scratch:   .space 4194304   // 4MB: [0,2MB) getstr, [2MB,3MB) strict names, [3MB,4MB) strict pairs
     .text
 
 #define NAPI_UNDEF 0
@@ -331,8 +331,18 @@ _aznapi_run:
     b.eq .Ln_def
     cmp w9, #0x0e
     b.eq .Ln_cat
+    cmp w9, #0x08
+    b.eq .Ln_disc
+    cmp w9, #0x11
+    b.eq .Ln_pipe
+    cmp w9, #0x12
+    b.eq .Ln_int
     cmp w9, #0x13
     b.eq .Ln_tup
+    cmp w9, #0x14
+    b.eq .Ln_rec
+    cmp w9, #0x20
+    b.eq .Ln_date
     cmp w9, #0x15
     b.eq .Ln_any
     cmp w9, #0x16
@@ -374,8 +384,9 @@ _azn_typeof:
 _azn_getstr:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
+    str x0, [sp, #24]         // save val (caller-saved)
     mov x0, x26
-    mov x1, x28
+    ldr x1, [sp, #24]
     mov x2, #0
     mov x3, #0
     add x4, sp, #16
@@ -384,8 +395,9 @@ _azn_getstr:
     mov x10, #2097152
     cmp x9, x10
     b.hs .Lgs_big
+    ldr x9, [sp, #24]
     mov x0, x26
-    mov x1, x28
+    mov x1, x9
     mov x2, x20
     mov x3, #2097152
     add x4, sp, #16
@@ -947,6 +959,7 @@ _az_issue_size_n:
     bl _azn_typeof
     cmp w0, #NAPI_STR
     b.ne .Ln_str_fail
+    mov x0, x28
     bl _azn_getstr
     cmp x0, #-1
     b.eq .Ln_toobig
@@ -1603,6 +1616,7 @@ _azn_encval:
 .Ln_lit_str:
     cmp w0, #NAPI_STR
     b.ne .Ln_lit_miss
+    mov x0, x28
     bl _azn_getstr
     cmp x0, #-1
     b.eq .Ln_toobig
@@ -1646,6 +1660,7 @@ _azn_encval:
     bl _azn_typeof
     cmp w0, #NAPI_STR
     b.ne .Ln_enum_miss
+    mov x0, x28
     bl _azn_getstr
     cmp x0, #-1
     b.eq .Ln_toobig
@@ -1909,10 +1924,6 @@ _azn_encval:
     ldrb w9, [sp, #LN_C]
     cbz w9, .Ln_obj_exotic
 .Ln_obj_mode:
-    ldrb w9, [x27, #1]
-    cbnz w9, .Ln_obj_unsup    // v1: strip only
-    ldr x9, [x27, #2]
-    cbnz x9, .Ln_obj_unsup    // catchall -> FFI
     mov x0, x26
     add x1, sp, #LN_A
     bl _napi_create_object
@@ -1984,11 +1995,161 @@ _azn_encval:
     str x9, [sp, #LN_D]
     b .Ln_obj_loop
 .Ln_obj_done:
+    // pass2: strict/passthrough/catchall over unknown input props
+    ldrb w9, [x27, #1]
+    ldr x10, [x27, #2]
+    orr x11, x9, x10
+    cbz x11, .Ln_obj_wrapup
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_K
+    bl _napi_get_property_names
+    cbnz x0, .Ln_obj_hard
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    add x2, sp, #LN_L
+    bl _napi_get_array_length
+    str xzr, [sp, #LN_M]      // i
+    str xzr, [sp, #LN_N]      // unk count
+    str xzr, [sp, #LN_D]      // names-region bytes used
+    AZ_ADR x9, _azn_scratch
+    add x9, x9, #0x200000     // namesBase = scratch+2MB
+    str x9, [sp, #LN_O]
+    add x9, x9, #0x100000     // pairsBase = scratch+3MB
+    str x9, [sp, #LN_P]
+.Ln_obj_p2loop:
+    ldr w9, [sp, #LN_L]
+    ldr x10, [sp, #LN_M]
+    cmp x10, x9
+    b.hs .Ln_obj_p2done
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    ldr x2, [sp, #LN_M]
+    add x3, sp, #LN_J
+    bl _napi_get_element
+    ldr x0, [sp, #LN_J]
+    bl _azn_getstr            // x0=len, bytes at x20
+    cmp x0, #-1
+    b.eq .Ln_obj_unsup        // absurd key
+    str x0, [sp, #LN_E]       // klen
+    mov x0, x27
+    mov x1, x20
+    ldr x2, [sp, #LN_E]
+    bl _azn_haskey
+    cbnz w0, .Ln_obj_p2next   // schema key -> skip
+    ldr x9, [x27, #2]
+    cbnz x9, .Ln_obj_p2ca     // catchall
+    ldrb w9, [x27, #1]
+    cmp w9, #2
+    b.eq .Ln_obj_p2pass       // passthrough
+    // strict: record {kptr,klen} pair in persistent region
+    ldr x12, [sp, #LN_D]
+    ldr x14, [sp, #LN_E]
+    add x9, x12, x14
+    mov x10, #0x100000
+    cmp x9, x10
+    b.hi .Ln_obj_unsup        // names region full -> FFI
+    ldr x9, [sp, #LN_N]
+    mov x10, #32768
+    cmp x9, x10
+    b.hs .Ln_obj_unsup        // pairs region full -> FFI
+    ldr x13, [sp, #LN_O]
+    add x13, x13, x12         // dst = namesBase+used
+    mov x0, x13
+    mov x1, x20
+    mov x2, x14
+    str x13, [sp, #LN_G]      // save dst across memcpy
+    bl _az_memcpy
+    ldr x13, [sp, #LN_G]
+    ldr x9, [sp, #LN_N]
+    ldr x10, [sp, #LN_P]
+    lsl x11, x9, #4
+    add x10, x10, x11         // pair slot
+    ldr x14, [sp, #LN_E]
+    stp x13, x14, [x10]       // {kptr,klen}
+    ldr x12, [sp, #LN_D]
+    add x12, x12, x14
+    str x12, [sp, #LN_D]      // used += len
+    add x9, x9, #1
+    str x9, [sp, #LN_N]
+    b .Ln_obj_p2next
+.Ln_obj_p2pass:
+    mov x0, x26
+    mov x1, x28
+    ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_G
+    bl _napi_get_property
+    mov x0, x26
+    ldr x1, [sp, #LN_A]
+    ldr x2, [sp, #LN_J]
+    ldr x3, [sp, #LN_G]
+    bl _napi_set_property
+    b .Ln_obj_p2next
+.Ln_obj_p2ca:
+    mov x0, x26
+    mov x1, x28
+    ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_G
+    bl _napi_get_property
+    mov x0, x20               // key bytes still at scratch — copy to ring (inner runs reuse scratch)
+    ldr x1, [sp, #LN_E]
+    bl _azn_path_push_skey
+    add x9, x27, #2
+    ldr x10, [x9]
+    add x0, x9, x10           // catchall node
+    ldr x1, [sp, #LN_G]
+    add x2, sp, #LN_G
+    bl _aznapi_run
+    str x0, [sp, #LN_H]
+    bl _az_path_pop
+    ldr x0, [sp, #LN_H]
+    cmp x0, #-2
+    b.ne .Ln_obj_p2cast
+    mov x9, #1
+    str x9, [sp, #LN_I]
+    b .Ln_obj_p2next
+.Ln_obj_p2cast:
+    cbnz x0, .Ln_ret
+    mov x0, x26
+    ldr x1, [sp, #LN_A]
+    ldr x2, [sp, #LN_J]
+    ldr x3, [sp, #LN_G]
+    bl _napi_set_property
+.Ln_obj_p2next:
+    ldr x9, [sp, #LN_M]
+    add x9, x9, #1
+    str x9, [sp, #LN_M]
+    b .Ln_obj_p2loop
+.Ln_obj_p2done:
+    ldrb w9, [x27, #1]
+    cmp w9, #1
+    b.ne .Ln_obj_wrapup
+    ldr x9, [sp, #LN_N]
+    cbz x9, .Ln_obj_wrapup
+    mov x0, #5                // unrecognized_keys
+    mov x1, #0
+    mov x2, #0
+    bl _az_issue_begin
+    cbnz x0, .Ln_ret
+    AZ_ADR x0, .Ls_keys
+    mov x1, #4
+    ldr x2, [sp, #LN_P]
+    mov x3, #16               // stride between {ptr,len} pairs
+    ldr x4, [sp, #LN_N]
+    bl _az_issue_f_strarr2
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    mov x9, #1
+    str x9, [sp, #LN_I]
+.Ln_obj_wrapup:
     ldr x9, [sp, #LN_I]
     cbnz x9, .Ln_obj_failed
     ldr x9, [sp, #LN_A]
     str x9, [x19]
     mov x0, #0
+    b .Ln_ret
+.Ln_obj_hard:
+    mov x0, #-3
     b .Ln_ret
 .Ln_obj_failed:
     mov x0, #-2
@@ -2173,6 +2334,641 @@ _azn_encval:
     b .Ln_ret
 
 // ================= data =================
+// ============ 0x08 DISCRIMINATED UNION ============
+// [op][dlen u64][dname][n u64][klen,key,field]*n — input obj, disc prop string-matches a key
+.Ln_disc:
+    mov x0, x28
+    bl _azn_typeof
+    cmp w0, #NAPI_OBJ
+    b.ne .Ln_disc_fail
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_A
+    bl _napi_is_array
+    ldrb w9, [sp, #LN_A]
+    cbnz w9, .Ln_disc_fail
+    // disc prop
+    mov x0, x26
+    add x1, x27, #9           // dname ptr
+    ldr x2, [x27, #1]         // dlen
+    add x3, sp, #LN_J
+    bl _napi_create_string_utf8
+    mov x0, x26
+    mov x1, x28
+    ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_G
+    bl _napi_get_property
+    ldr x0, [sp, #LN_G]
+    bl _azn_typeof
+    cmp w0, #NAPI_STR
+    b.ne .Ln_disc_punt        // non-string disc -> FFI (num/bool discs)
+    ldr x0, [sp, #LN_G]
+    bl _azn_getstr            // x0=len, x20 bytes
+    cmp x0, #-1
+    b.eq .Ln_obj_unsup
+    str x0, [sp, #LN_A]       // disc len
+    // scan entries
+    ldr x9, [x27, #1]
+    add x10, x27, #9
+    add x10, x10, x9          // &n
+    ldr x11, [x10]
+    str x11, [sp, #LN_B]      // n remaining
+    add x10, x10, #8
+    str x10, [sp, #LN_C]      // entry cur
+.Ln_disc_scan:
+    ldr x9, [sp, #LN_B]
+    cbz x9, .Ln_disc_nomatch
+    ldr x10, [sp, #LN_C]
+    ldr x11, [x10]            // klen
+    ldr x12, [sp, #LN_A]
+    cmp x11, x12
+    b.ne .Ln_disc_next
+    add x0, x10, #8           // key ptr
+    mov x1, x20               // input disc bytes
+    mov x2, x11
+    bl _az_memeq
+    cbnz w0, .Ln_disc_hit
+.Ln_disc_next:
+    ldr x10, [sp, #LN_C]
+    ldr x11, [x10]
+    add x10, x10, x11
+    add x10, x10, #16
+    str x10, [sp, #LN_C]
+    ldr x9, [sp, #LN_B]
+    sub x9, x9, #1
+    str x9, [sp, #LN_B]
+    b .Ln_disc_scan
+.Ln_disc_hit:
+    ldr x10, [sp, #LN_C]
+    ldr x11, [x10]
+    add x10, x10, #8
+    add x12, x10, x11         // field addr
+    ldr x13, [x12]
+    add x0, x12, x13          // option node
+    mov x1, x28               // option validates WHOLE input
+    mov x2, x19
+    bl _aznapi_run
+    b .Ln_ret
+.Ln_disc_nomatch:
+    // invalid_union w/ path=[disc]
+    add x0, x27, #9
+    ldr x1, [x27, #1]
+    bl _az_path_push_key
+    mov x0, #3
+    mov x1, #0
+    mov x2, #0
+    bl _az_issue_begin
+    str x0, [sp, #LN_H]
+    bl _az_path_pop
+    ldr x0, [sp, #LN_H]
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    mov x0, #-2
+    b .Ln_ret
+.Ln_disc_punt:
+    mov x0, #-10
+    b .Ln_ret
+.Ln_disc_fail:
+    AZ_ADR x0, .Lex_object
+    mov x1, #6
+    bl _azn_issue_type
+    b .Ln_ret
+
+// ============ 0x11 PIPE ============
+// [op][inField i64][outField i64]
+.Ln_pipe:
+    add x9, x27, #1
+    ldr x10, [x9]
+    add x0, x9, x10           // in node
+    mov x1, x28
+    add x2, sp, #LN_A
+    bl _aznapi_run
+    cbnz x0, .Ln_ret          // propagate (-2 has issues)
+    add x9, x27, #9
+    ldr x10, [x9]
+    add x0, x9, x10           // out node
+    ldr x1, [sp, #LN_A]
+    mov x2, x19
+    bl _aznapi_run
+    b .Ln_ret
+
+// ============ 0x12 INTERSECTION ============
+// [op][lField i64][rField i64] — both run on input; objects merge (r wins), equal prims keep l
+.Ln_int:
+    add x9, x27, #1
+    ldr x10, [x9]
+    add x0, x9, x10
+    mov x1, x28
+    add x2, sp, #LN_B
+    bl _aznapi_run
+    str x0, [sp, #LN_A]       // stL
+    add x9, x27, #9
+    ldr x10, [x9]
+    add x0, x9, x10
+    mov x1, x28
+    add x2, sp, #LN_C
+    bl _aznapi_run
+    str x0, [sp, #LN_D]       // stR
+    ldr x0, [sp, #LN_A]
+    cbnz x0, .Ln_ret          // L failed -> propagate
+    ldr x0, [sp, #LN_D]
+    cbnz x0, .Ln_ret          // R failed -> propagate
+    ldr x0, [sp, #LN_B]
+    bl _azn_typeof
+    cmp w0, #NAPI_OBJ
+    b.ne .Ln_int_eq
+    ldr x0, [sp, #LN_C]
+    bl _azn_typeof
+    cmp w0, #NAPI_OBJ
+    b.ne .Ln_int_eq
+    mov x0, x26
+    ldr x1, [sp, #LN_B]
+    add x2, sp, #LN_A
+    bl _napi_is_array
+    ldrb w9, [sp, #LN_A]
+    cbnz w9, .Ln_int_punt     // array merge -> FFI
+    mov x0, x26
+    ldr x1, [sp, #LN_C]
+    add x2, sp, #LN_A
+    bl _napi_is_array
+    ldrb w9, [sp, #LN_A]
+    cbnz w9, .Ln_int_punt
+    // merge r's props into l
+    mov x0, x26
+    ldr x1, [sp, #LN_C]
+    add x2, sp, #LN_K
+    bl _napi_get_property_names
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    add x2, sp, #LN_L
+    bl _napi_get_array_length
+    str xzr, [sp, #LN_M]
+.Ln_int_ml:
+    ldr w9, [sp, #LN_L]
+    ldr x10, [sp, #LN_M]
+    cmp x10, x9
+    b.hs .Ln_int_md
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    ldr x2, [sp, #LN_M]
+    add x3, sp, #LN_J
+    bl _napi_get_element
+    mov x0, x26
+    ldr x1, [sp, #LN_C]
+    ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_G
+    bl _napi_get_property
+    mov x0, x26
+    ldr x1, [sp, #LN_B]
+    ldr x2, [sp, #LN_J]
+    ldr x3, [sp, #LN_G]
+    bl _napi_set_property
+    ldr x9, [sp, #LN_M]
+    add x9, x9, #1
+    str x9, [sp, #LN_M]
+    b .Ln_int_ml
+.Ln_int_md:
+    ldr x9, [sp, #LN_B]
+    str x9, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_int_eq:
+    mov x0, x26
+    ldr x1, [sp, #LN_B]
+    ldr x2, [sp, #LN_C]
+    add x3, sp, #LN_A
+    bl _napi_strict_equals
+    ldrb w9, [sp, #LN_A]
+    cbz w9, .Ln_int_punt
+    ldr x9, [sp, #LN_B]
+    str x9, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_int_punt:
+    mov x0, #-10
+    b .Ln_ret
+
+// ============ 0x14 RECORD ============
+// [op][keyField i64][valField i64] — keyField==0 => keys unchecked
+.Ln_rec:
+    mov x0, x28
+    bl _azn_typeof
+    cmp w0, #NAPI_OBJ
+    b.ne .Ln_rec_fail
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_A
+    bl _napi_is_array
+    ldrb w9, [sp, #LN_A]
+    cbnz w9, .Ln_rec_fail
+    // zod rejects exotic protos (Map/Set/Date...) — plain objects only
+    mov x0, x28
+    bl _azn_is_proto_obj
+    cbnz w0, .Ln_rec_plain
+    cmp w0, #-1
+    b.eq .Ln_obj_unsup
+    b .Ln_rec_fail
+.Ln_rec_plain:
+    mov x0, x26
+    add x1, sp, #LN_A
+    bl _napi_create_object
+    mov x0, x26
+    mov x1, x28
+    add x2, sp, #LN_K
+    bl _napi_get_property_names
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    add x2, sp, #LN_L
+    bl _napi_get_array_length
+    str xzr, [sp, #LN_M]
+    str xzr, [sp, #LN_I]
+.Ln_rec_loop:
+    ldr w9, [sp, #LN_L]
+    ldr x10, [sp, #LN_M]
+    cmp x10, x9
+    b.hs .Ln_rec_done
+    mov x0, x26
+    ldr x1, [sp, #LN_K]
+    ldr x2, [sp, #LN_M]
+    add x3, sp, #LN_J
+    bl _napi_get_element      // key string
+    // key check
+    ldr x9, [x27, #1]
+    cbz x9, .Ln_rec_val
+    ldr x10, [x22]
+    str x10, [sp, #LN_B]      // issue_count before key run
+    add x10, x27, #1
+    add x0, x10, x9           // keynode
+    ldr x1, [sp, #LN_J]
+    add x2, sp, #LN_G
+    bl _aznapi_run
+    cmp x0, #-2
+    b.eq .Ln_rec_kfail
+    cbnz x0, .Ln_ret
+    b .Ln_rec_val
+.Ln_rec_kfail:
+    mov x9, #1
+    str x9, [sp, #LN_I]
+    // wrap: invalid_key{origin:"record",_k:delta,path:[key]}
+    ldr x0, [sp, #LN_J]
+    bl _azn_getstr            // key bytes at x20, x0=len
+    cmp x0, #-1
+    b.eq .Ln_obj_unsup
+    mov x9, x0
+    mov x0, x20
+    mov x1, x9
+    bl _azn_path_push_skey
+    mov x0, #13
+    mov x1, #0
+    mov x2, #0
+    bl _az_issue_begin
+    str x0, [sp, #LN_H]
+    bl _az_path_pop
+    ldr x0, [sp, #LN_H]
+    cbnz x0, .Ln_ret
+    AZ_ADR x0, .Lnk_origin
+    mov x1, #6
+    AZ_ADR x2, .Ls_record
+    mov x3, #6
+    bl _az_issue_f_str
+    cbnz x0, .Ln_ret
+    ldr x9, [x22]
+    ldr x10, [sp, #LN_B]
+    sub x10, x9, x10
+    ucvtf d0, x10
+    AZ_ADR x0, .Lnk_k
+    mov x1, #2
+    bl _az_issue_f_f64
+    cbnz x0, .Ln_ret
+    bl _az_issue_commit
+    b .Ln_rec_next
+.Ln_rec_val:
+    mov x0, x26
+    mov x1, x28
+    ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_G
+    bl _napi_get_property
+    ldr x0, [sp, #LN_J]
+    bl _azn_getstr            // key bytes at x20
+    cmp x0, #-1
+    b.eq .Ln_obj_unsup
+    mov x9, x0
+    mov x0, x20
+    mov x1, x9
+    bl _azn_path_push_skey
+    add x9, x27, #9
+    ldr x10, [x9]
+    add x0, x9, x10           // valnode
+    ldr x1, [sp, #LN_G]
+    add x2, sp, #LN_G
+    bl _aznapi_run
+    str x0, [sp, #LN_H]
+    bl _az_path_pop
+    ldr x0, [sp, #LN_H]
+    cmp x0, #-2
+    b.ne .Ln_rec_vst
+    mov x9, #1
+    str x9, [sp, #LN_I]
+    b .Ln_rec_next
+.Ln_rec_vst:
+    cbnz x0, .Ln_ret
+    mov x0, x26
+    ldr x1, [sp, #LN_A]
+    ldr x2, [sp, #LN_J]
+    ldr x3, [sp, #LN_G]
+    bl _napi_set_property
+.Ln_rec_next:
+    ldr x9, [sp, #LN_M]
+    add x9, x9, #1
+    str x9, [sp, #LN_M]
+    b .Ln_rec_loop
+.Ln_rec_done:
+    ldr x9, [sp, #LN_I]
+    cbnz x9, .Ln_rec_failed
+    ldr x9, [sp, #LN_A]
+    str x9, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_rec_failed:
+    mov x0, #-2
+    b .Ln_ret
+.Ln_rec_fail:
+    AZ_ADR x0, .Ls_record
+    mov x1, #6
+    bl _azn_issue_type
+    b .Ln_ret
+
+// ============ 0x20 DATE ============
+// [op][nchecks u8][kind u8,msglen u64,msg,f64]* — Date proto + getTime, min/max bounds
+.Ln_date:
+    mov x0, x28
+    bl _azn_typeof
+    cmp w0, #NAPI_OBJ
+    b.ne .Ln_date_fail
+    mov x0, x28
+    AZ_ADR x1, .Ls_Date
+    mov x2, #4
+    bl _azn_is_proto
+    cmp w0, #1
+    b.ne .Ln_date_fail
+    mov x0, x26
+    mov x1, x28
+    AZ_ADR x2, .Ls_getTime
+    add x3, sp, #LN_A
+    bl _napi_get_named_property
+    cbnz x0, .Ln_date_fail
+    mov x0, x26
+    mov x1, x28               // this
+    ldr x2, [sp, #LN_A]       // fn
+    mov x3, #0
+    mov x4, #0
+    add x5, sp, #LN_B
+    bl _napi_call_function
+    cbnz x0, .Ln_date_fail
+    mov x0, x26
+    ldr x1, [sp, #LN_B]
+    add x2, sp, #LN_C
+    bl _napi_get_value_double
+    ldr d0, [sp, #LN_C]
+    fcmp d0, d0
+    b.vs .Ln_date_nan
+    str d0, [sp, #LN_D]       // time
+    str xzr, [sp, #LN_I]      // failed
+    ldrb w9, [x27, #1]
+    cbz w9, .Ln_date_done
+    add x10, x27, #2
+    str x10, [sp, #LN_E]      // chk cur
+    str x9, [sp, #LN_F]       // chk rem
+.Ln_date_cl:
+    ldr x9, [sp, #LN_F]
+    cbz x9, .Ln_date_done
+    ldr x10, [sp, #LN_E]
+    ldrb w11, [x10]           // kind
+    ldr x12, [x10, #1]        // msglen
+    add x13, x10, #9          // msgptr
+    add x14, x13, x12         // f64
+    ldr d1, [x14]
+    add x15, x14, #8
+    str x15, [sp, #LN_E]
+    ldr x9, [sp, #LN_F]
+    sub x9, x9, #1
+    str x9, [sp, #LN_F]
+    stp x12, x13, [sp, #LN_G] // msglen,msgptr across cmps
+    ldr d0, [sp, #LN_D]
+    cmp w11, #1
+    b.eq .Ln_date_min
+    cmp w11, #2
+    b.ne .Ln_date_cl
+    // max: t > bound -> too_big "date"
+    fcmp d0, d1
+    b.le .Ln_date_cl
+    mov x0, #9
+    b .Ln_date_sz
+.Ln_date_min:
+    fcmp d0, d1
+    b.ge .Ln_date_cl
+    mov x0, #8
+.Ln_date_sz:
+    fmov x3, d1
+    AZ_ADR x1, .Ls_date4
+    mov x2, #4
+    mov w4, #1                // inclusive
+    mov w5, #0
+    ldr x6, [sp, #LN_H]       // msgptr — wait, stp order
+    mov x6, x13
+    mov x7, x12
+    bl _az_issue_size
+    cbnz x0, .Ln_ret
+    mov x9, #1
+    str x9, [sp, #LN_I]
+    b .Ln_date_cl
+.Ln_date_done:
+    ldr x9, [sp, #LN_I]
+    cbnz x9, .Ln_date_failed
+    str x28, [x19]
+    mov x0, #0
+    b .Ln_ret
+.Ln_date_failed:
+    mov x0, #-2
+    b .Ln_ret
+.Ln_date_nan:
+    bl _az_issue_invalid_date
+    cbnz x0, .Ln_ret
+    mov x0, #-2
+    b .Ln_ret
+.Ln_date_fail:
+    AZ_ADR x0, .Lex_date2
+    mov x1, #4
+    bl _azn_issue_type
+    b .Ln_ret
+
+// ============ helpers ============
+// _azn_haskey(x0=objnode, x1=kptr, x2=klen) -> w0=1 if schema has key
+_azn_haskey:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    stp x1, x2, [sp, #16]     // kptr,klen
+    ldr x9, [x0, #10]         // nkeys
+    add x10, x0, #18          // rec cur
+.Lhk_loop:
+    cbz x9, .Lhk_no
+    ldr x11, [x10]            // klen2
+    ldr x12, [sp, #24]
+    stp x9, x10, [sp, #32]    // rem,cur across possible call
+    cmp x11, x12
+    b.ne .Lhk_adv
+    add x0, x10, #8
+    ldr x1, [sp, #16]
+    mov x2, x11
+    bl _az_memeq
+    cbnz w0, .Lhk_yes
+.Lhk_adv:
+    ldp x9, x10, [sp, #32]
+    ldr x11, [x10]
+    add x10, x10, x11
+    add x10, x10, #16
+    sub x9, x9, #1
+    b .Lhk_loop
+.Lhk_yes:
+    mov w0, #1
+    b .Lhk_ret
+.Lhk_no:
+    mov w0, #0
+.Lhk_ret:
+    ldp x29, x30, [sp], #48
+    ret
+
+// _azn_path_push_skey(x0=kptr, x1=klen): copy into the path ring then push —
+// az_path_push_key stores a pointer, and scratch bytes die on the next getstr.
+// ring: 128 slots x 4KB at scratch+3.5MB, slot = current path depth.
+_azn_path_push_skey:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    stp x0, x1, [sp, #16]     // kptr,klen
+    ldr x9, [x22, #8]         // depth = slot idx
+    cmp x9, #128
+    b.hs .Lskey_push          // stack full: push raw ptr (same as plain push)
+    mov x10, #4096
+    mul x10, x9, x10
+    AZ_ADR x11, _azn_scratch
+    add x11, x11, #0x380000   // ring base = scratch + 3.5MB
+    add x11, x11, x10
+    ldr x2, [sp, #24]
+    mov x12, #4096
+    cmp x2, x12
+    b.ls .Lskey_lenok
+    mov x2, x12               // clamp (arena caps make >4KB keys unrealistic)
+    str x2, [sp, #24]
+.Lskey_lenok:
+    str x11, [sp, #32]
+    mov x0, x11
+    ldr x1, [sp, #16]
+    bl _az_memcpy
+    ldr x11, [sp, #32]
+    str x11, [sp, #16]        // kptr = ring slot
+.Lskey_push:
+    ldp x0, x1, [sp, #16]
+    bl _az_path_push_key
+    ldp x29, x30, [sp], #48
+    ret
+
+// _azn_is_proto_obj(x0=val) -> w0=1 plain object (Object.prototype / null proto), 0 else, -1 err
+_azn_is_proto_obj:
+    stp x29, x30, [sp, #-96]!
+    mov x29, sp
+    str x0, [sp, #16]
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #40
+    bl _napi_get_prototype
+    cbnz x0, .Lpo_err
+    ldr x9, [sp, #40]
+    cbz x9, .Lpo_yes           // null proto -> plain
+    mov x0, x26
+    add x1, sp, #48
+    bl _napi_get_global
+    cbnz x0, .Lpo_err
+    mov x0, x26
+    ldr x1, [sp, #48]
+    AZ_ADR x2, .Ls_Objstr
+    add x3, sp, #56
+    bl _napi_get_named_property
+    cbnz x0, .Lpo_err
+    mov x0, x26
+    ldr x1, [sp, #56]
+    AZ_ADR x2, .Ls_protoname
+    add x3, sp, #64
+    bl _napi_get_named_property
+    cbnz x0, .Lpo_err
+    mov x0, x26
+    ldr x1, [sp, #40]
+    ldr x2, [sp, #64]
+    add x3, sp, #72
+    bl _napi_strict_equals
+    cbnz x0, .Lpo_err
+    ldrb w0, [sp, #72]
+    b .Lpo_ret
+.Lpo_yes:
+    mov w0, #1
+    b .Lpo_ret
+.Lpo_err:
+    mov w0, #-1
+.Lpo_ret:
+    ldp x29, x30, [sp], #96
+    ret
+
+// _azn_is_proto(x0=val, x1=nameptr, x2=namelen) -> w0=1 if proto(val)===Global[name].prototype
+_azn_is_proto:
+    stp x29, x30, [sp, #-96]!
+    mov x29, sp
+    stp x0, x1, [sp, #16]     // val, nameptr
+    str x2, [sp, #32]
+    mov x0, x26
+    ldr x1, [sp, #16]
+    add x2, sp, #40
+    bl _napi_get_prototype
+    cbnz x0, .Lip_err
+    ldr x9, [sp, #40]
+    cbz x9, .Lip_no
+    mov x0, x26
+    add x1, sp, #48
+    bl _napi_get_global
+    cbnz x0, .Lip_err
+    mov x0, x26
+    ldr x1, [sp, #24]
+    ldr x2, [sp, #32]
+    add x3, sp, #56
+    bl _napi_create_string_utf8
+    cbnz x0, .Lip_err
+    mov x0, x26
+    ldr x1, [sp, #48]
+    ldr x2, [sp, #56]
+    add x3, sp, #56
+    bl _napi_get_property     // ctor
+    cbnz x0, .Lip_err
+    mov x0, x26
+    ldr x1, [sp, #56]
+    AZ_ADR x2, .Ls_protoname
+    add x3, sp, #64
+    bl _napi_get_named_property
+    cbnz x0, .Lip_err
+    mov x0, x26
+    ldr x1, [sp, #40]
+    ldr x2, [sp, #64]
+    add x3, sp, #72
+    bl _napi_strict_equals
+    cbnz x0, .Lip_err
+    ldrb w0, [sp, #72]
+    b .Lip_ret
+.Lip_no:
+    mov w0, #0
+    b .Lip_ret
+.Lip_err:
+    mov w0, #-1
+.Lip_ret:
+    ldp x29, x30, [sp], #96
+    ret
+
 .Ls_nan:      .ascii "NaN\0"
 .Ls_inf:      .ascii "Infinity\0"
 .Ls_ninf:     .ascii "-Infinity\0"
@@ -2197,8 +2993,16 @@ _azn_encval:
 .Lex_object:     .ascii "object\0"
 .Lex_tuple:      .ascii "tuple\0"
 .Lex_nonoptional:.ascii "nonoptional\0"
+.Ls_record:    .ascii "record\0"
+.Ls_Date:      .ascii "Date\0"
+.Ls_getTime:   .ascii "getTime\0"
+.Ls_keys:      .ascii "keys\0"
+.Ls_date4:     .ascii "date\0"
+.Lex_date2:    .ascii "date\0"
 .Ln_k_expected:  .ascii "expected\0"
 .Lnk_u:          .ascii "_u\0"
+.Lnk_k:          .ascii "_k\0"
+.Lnk_origin:     .ascii "origin\0"
 .Lnk_received:   .ascii "received\0"
 .Lnk_options:    .ascii "options\0"
 .Ln_k_received:  .ascii "received\0"
