@@ -28,7 +28,7 @@ _az_utf16_units:
     cmp x11, #16
     b.hs .Luu_simd
     uaddlv h4, v4.16b
-    fmov w11, h4
+    umov w11, v4.h[0]
     sub x9, x10, x11         // simd units = bytes - continuations
 .Luu_tail0:
     mov x10, x9              // scalar tail resumes at byte = units+conts
