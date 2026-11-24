@@ -610,7 +610,7 @@ export const z = {
   /** MAC address — same regex as zod */
   mac: (params?: any) => new ZodString().mac(params),
   /** JSON Schema -> schema (covers the subset toJSONSchema emits + common constructs) */
-  fromJSONSchema: (js: any): ZodTypeAny => fromJSONSchema(js),
+  fromJSONSchema: (js: any, params?: any): ZodTypeAny => fromJSONSchema(js, params),
 
   // ---------- remaining top-level utilities ----------
   /** schema.pipe(target) as a factory */
@@ -741,6 +741,7 @@ const HASH_LENS = {
 (z as any).ZodError = ZodError;
 (z as any).ZodRealError = ZodRealError;
 import { toJSONSchema, JSONSchemaGenerator } from "./jsonschema.ts";
+import { fromJSONSchema } from "./fromjson.ts";
 import * as _regexes from "./regexes.ts";
 (z as any).toJSONSchema = toJSONSchema;
 (ZodType.prototype as any).toJSONSchema = function (this: any, params?: any) {
@@ -862,91 +863,6 @@ export declare namespace z {
   export type output<T extends ZodType<any, any>> = T["_output"];
 }
 
-// fromJSONSchema: inverse of toJSONSchema — covers the emitted subset
-// plus common draft-2020-12 constructs. Unsupported constructs throw.
-function fromJSONSchema(js: any): ZodTypeAny {
-  if (js === true || js === undefined) return z.any();
-  if (js === false) return z.never();
-  if (js.const !== undefined) return z.literal(js.const);
-  if (js.enum !== undefined) return z.enum(js.enum);
-  if (js.anyOf) return z.union(js.anyOf.map(fromJSONSchema));
-  if (js.oneOf) return z.union(js.oneOf.map(fromJSONSchema));
-  if (js.allOf && js.allOf.length === 2)
-    return z.intersection(fromJSONSchema(js.allOf[0]), fromJSONSchema(js.allOf[1]));
-  if (js.not) throw new Error("asmzod: fromJSONSchema does not support 'not'");
-  const types: string[] = Array.isArray(js.type) ? js.type : js.type ? [js.type] : [];
-  if (types.length > 1) {
-    // ["T","null"] -> nullable(T); other unions -> z.union
-    const nonNull = types.filter((t) => t !== "null");
-    if (nonNull.length === 1)
-      return (fromJSONSchema({ ...js, type: nonNull[0] }) as any).nullable();
-    return z.union(types.map((t) => fromJSONSchema({ ...js, type: t })));
-  }
-  let s: ZodTypeAny;
-  switch (types[0]) {
-    case "string": {
-      let str = z.string() as any;
-      const fmtMap: Record<string, string> = {
-        email: "email", uuid: "uuid", url: "url", uri: "url", emoji: "emoji",
-        base64: "base64", base64url: "base64url", nanoid: "nanoid", cuid: "cuid",
-        cuid2: "cuid2", ulid: "ulid", ipv4: "ipv4", ipv6: "ipv6",
-        cidrv4: "cidrv4", cidrv6: "cidrv6", date: "date", time: "time",
-        "date-time": "datetime", datetime: "datetime", duration: "duration",
-        e164: "e164", jwt: "jwt", hex: "hex",
-      };
-      const f = fmtMap[js.format ?? ""];
-      if (f && typeof str[f] === "function") str = str[f]();
-      else if (js.format === "credit_card") str = z.creditCard();
-      else if (js.format === "iban") str = z.iban();
-      else if (js.format === "currency_code") str = z.currencyCode();
-      if (typeof js.minLength === "number") str = str.min(js.minLength);
-      if (typeof js.maxLength === "number") str = str.max(js.maxLength);
-      if (typeof js.length === "number") str = str.length(js.length);
-      if (js.pattern && typeof str.regex === "function") str = str.regex(new RegExp(js.pattern));
-      if (js.startsWith) str = str.startsWith(js.startsWith);
-      if (js.endsWith) str = str.endsWith(js.endsWith);
-      if (js.includes) str = str.includes(js.includes);
-      s = str; break;
-    }
-    case "number": case "integer": {
-      let n = z.number() as any;
-      if (types[0] === "integer") n = n.int();
-      if (typeof js.minimum === "number") n = n.gte(js.minimum);
-      if (typeof js.maximum === "number") n = n.lte(js.maximum);
-      if (typeof js.exclusiveMinimum === "number") n = n.gt(js.exclusiveMinimum);
-      if (typeof js.exclusiveMaximum === "number") n = n.lt(js.exclusiveMaximum);
-      if (typeof js.multipleOf === "number") n = n.multipleOf(js.multipleOf);
-      s = n; break;
-    }
-    case "boolean": s = z.boolean(); break;
-    case "null": s = z.null(); break;
-    case "array": {
-      let a = z.array(js.items ? fromJSONSchema(js.items) : z.any()) as any;
-      if (typeof js.minItems === "number") a = a.min(js.minItems);
-      if (typeof js.maxItems === "number") a = a.max(js.maxItems);
-      s = a; break;
-    }
-    case "object": {
-      if (js.properties) {
-        const shape: Record<string, ZodTypeAny> = {};
-        for (const [k, v] of Object.entries(js.properties)) {
-          let vs = fromJSONSchema(v);
-          if (!js.required?.includes(k)) vs = (vs as any).optional();
-          shape[k] = vs;
-        }
-        s = js.additionalProperties === false ? z.strictObject(shape)
-          : js.additionalProperties ? z.looseObject(shape) : z.object(shape);
-      } else if (js.additionalProperties && typeof js.additionalProperties === "object") {
-        s = z.record(z.string(), fromJSONSchema(js.additionalProperties));
-      } else s = z.record(z.string(), z.unknown());
-      break;
-    }
-    default:
-      if (js.$ref) throw new Error("asmzod: fromJSONSchema does not resolve $ref");
-      s = z.unknown();
-  }
-  return s;
-}
 
 // toZod: render a schema's def back to zod-ish source — subset matching
 // fromJSONSchema coverage; unknown defs degrade to z.unknown()

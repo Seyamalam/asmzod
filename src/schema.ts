@@ -651,6 +651,38 @@ function _checkClsName(c: any): string {
     default: return "$ZodCheckStringFormat";
   }
 }
+// zod check names for our record kinds — the `_zod.def.check` strings tests
+// and serializers read off check objects
+const _ZCHK_NAME: Record<string, string> = {
+  gt: "greater_than", gte: "greater_than", lt: "less_than", lte: "less_than",
+  min: "min_length", max: "max_length", length: "length_equals",
+  size: "size_equals", minSize: "min_size", maxSize: "max_size",
+  multipleOf: "multiple_of", int: "number_format", finite: "number_format",
+  regex: "string_format", startsWith: "string_format", endsWith: "string_format",
+  includes: "string_format", lowercase: "string_format", uppercase: "string_format",
+  overwrite: "overwrite", tx: "overwrite", checkfn: "custom", refine: "custom",
+  schemacheck: "custom", properties: "properties",
+};
+
+// spread + message normalization + a non-enumerable `_zod` facade — records
+// masquerade as zod check objects for `_zod.def` readers
+function _zrec(c: any): any {
+  const r = { ...c, message: paramMsg(c.message) };
+  if (r && typeof r === "object" && r.kind !== undefined && r._zod === undefined) {
+    const def: any = { check: _ZCHK_NAME[r.kind] ?? r.kind };
+    for (const [k, v] of Object.entries(r)) {
+      if (k === "kind" || k === "fn" || k === "message" || k === "error" || k === "when" || k === "abort" || k.startsWith("_")) continue;
+      def[k] = v;
+    }
+    if (r.kind === "gt" || r.kind === "lt") def.inclusive = false;
+    if (r.kind === "gte" || r.kind === "lte") def.inclusive = true;
+    if (r.kind === "min" || r.kind === "minSize") { def.minimum = r.value ?? r.min; delete def.value; }
+    if (r.kind === "max" || r.kind === "maxSize") { def.maximum = r.value ?? r.max; delete def.value; }
+    Object.defineProperty(r, "_zod", { value: { def, check: r.fn, traits: new Set(["$ZodCheck"]) }, enumerable: false, writable: true, configurable: true });
+  }
+  return r;
+}
+
 function _checkInst(c: any): any {
   const name = _checkClsName(c);
   let cls = _CHECK_CLS.get(name);
@@ -1410,6 +1442,15 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const checks = [...(this._def.checks ?? [])];
       const def: any = { ...this._def, checks };
       for (const o of objs) {
+        // plain check records (facade `_zod` included) — kind discriminates
+        // them from real `_zod` check objects, whose def carries `check`
+        const c0 = o._def ?? o;
+        if (c0 !== null && typeof c0 === "object" && c0.kind !== undefined && !_isSchema(o)) {
+          if (c0.kind === "meta") (def._metaCheck ??= []).push(c0);
+          else if (c0.kind === "checkfn") fns.push(c0.fn);
+          else checks.push(_zrec(c0));
+          continue;
+        }
         // a schema passed to .check runs as a check — its whole validation
         // applies to the payload (zod: schemas carry _zod.check too). this
         // covers z.refine()/z.superRefine()/z.iso.* args
@@ -1419,7 +1460,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
           const rec: any = { ...(o._zod.def ?? {}), fn: o._zod.check, _onattach: o._zod.onattach };
           // _zod.check takes the payload ({value, issues}) — route like checkfn
           if (typeof rec.fn === "function" && rec.kind === undefined) rec.kind = "checkfn";
-          checks.push(rec);
+          checks.push(_zrec(rec));
           continue;
         }
         if (_isSchema(o)) {
@@ -1429,7 +1470,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         const c = o._def ?? o;
         if (c.kind === "meta") (def._metaCheck ??= []).push(c);
         else if (c.kind === "checkfn") fns.push(c.fn);
-        else checks.push(c);
+        else checks.push(_zrec(c));
       }
       s = new (this as any).constructor(def);
       (s as any)._zod.parent = this;
@@ -1745,7 +1786,7 @@ export class ZodString extends ZodType<string> {
     const rec = mk ? { ...c, fn: mk(c), builtin: true } : c;
     // mk may annotate the record (fmt/pat for JSON Schema + issues)
     if (mk) Object.assign(rec, c);
-    return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, { ...rec, message: paramMsg(rec.message) }] });
+    return new ZodString({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(rec)] });
   }
   min(n: number, message?: string) { return this._check({ kind: "min", value: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "max", value: n, message }); }
@@ -1889,7 +1930,7 @@ export class ZodString extends ZodType<string> {
 
 export class ZodNumber extends ZodType<number> {
   constructor(_def: any = { type: "number", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodNumber({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodNumber({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   gt(n: number, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
   min(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -1949,7 +1990,7 @@ export class ZodNumber extends ZodType<number> {
 
 export class ZodBigInt extends ZodType<bigint> {
   constructor(_def: any = { type: "bigint", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodBigInt({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodBigInt({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   gt(n: bigint, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
   min(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -2010,7 +2051,7 @@ export class ZodSymbol extends ZodType<symbol> {
 
 export class ZodDate extends ZodType<Date> {
   constructor(_def: any = { type: "date", checks: [] }) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodDate({ ...this._def, parent: this, checks: [...this._def.checks, { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodDate({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   min(d: Date | number, message?: string) { return this._check({ kind: "min", value: d instanceof Date ? d.getTime() : +d, message }); }
   max(d: Date | number, message?: string) { return this._check({ kind: "max", value: d instanceof Date ? d.getTime() : +d, message }); }
   get minDate(): Date | null {
@@ -2842,10 +2883,10 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
     // optoutStart, so optoutStart===n means the engine path is equivalent
     let optinStart = n; while (optinStart > 0 && items[optinStart - 1]?._zod?.optin !== undefined) optinStart--;
     let optoutStart = n; while (optoutStart > 0 && items[optoutStart - 1]?._zod?.optout === "optional") optoutStart--;
-    if (optoutStart === n && !this._hasFx() && !earlyAbort && !(MEMO && Array.isArray(data) && this._isRec()))
+    if (optoutStart === n && !this._hasFx() && !this._def.checks?.length && !earlyAbort && !(MEMO && Array.isArray(data) && this._isRec()))
       return super._runImpl(data);
     if (!Array.isArray(data)) return super._runImpl(data);
-    return _memoRun(this, data, () => new Array(Math.max(data.length, optoutStart)), (out) => {
+    const tr = _memoRun(this, data, () => new Array(Math.max(data.length, optoutStart)), (out) => {
       const issues: any[] = [];
       if (!rest) {
         if (data.length < optinStart) {
@@ -2907,6 +2948,10 @@ export class ZodTuple<Items extends ZodTypeAny[] = ZodTypeAny[]> extends ZodType
       }
       return issues.length ? { ok: false as const, issues, aborted: isAborted(issues) } : { ok: true as const, value: out };
     });
+    // def.checks evaluate on the parsed tuple after elements walk
+    if (this._def.checks?.length)
+      return this._runChecksTS(tr.ok ? tr.value : data, this._def.checks, tr, this);
+    return tr;
   }
 }
 
@@ -3214,7 +3259,7 @@ function typeIssue(expected: string, received: unknown): ZodIssue {
 export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
   extends ZodType<Map<K["_output"], V["_output"]>, Map<K["_input"], V["_input"]>> {
   constructor(_def: any) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodMap({ ...this._def, checks: [...(this._def.checks ?? []), { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodMap({ ...this._def, checks: [...(this._def.checks ?? []), _zrec(c)] }); }
   min(n: number, message?: string) { return this._check({ kind: "size", min: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "size", max: n, message }); }
   size(n: number, message?: string) { return this._check({ kind: "size", exact: n, message }); }
@@ -3279,7 +3324,7 @@ export class ZodMap<K extends ZodTypeAny, V extends ZodTypeAny>
 export class ZodSet<V extends ZodTypeAny>
   extends ZodType<Set<V["_output"]>, Set<V["_input"]>> {
   constructor(_def: any) { super(); this._def = _def; }
-  private _check(c: any) { return new ZodSet({ ...this._def, checks: [...(this._def.checks ?? []), { ...c, message: paramMsg(c.message) }] }); }
+  private _check(c: any) { return new ZodSet({ ...this._def, checks: [...(this._def.checks ?? []), _zrec(c)] }); }
   min(n: number, message?: string) { return this._check({ kind: "size", min: n, message }); }
   max(n: number, message?: string) { return this._check({ kind: "size", max: n, message }); }
   size(n: number, message?: string) { return this._check({ kind: "size", exact: n, message }); }

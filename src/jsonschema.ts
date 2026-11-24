@@ -1236,7 +1236,12 @@ const catchProcessor: Processor = (schema, ctx, json, params) => {
 
 const pipeProcessor: Processor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
-  const inIsTransform = def.in?._zod?.traits?.has(ZodTransform) || def.in?._def?.type === "transform";
+  // our `.check`/`refine` on a transform wraps it in ZodEffects — zod clones
+  // instead, so unwrap refine-family layers before the trait check
+  let inDef = def.in?._def;
+  while (inDef && (inDef.type === "refine" || inDef.type === "effects" || inDef.type === "superrefine"))
+    inDef = (inDef.innerType ?? inDef.inner)?._def;
+  const inIsTransform = inDef?.type === "transform" || def.in?._zod?.traits?.has(ZodTransform);
   const innerType = ctx.io === "input" ? (inIsTransform ? def.out : def.in) : def.out;
   processSchema(innerType, ctx, params);
   ctx.seen.get(schema)!.ref = innerType;
