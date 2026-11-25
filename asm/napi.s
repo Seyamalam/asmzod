@@ -1081,6 +1081,7 @@ _aznapi_parse:
 .equ LN_R, 248            // obj: missing-declared-key flag
 .equ LN_S, 192            // obj: issue-cursor snapshot for absent-optin swallow
 .equ LN_T, 200            // obj: issue-count snapshot for absent-optin swallow
+.equ LN_TT, 208           // obj: typeof scratch for undefined detection
 _aznapi_run:
     stp x29, x30, [sp, #-256]!
     mov x29, sp
@@ -3030,16 +3031,30 @@ _azn_encval:
     strb wzr, [x11, x12]      // NUL-terminate for named-property APIs
     mov x0, x26
     mov x1, x28
+    // get first, then typeof: a defined value needs no presence check at all.
+    // handles are opaque slots — value equality needs napi_typeof, not cmp
+    ldr x2, [sp, #LN_J]
+    add x3, sp, #LN_G
+    bl AZ_NAPI(napi_get_named_property)
+    cbnz x0, .Ln_obj_absent   // get faulted -> treat as absent
+    mov x0, x26
+    ldr x1, [sp, #LN_G]
+    add x2, sp, #LN_TT
+    bl AZ_NAPI(napi_typeof)
+    ldr w9, [sp, #LN_TT]
+    cmp w9, #NAPI_UNDEF
+    b.eq .Ln_obj_mayabs
+    mov w9, #1
+    strb w9, [sp, #LN_O]
+    b .Ln_obj_havekey
+.Ln_obj_mayabs:
+    mov x0, x26
+    mov x1, x28
     ldr x2, [sp, #LN_J]
     add x3, sp, #LN_O         // present flag (key-exists, not value==undef)
     bl AZ_NAPI(napi_has_named_property)
     ldrb w9, [sp, #LN_O]      // out param is a C bool — 1 byte
     cbz w9, .Ln_obj_absent
-    mov x0, x26
-    mov x1, x28
-    ldr x2, [sp, #LN_J]
-    add x3, sp, #LN_G
-    bl AZ_NAPI(napi_get_named_property)
     b .Ln_obj_havekey
 .Ln_obj_absent:
     // absent: inner still runs on undefined (flag 0/1); flag 2 skips the field
