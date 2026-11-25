@@ -4474,29 +4474,82 @@ for (const Cls of [
 // regexes reduces to a typed typeof + predicate loop on success. failures
 // fall through to the full pipeline for exact issue semantics. cached on
 // the def — the check list is schema-static
-function _leafPreds(d: any): ((v: string) => boolean)[] | null {
-  if (d.type !== "string" || !d.checks?.length) return null;
-  const out: ((v: string) => boolean)[] = [];
+function _leafPreds(d: any): ((v: any) => boolean)[] | null {
+  if (!d.checks?.length) return null;
+  const t = d.type;
+  if (t !== "string" && t !== "number" && t !== "bigint") return null;
+  const out: ((v: any) => boolean)[] = [];
   for (const c of d.checks) {
-    if (c && c.kind === "regex" && c.regex instanceof RegExp) {
-      const re = c.regex;
-      out.push((v) => { re.lastIndex = 0; return re.test(v); });
+    if (t === "string") {
+      if (c && c.kind === "regex" && c.regex instanceof RegExp) {
+        const re = c.regex;
+        out.push((v) => { re.lastIndex = 0; return re.test(v); });
+        continue;
+      }
+      if (c && typeof c.fn === "function" && c.builtin) {
+        const fn = c.fn;
+        out.push((v) => fn(v) === true);
+        continue;
+      }
+    }
+    // string size bounds count code points, not utf16 units (zod-exact);
+    // iteration stops at the bound — cost scales with n, not string length
+    if (t === "string" && (c.kind === "min" || c.kind === "max" || c.kind === "length")) {
+      const n = c.value;
+      if (c.kind === "min") out.push((v: string) => {
+        if (v.length < n) return false;
+        let k = 0;
+        for (const _ch of v) { if (++k === n) return true; }
+        return false;
+      });
+      else if (c.kind === "max") out.push((v: string) => {
+        if (v.length <= n) return true;
+        let k = 0;
+        for (const _ch of v) { if (++k > n) return false; }
+        return true;
+      });
+      else out.push((v: string) => {
+        if (v.length < n) return false;
+        let k = 0;
+        for (const _ch of v) { if (++k > n) return false; }
+        return k === n;
+      });
       continue;
     }
-    if (c && typeof c.fn === "function" && c.builtin) {
-      const fn = c.fn;
-      out.push((v) => fn(v) === true);
+    if ((t === "number" || t === "bigint") && (c.kind === "gte" || c.kind === "gt" || c.kind === "lte" || c.kind === "lt")) {
+      const n = c.value;
+      if (c.kind === "gte") out.push((v) => v >= n);
+      else if (c.kind === "gt") out.push((v) => v > n);
+      else if (c.kind === "lte") out.push((v) => v <= n);
+      else out.push((v) => v < n);
       continue;
+    }
+    if (t === "number" && (c.kind === "int" || c.kind === "safeInt")) {
+      out.push((v) => Number.isSafeInteger(v));
+      continue;
+    }
+    if (t === "number" && c.kind === "finite") {
+      out.push((v) => Number.isFinite(v));
+      continue;
+    }
+    if ((t === "number" || t === "bigint") && c.kind === "multipleOf") {
+      const n = c.value ?? c.divisor;
+      if (n !== undefined) { out.push((v) => t === "bigint" ? v % n === 0n : v % n === 0); continue; }
     }
     return null;
   }
   return out;
 }
 function _leafRun(d: any, data: unknown): boolean {
-  if (typeof data !== "string") return false;
-  const lf = d.leaf === undefined ? (d.leaf = _leafPreds(d) ?? 0) : d.leaf;
+  const want = d.type === "string" ? "string" : d.type === "number" ? "number" : "bigint";
+  if (typeof data !== want) return false;
+  if (d.type === "number" && !Number.isFinite(data as number)) return false;
+  // non-enumerable — def spreads (`.max()` extension) must not inherit it
+  const lf = d.leaf === undefined
+    ? (Object.defineProperty(d, "leaf", { value: _leafPreds(d) ?? 0, writable: true, enumerable: false, configurable: true }), d.leaf)
+    : d.leaf;
   if (!lf) return false;
-  for (const p of lf) if (!p(data as string)) return false;
+  for (const p of lf) if (!p(data)) return false;
   return true;
 }
 
