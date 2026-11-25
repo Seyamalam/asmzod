@@ -4532,10 +4532,6 @@ function _leafPreds(d: any): ((v: any) => boolean)[] | null {
       out.push((v) => Number.isFinite(v));
       continue;
     }
-    if ((t === "number" || t === "bigint") && c.kind === "multipleOf") {
-      const n = c.value ?? c.divisor;
-      if (n !== undefined) { out.push((v) => t === "bigint" ? v % n === 0n : v % n === 0); continue; }
-    }
     return null;
   }
   return out;
