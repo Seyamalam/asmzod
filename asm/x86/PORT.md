@@ -13,9 +13,17 @@ This file is the continuation manual — read it fully before porting the next f
 - [x] engine.s — ported, assembles (no runtime test yet — needs validate.s)
 - [x] value.s — ported, assembles (no runtime test yet)
 
-- [x] checks.s — utf16_units + memmem + is_email ported and VERIFIED
-      in-container (ctest.c, etest.c). remaining: uuid/ulid/nanoid/cuid2/
-      base64/hex/ipv4/ipv6/hash/datetime — scalar-faithful ports (see below)
+- [x] checks.s — 10 validators ported and VERIFIED in-container:
+      utf16_units memmem email uuid ulid nanoid cuid2 base64 hex ipv4
+      (ctest/etest/utest/untest/btest/itest.c — reuse the pattern for new tests)
+
+NEXT EXACT TASK: az_is_ipv6 — the one intricate parser left in checks.s.
+read asm/checks.s lines 910-1100 COMPLETE first (the .L6split middle section
+was not fully captured last time). traps: x2 doubles as isLast input AND
+leading-zero flag inside the v4 octet loop; ipv4-in-ipv6 tail counts as 2
+groups; cset has no direct x86 equivalent — use setcc+movzx. after ipv6:
+is_hash, is_datetime/datestr/timestr, then the check-runner machinery at
+the end of checks.s, then issues.s.
 
 ## port doctrine: scalar-first
 
