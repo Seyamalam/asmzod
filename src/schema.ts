@@ -1442,6 +1442,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const lane = _topLaneOf(this);
       if (lane && lane(data, new Set())) return data as Output;
     }
+    if (params === undefined && _COERCE_TYPES.has(d.type)) {
+      const lane = _coerceLaneOf(this);
+      if (lane) {
+        const cr = lane(data);
+        if (cr.hit) return cr.value as Output;
+      }
+    }
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -1475,6 +1482,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && _LANEABLE_TOP.has(d.type)) {
       const lane = _topLaneOf(this);
       if (lane && lane(data, new Set())) return { success: true, data } as SafeParseResult<Output>;
+    }
+    if (params === undefined && _COERCE_TYPES.has(d.type)) {
+      const lane = _coerceLaneOf(this);
+      if (lane) {
+        const cr = lane(data);
+        if (cr.hit) return { success: true, data: cr.value } as SafeParseResult<Output>;
+      }
     }
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
@@ -4845,6 +4859,31 @@ function _topLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
   Object.defineProperty(d, "toplane", { value: lane, writable: true, enumerable: false, configurable: true });
   return lane;
 }
+
+// coercion fast lane: the conversion is zod's exact primitive coercion;
+// the converted value validates through the inner schema's own lane
+function _coerceLaneOf(schema: any): ((v: any) => { hit: boolean; value?: any }) | 0 {
+  const d = schema._def;
+  if (d.coercelane !== undefined) return d.coercelane;
+  let lane: any = 0;
+  const conv = d.type === "coerce_num" ? Number : d.type === "coerce_str" ? String :
+    d.type === "coerce_bool" ? Boolean : d.type === "coerce_bigint" ? BigInt as any : null;
+  if (conv && !d.checks?.length) {
+    const inner = _fieldLane(d.innerType, new Set());
+    if (inner) {
+      lane = (v: any) => {
+        let cv: any;
+        try { cv = (conv as any)(v); } catch { return { hit: false }; }
+        // lane predicates need a refs set but primitives never use it
+        return inner(cv, undefined as any) ? { hit: true, value: cv } : { hit: false };
+      };
+    }
+  }
+  Object.defineProperty(d, "coercelane", { value: lane, writable: true, enumerable: false, configurable: true });
+  return lane;
+}
+
+const _COERCE_TYPES = new Set(["coerce_num", "coerce_str", "coerce_bool", "coerce_bigint"]);
 
 const _LANEABLE_TOP = new Set(["tuple", "record", "union", "discriminatedUnion", "discunion", "optional", "nullable"]);
 
