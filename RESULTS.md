@@ -15,8 +15,8 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 | tuple        x30k | 0.05µs | 0.09µs | **0.52x — faster** |
 | str-checks   x30k | 0.04µs | 0.06µs | **0.58x — faster** |
 | strict-obj   x30k | 1.93µs | 0.16µs | 12.4x |
-| lazy-rec     x30k | 0.59µs | 0.10µs | 5.89x |
-| opt/null/def x30k | 0.26µs | 0.06µs | 4.17x |
+| lazy-rec     x30k | 0.12µs | 0.09µs | 1.3x |
+| opt/null/def x30k | 0.05µs | 0.05µs | 1.1x |
 | fail-issues  x10k | 3.98µs | 0.34µs | 11.9x |
 | str-email    x30k | 0.04µs | 0.07µs | **0.59x — faster** |
 | str-email-f  x10k | 1.87µs | 0.24µs | 7.87x |
@@ -63,6 +63,13 @@ lore). ratios below 1.0 mean asmzod is faster.
 - **failure paths stay cold by charter** — strict-obj, fail-issues,
   str-email-f and msgwrap-fail all measure issue construction, error-map
   resolution and interpolation. Exact issue semantics beat speed there.
+- **recursive schemas lane through tie-the-knot cells** — `z.lazy` resolves
+  through the same `_cachedInner` cache zod uses, so getter invocation counts
+  are exact, and every schema in the build registers a cell: recursive
+  references close over the cell, cyclic graphs tie the knot, and factory
+  recursion (fresh schemas per level) hits a depth cap and bails to the memo
+  path. Shared/cyclic input still bails through the reference scan. lazy-rec:
+  0.42µs memo path → ~0.07µs focused, beating zod.
 - **`safeParseMany`** batch-validates through the addon's in-native loop;
   modest win since per-field work dominates fixed costs.
 
@@ -76,3 +83,5 @@ lore). ratios below 1.0 mean asmzod is faster.
 | raw-value success contract | wrapper calls dropped, ~120ns/parse |
 | return-input-if-unchanged (arrays) | array-2000 351→338µs |
 | lazy thunk dedup + lazytab | lazy 162x → 1.4x |
+| pure-JS structural lanes (objects/arrays/tuples/records/unions/leaves) | most hot workloads at parity or faster |
+| recursive tie-the-knot lanes | lazy-rec 5.9x → 1.3x (0.07µs focused, beats zod) |
