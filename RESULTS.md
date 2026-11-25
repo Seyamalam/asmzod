@@ -14,7 +14,7 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 | record-200   x2000 | 2.13µs | 17.08µs | **0.12x — faster** |
 | tuple        x30k | 0.05µs | 0.09µs | **0.52x — faster** |
 | str-checks   x30k | 0.04µs | 0.06µs | **0.58x — faster** |
-| strict-obj   x30k | 1.93µs | 0.16µs | 12.4x |
+| strict-obj   x30k | 0.12µs | 0.10µs | 1.2x |
 | lazy-rec     x30k | 0.12µs | 0.09µs | 1.3x |
 | opt/null/def x30k | 0.05µs | 0.05µs | 1.1x |
 | fail-issues  x10k | 3.98µs | 0.34µs | 11.9x |
@@ -63,6 +63,18 @@ lore). ratios below 1.0 mean asmzod is faster.
 - **failure paths stay cold by charter** — strict-obj, fail-issues,
   str-email-f and msgwrap-fail all measure issue construction, error-map
   resolution and interpolation. Exact issue semantics beat speed there.
+- **object failures lane single-pass** — the lane scans undeclared keys
+  before touching fields (for-in never invokes getters), walks each field
+  exactly once (zod's own access pattern), and builds leaf-eligible failure
+  issues inline: type mismatches and strict unrecognized-keys hit zod speed
+  (~0.06-0.12µs vs 1.5µs pipelined). Richer failures (formats, checks,
+  nested) keep the exact pipeline — cold by charter. validate's earlyAbort
+  still stops at the first failure unread.
+- **strip-copy lanes** — extra keys no longer leave the fast path: the
+  walk stashes values (getter inputs read exactly once) and builds zod's
+  output shape directly — declared keys in shape order, absent optionals
+  absent, defaults materialized. Nested strip-extra inputs keep the
+  pipeline since composition carries booleans, not values.
 - **recursive schemas lane through tie-the-knot cells** — `z.lazy` resolves
   through the same `_cachedInner` cache zod uses, so getter invocation counts
   are exact, and every schema in the build registers a cell: recursive
@@ -85,3 +97,5 @@ lore). ratios below 1.0 mean asmzod is faster.
 | lazy thunk dedup + lazytab | lazy 162x → 1.4x |
 | pure-JS structural lanes (objects/arrays/tuples/records/unions/leaves) | most hot workloads at parity or faster |
 | recursive tie-the-knot lanes | lazy-rec 5.9x → 1.3x (0.07µs focused, beats zod) |
+| single-pass object failure lanes + strict catchall exemption | strict-obj 12-15x → 1.2x, leaf-field failures at zod speed |
+| strip-copy lanes | extra-key inputs stay on the fast path (0.066µs vs pipeline) |
