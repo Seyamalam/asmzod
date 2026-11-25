@@ -13,3 +13,4 @@ core
 asm/asmzod.node
 .wrangler/
 *.tgz
+*.xo
