@@ -1435,6 +1435,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const lane = _arrLaneOf(this);
       if (lane && _arrLaneRun(lane, data, d.minLen, d.maxLen, d.exactLen)) return data as Output;
     }
+    if (params === undefined && _LANEABLE_TOP.has(d.type)) {
+      const lane = _topLaneOf(this);
+      if (lane && lane(data, new Set())) return data as Output;
+    }
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -1461,6 +1465,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const lane = _arrLaneOf(this);
       if (lane && _arrLaneRun(lane, data, d.minLen, d.maxLen, d.exactLen))
         return { success: true, data } as SafeParseResult<Output>;
+    }
+    if (params === undefined && _LANEABLE_TOP.has(d.type)) {
+      const lane = _topLaneOf(this);
+      if (lane && lane(data, new Set())) return { success: true, data } as SafeParseResult<Output>;
     }
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
@@ -4605,7 +4613,22 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
   if (t === "optional") {
     const inner = _fieldLane(d.innerType, seen);
     if (!inner) return null;
+    // undefined survives verbatim only when the inner certainly rejects it —
+    // wrapper inners can funnel undefined down a ladder into a default that
+    // rewrites it, so only concrete leaf/container inners keep the shortcut
+    const innerT = (d.innerType as any)?._def?.type;
+    const solid = innerT === "string" || innerT === "number" || innerT === "bigint" || innerT === "boolean" ||
+      innerT === "date" || innerT === "literal" || innerT === "enum" ||
+      innerT === "object" || innerT === "array" || innerT === "tuple" || innerT === "record";
+    if (!solid) return (v, refs) => v !== undefined && inner(v, refs);
     return (v, refs) => v === undefined || inner(v, refs);
+  }
+  if (t === "default" || t === "catch" || t === "prefault") {
+    const inner = _fieldLane(d.innerType, seen);
+    if (!inner) return null;
+    // undefined input would materialize the fallback — output differs from
+    // input, so the lane never engages; present-and-valid is verbatim-exact
+    return (v, refs) => v !== undefined && inner(v, refs);
   }
   if (t === "nullable") {
     const inner = _fieldLane(d.innerType, seen);
@@ -4630,6 +4653,70 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     const spec = _objSpec(fs, seen);
     if (!spec) return null;
     return (v, refs: Set<object>) => _objLaneRun(spec, v, refs);
+  }
+  if (t === "tuple") {
+    if (d.rest) return null;
+    const items = d.items as any[];
+    const lanes: _Lane[] = [];
+    for (const it of items) {
+      const l = _fieldLane(it, seen);
+      if (!l) return null;
+      lanes.push(l);
+    }
+    // positional validation only lanes when optionals form a trailing run —
+    // an interior optional makes the minimum length positional, not a count
+    let seenOpt = false;
+    for (const it of items) {
+      const opt = it?._zod?.optin === "optional" || it?._def?.type === "optional";
+      if (opt) seenOpt = true;
+      else if (seenOpt) return null;
+    }
+    const reqLen = items.filter((it: any) => it?._zod?.optin !== "optional" && it?._def?.type !== "optional").length;
+    return (v, refs) => {
+      if (!Array.isArray(v) || Object.getPrototypeOf(v) !== Array.prototype) return false;
+      if (v.length > lanes.length || v.length < reqLen) return false;
+      if (refs.has(v)) return false;
+      refs.add(v);
+      for (let i = 0; i < v.length; i++) if (!lanes[i](v[i], refs)) return false;
+      return true;
+    };
+  }
+  if (t === "record") {
+    // key validation beyond "is a string" is out of lane scope — object keys
+    // are always strings, so only a laneable key schema that accepts every
+    // string could engage; simpler to require a bare string keyType
+    if ((d.keyType as any)?._def?.type !== "string" || (d.keyType as any)?._def?.checks?.length) return null;
+    const vl = _fieldLane(d.valueType, seen);
+    if (!vl) return null;
+    return (v, refs) => {
+      if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+      const p = Object.getPrototypeOf(v);
+      if (p !== null && p !== Object.prototype) return false;
+      if (refs.has(v)) return false;
+      refs.add(v);
+      for (const k in v) if (!vl(v[k], refs)) return false;
+      return true;
+    };
+  }
+  if (t === "union" || t === "discriminatedUnion" || t === "discunion") {
+    const opts = d.options as any[];
+    if (!opts?.length) return null;
+    // duplicate discriminator values are a schema error zod surfaces at first
+    // use — forcing the map here keeps the throw instead of laning past it
+    if (t !== "union" && typeof (fs as any).discMap === "function") (fs as any).discMap();
+    const lanes: _Lane[] = [];
+    for (const o of opts) {
+      const l = _fieldLane(o, seen);
+      if (!l) return null;
+      lanes.push(l);
+    }
+    // first passing option wins — zod's resolution order, verbatim-exact.
+    // one failed attempt can leave refs entries behind, but bailing lanes
+    // only ever false-negative: correctness is the fall-through's job
+    return (v, refs) => {
+      for (const l of lanes) if (l(v, refs)) return true;
+      return false;
+    };
   }
   return null;
 }
@@ -4693,6 +4780,21 @@ function _arrLaneRun(lane: (v: any, refs: Set<object>) => boolean, data: any, mi
   for (let i = 0; i < data.length; i++) if (!lane(data[i], refs)) return false;
   return true;
 }
+
+// generic top-level lane for container types — same machinery, root refs
+function _topLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
+  const d = schema._def;
+  if (d.toplane !== undefined) return d.toplane;
+  let lane: any = 0;
+  if (!schema._isRec() && !d.checks?.length) {
+    const l = _fieldLane(schema, new Set());
+    if (l) lane = l;
+  }
+  Object.defineProperty(d, "toplane", { value: lane, writable: true, enumerable: false, configurable: true });
+  return lane;
+}
+
+const _LANEABLE_TOP = new Set(["tuple", "record", "union", "discriminatedUnion", "discunion", "optional", "nullable"]);
 
 function _arrLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
   const d = schema._def;
