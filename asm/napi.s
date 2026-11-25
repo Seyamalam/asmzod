@@ -2979,6 +2979,7 @@ _azn_encval:
     ldr x9, [x27, #10]
     str x9, [sp, #LN_D]       // remaining
     str xzr, [sp, #LN_I]      // failed-any
+    str xzr, [sp, #216]       // present-declared-key count for pass2 skip
 .Ln_obj_loop:
     ldr x9, [sp, #LN_D]
     cbz x9, .Ln_obj_done
@@ -3037,6 +3038,11 @@ _azn_encval:
     add x3, sp, #LN_G
     bl AZ_NAPI(napi_get_named_property)
     cbnz x0, .Ln_obj_absent   // get faulted -> treat as absent
+    // optin flag 4 = required + inner rejects undefined outright: absent and
+    // present-undefined produce the same invalid_type, so no typeof needed
+    ldr x9, [sp, #LN_M]
+    cmp x9, #4
+    b.eq .Ln_obj_defined
     mov x0, x26
     ldr x1, [sp, #LN_G]
     add x2, sp, #LN_TT
@@ -3044,8 +3050,12 @@ _azn_encval:
     ldr w9, [sp, #LN_TT]
     cmp w9, #NAPI_UNDEF
     b.eq .Ln_obj_mayabs
+.Ln_obj_defined:
     mov w9, #1
     strb w9, [sp, #LN_O]
+    ldr x9, [sp, #216]
+    add x9, x9, #1
+    str x9, [sp, #216]        // present-declared++
     b .Ln_obj_havekey
 .Ln_obj_mayabs:
     mov x0, x26
@@ -3055,6 +3065,9 @@ _azn_encval:
     bl AZ_NAPI(napi_has_named_property)
     ldrb w9, [sp, #LN_O]      // out param is a C bool — 1 byte
     cbz w9, .Ln_obj_absent
+    ldr x9, [sp, #216]
+    add x9, x9, #1
+    str x9, [sp, #216]        // present-declared++
     b .Ln_obj_havekey
 .Ln_obj_absent:
     // absent: inner still runs on undefined (flag 0/1); flag 2 skips the field
@@ -3184,6 +3197,10 @@ _azn_encval:
     ldr x1, [sp, #LN_K]
     add x2, sp, #LN_L
     bl AZ_NAPI(napi_get_array_length)
+    ldr w9, [sp, #LN_L]
+    ldr x10, [sp, #216]
+    cmp x9, x10
+    b.eq .Ln_obj_wrapup       // no unknown keys — nothing to scan
     str xzr, [sp, #LN_M]      // i
     str xzr, [sp, #LN_N]      // unk count
     str xzr, [sp, #LN_D]      // names-region bytes used

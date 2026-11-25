@@ -41,6 +41,23 @@ const lazyThunks = new Map<() => unknown, () => Uint8Array>();
 // even when the union node was emitted by a lazy subschema compiled later
 const unionReg: SchemaLike[] = [];
 
+// structural undefined-rejection: these types fail undefined at their own
+// type gate, so for required keys absent and present-undefined are the same
+// failure. conservative — wrappers, unions and undefined-accepting types stay
+// on the exact presence path
+const REJECTS_UNDEF = new Set([
+  "string", "number", "boolean", "bigint", "date", "symbol", "object",
+  "array", "tuple", "record", "set", "map", "nan", "null", "enum",
+]);
+function rejectsUndefined(s: any): boolean {
+  const t = s?._zod?.def?.type;
+  if (t === "literal") {
+    const vals = s._zod.def.values ?? [];
+    return !vals.includes(undefined);
+  }
+  return REJECTS_UNDEF.has(t);
+}
+
 export function compile(schema: SchemaLike): Compiled {
   const w = new BW();
   const hosts: HostTable = [];
@@ -220,7 +237,11 @@ function emitNode(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]):
         // 2 -> optin==="optional" + optional-out (contributes nothing);
         // 3 -> omittable-in but non-optional-out (run, failures surface)
         const fo = (d.shape[k] as any)._zod;
-        const opt = fo?.optin === undefined ? 0
+        // flag 4 = required + structurally rejects undefined: presence is then
+        // irrelevant, so the object loop may skip typeof. it inflates the
+        // present-count the pass2 skip relies on — strip mode only
+        const passthru = d.mode === "strict" || d.mode === "passthrough" || !!d.catchall;
+        const opt = fo?.optin === undefined ? (!passthru && rejectsUndefined(d.shape[k]) ? 4 : 0)
           : fo.optout === "optional" ? (fo.optin === "optional" ? 2 : 1)
           : 3;
         w.u8(opt);
