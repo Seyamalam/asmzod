@@ -6,65 +6,65 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 
 | workload | asmzod | zod4 | ratio |
 |---|---|---|---|
-| small-obj     x50k | 0.39µs | 0.12µs | 3.23x |
-| array-2000     x40 | 357µs | 120µs | 2.99x |
-| deep+arr500   x400 | 8.95µs | 24.91µs | **0.36x — faster** |
-| union-mixed   x30k | 0.19µs | 0.14µs | 1.36x |
-| disc-union    x30k | 0.61µs | 0.14µs | 4.32x |
-| record-200   x2000 | 64µs | 17µs | 3.73x |
-| tuple        x30k | 0.60µs | 0.15µs | 3.90x |
-| str-checks   x30k | 0.13µs | 0.14µs | **0.95x — faster** |
-| strict-obj   x30k | 1.70µs | 0.18µs | 9.46x |
-| lazy-rec     x30k | 1.72µs | 0.13µs | 13.20x |
-| opt/null/def x30k | 0.22µs | 0.10µs | 2.09x |
-| fail-issues  x10k | 3.75µs | 0.45µs | 8.26x |
-| str-email    x30k | 0.06µs | 0.08µs | **0.73x — faster** |
-| str-email-f  x10k | 1.95µs | 0.28µs | 6.84x |
-| emoji        x30k | 0.04µs | 0.07µs | **0.54x — faster** |
-| coerce-num   x30k | 0.19µs | 0.04µs | 4.65x |
-| refine+trans x30k | 0.55µs | 0.17µs | 3.22x |
-| msgwrap      x30k | 0.03µs | 0.04µs | **0.90x — faster** |
-| msgwrap-fail x10k | 1.55µs | 0.04µs | 40.8x |
-| int-safe     x30k | 0.06µs | 0.11µs | **0.61x — faster** |
-| date         x30k | 0.03µs | 0.02µs | 1.46x |
+| small-obj     x50k | 0.06µs | 0.07µs | **0.84x — faster** |
+| array-2000     x40 | 78µs | 68µs | 1.15x |
+| deep+arr500   x400 | 2.50µs | 13.28µs | **0.19x — faster** |
+| union-mixed   x30k | 0.04µs | 0.08µs | **0.47x — faster** |
+| disc-union    x30k | 0.03µs | 0.06µs | **0.50x — faster** |
+| record-200   x2000 | 2.13µs | 17.08µs | **0.12x — faster** |
+| tuple        x30k | 0.05µs | 0.09µs | **0.52x — faster** |
+| str-checks   x30k | 0.04µs | 0.06µs | **0.58x — faster** |
+| strict-obj   x30k | 1.93µs | 0.16µs | 12.4x |
+| lazy-rec     x30k | 0.59µs | 0.10µs | 5.89x |
+| opt/null/def x30k | 0.26µs | 0.06µs | 4.17x |
+| fail-issues  x10k | 3.98µs | 0.34µs | 11.9x |
+| str-email    x30k | 0.04µs | 0.07µs | **0.59x — faster** |
+| str-email-f  x10k | 1.87µs | 0.24µs | 7.87x |
+| emoji        x30k | 0.03µs | 0.05µs | **0.66x — faster** |
+| coerce-num   x30k | 0.10µs | 0.04µs | 2.33x |
+| refine+trans x30k | 0.53µs | 0.10µs | 5.42x |
+| msgwrap      x30k | 0.02µs | 0.02µs | **0.89x — faster** |
+| msgwrap-fail x10k | 1.57µs | 0.04µs | 37.8x |
+| int-safe     x30k | 0.02µs | 0.06µs | **0.40x — faster** |
+| date         x30k | 0.03µs | 0.02µs | 1.92x |
+
+bench methodology: min of 5 samples per measurement — allocating
+benchmarks sampled once time whatever the collector is doing (zod bench
+lore). ratios below 1.0 mean asmzod is faster.
 
 ## Where the time goes
 
-- **Success path** is one N-API call per value inspected
-  (`typeof`/`get_element`/`get_named_property`) — ~40ns/call is the floor
-  for an external validator; leaf schemas return the input handle
-  verbatim and unchanged arrays/objects return the input when nothing
-  changed (depth-1 strip mode, verified by key-count pigeonhole +
-  per-key own-property checks).
-- **Object fields** read with `get` first and only pay a `has` crossing
-  when the value is undefined (presence matters exactly there). Required
-  fields whose type structurally rejects undefined skip even the typeof
-  probe — absent and present-undefined are the same failure for them.
-- **strict/passthrough/catchall** skip the unknown-key scan entirely
-  when input key count equals the count of present declared keys —
-  input = declared + unknown with no duplicates, so equality is exact.
+- **The pure-JS fast lanes are the hot path now.** For effect-free
+  strip/strict objects, arrays, tuples, records, unions and leaves whose
+  fields validate as monomorphic JS (prims, leaf checks, dates, literals,
+  enums, optional/nullable, nested), success validation never crosses
+  into N-API at all — it is the same kind of monomorphic JS zod runs,
+  returning the verbatim input under the documented identity license.
+  The N-API crossing floor (~40ns/call) is why containers could never
+  beat zod through the addon: at 3+ crossings/field the floor alone
+  exceeds zod's entire per-field cost.
+- **Correctness is structural, not probabilistic.** Lanes are
+  success-only predicates: every failure, uncertainty, exotic prototype,
+  getter shape, effect, transform or callback falls through to the full
+  pipeline. Shared/cyclic input references bail out through a reference
+  set threaded through validation, preserving zod's independent-copy
+  semantics for non-recursive schemas and memo-sharing for recursive
+  ones. Optional's undefined shortcut only engages for concrete inners —
+  wrapper chains funnel undefined down zod's optin ladder into defaults.
+- **Defaults materialize.** A default/catch/prefault field only lanes
+  when the key is present and valid; absent keys would rewrite the
+  output, so those inputs take the full pipeline (the opt/null/def bench
+  input omits the defaulted key — that line measures exactly this).
+- **string size bounds count code points** with early exit at the bound —
+  cost scales with the bound, not the input length.
+- **recursive schemas** still validate through the TS memo path
+  (lazy/getter shapes don't lane); scan-gated native recursion handles
+  shared-reference-free input where compilation succeeds.
+- **failure paths stay cold by charter** — strict-obj, fail-issues,
+  str-email-f and msgwrap-fail all measure issue construction, error-map
+  resolution and interpolation. Exact issue semantics beat speed there.
 - **`safeParseMany`** batch-validates through the addon's in-native loop;
-  the win over per-value `safeParse` is small (~12%) because per-object
-  crossings dominate, not fixed entry costs.
-- **`lazy-rec`** recursive schemas route to the TS memo path. A depth
-  cap (768) now exists in the asm walker, and native-first validation of
-  recursive schemas was prototyped: it validated acyclic data at 0.38us
-  (vs 1.9us memo) but diverges on shared references — zod's memo maps
-  one input node to one output node, and the upstream cyclic-data tests
-  check exactly that. Native recursion needs a per-parse pointer-keyed
-  memo table in asm before it can replace the TS path; the memo fallback
-  alone is not enough.
-- **`str-checks`** runs natively: check records are walked one at a
-  time, regex hits the host's `RegExp.test` through a single N-API
-  call instead of bouncing through the whole FFI engine.
-- **`strict-obj`** input carries an extra key, so every parse fails with
-  `unrecognized_keys` — it measures the failure path, not objects.
-- **`fail-issues`** builds native issue objects then TypeScript
-  post-processing (`normalizeIssue`/`finishIssues`) interpolates zod's
-  messages — cold path, ~1µs/issue.
-- **deep+arr / record** beat zod because the asm walker has no
-  allocation on the hot path (issue arena is bump-only and untouched on
-  success).
+  modest win since per-field work dominates fixed costs.
 
 ## History
 
