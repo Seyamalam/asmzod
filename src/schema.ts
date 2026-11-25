@@ -2662,6 +2662,32 @@ const _isPlainObject = (v: any) =>
   v !== null && typeof v === "object" &&
   (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
 
+
+// iterative shared-reference scan: true when any object/array appears twice
+// in the input tree (cycles included). native validation is exact only when
+// the answer is no — zod's memo maps one input node to one output node, and
+// with no shared nodes that invariant is vacuous. cycle-safe, no recursion
+function _hasSharedRefs(root: unknown): boolean {
+  if (!_isRef(root)) return false;
+  const seen = new Set<object>();
+  const stack: unknown[] = [root];
+  let budget = 4096; // inputs bigger than this just take the memo path
+  while (stack.length) {
+    const v = stack.pop() as any;
+    if (!_isRef(v)) continue;
+    if (seen.has(v)) return true;
+    seen.add(v);
+    if (--budget <= 0) return true;
+    if (Array.isArray(v)) {
+      for (let i = 0; i < (v as any[]).length; i++) if (_isRef((v as any[])[i])) stack.push((v as any[])[i]);
+    } else {
+      for (const k in v) if (_isRef((v as any)[k])) stack.push((v as any)[k]);
+    }
+  }
+  return false;
+}
+
+
 export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T>, objectInputType<T>> {
   constructor(_def: any) {
     super();
@@ -2719,32 +2745,8 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
         input = merged;
       }
     }
-    
-// iterative shared-reference scan: true when any object/array appears twice
-// in the input tree (cycles included). native validation is exact only when
-// the answer is no — zod's memo maps one input node to one output node, and
-// with no shared nodes that invariant is vacuous. cycle-safe, no recursion
-function _hasSharedRefs(root: unknown): boolean {
-  if (!_isRef(root)) return false;
-  const seen = new Set<object>();
-  const stack: unknown[] = [root];
-  let budget = 4096; // inputs bigger than this just take the memo path
-  while (stack.length) {
-    const v = stack.pop() as any;
-    if (!_isRef(v)) continue;
-    if (seen.has(v)) return true;
-    seen.add(v);
-    if (--budget <= 0) return true;
-    if (Array.isArray(v)) {
-      for (let i = 0; i < (v as any[]).length; i++) if (_isRef((v as any[])[i])) stack.push((v as any[])[i]);
-    } else {
-      for (const k in v) if (_isRef((v as any)[k])) stack.push((v as any)[k]);
-    }
-  }
-  return false;
-}
 
-// recursive-capable subtree — cyclic input can only loop through lazy or
+    // recursive-capable subtree — cyclic input can only loop through lazy or
     // getter edges, and the engine can't close a reference cycle, so these
     // validate per-field at TS level through the parse memo
     const d2 = this._def as any;
@@ -3010,6 +3012,21 @@ export class ZodArray<T extends ZodTypeAny> extends ZodType<T["_output"][], T["_
     // so recursive arrays validate per-element at TS level through the memo
     if (!this._hasFx() && !earlyAbort && !(MEMO && Array.isArray(data) && this._isRec())) return super._runImpl(data);
     if (!Array.isArray(data)) return super._runImpl(data);
+    // recursive arrays get the same scan-gated native shot as objects —
+    // shared/cyclic/deep input and every failure stay on the memo path
+    if (MEMO && this._isRec() && !this._hasFx() && !earlyAbort) {
+      const m = MEMO as any;
+      if (m.scanDone === undefined) { m.scanDone = true; m.scanClean = !_hasSharedRefs(data); }
+      if (m.scanClean) {
+        try {
+          const c = this._compile();
+          if (!c.cbUnsafe) {
+            const nr = napiBackend.parse(c.blob, data, c.hosts, c.cbUnsafe);
+            if (nr !== null && nr.ok) return { ok: true as const, value: nr.value };
+          }
+        } catch { /* uncompilable subgraphs validate through the memo path */ }
+      }
+    }
     const el = this._def.element as any;
     const d = this._def;
     return _memoRun(this, data, () => new Array(data.length), (out: any[]) => {
