@@ -604,3 +604,73 @@ AZX_NAPI(az_is_hex):
 .Lxhx_no:
     xor eax, eax
     ret
+
+// ---------- az_is_ipv4(rdi=ptr, rsi=len) -> eax ----------
+// a.b.c.d, 1-3 digits each, <=255, no leading 0
+    .globl AZX_NAPI(az_is_ipv4)
+    AZX_HIDDEN AZX_NAPI(az_is_ipv4)
+AZX_NAPI(az_is_ipv4):
+    xor r9d, r9d             // pos
+    xor r10d, r10d           // part idx
+.Lxip4_part:
+    cmp r10, 4
+    jae .Lxip4_yes
+    xor r11d, r11d           // digits
+    xor ecx, ecx             // value
+.Lxip4_d:
+    cmp r9, rsi
+    jae .Lxip4_no
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxip4_no
+    cmp al, '9'
+    ja .Lxip4_no
+    sub al, '0'
+    movzx eax, al
+    imul rcx, rcx, 10
+    add rcx, rax
+    inc r9
+    inc r11
+    cmp r11, 3
+    jb .Lxip4_d2
+    jmp .Lxip4_pend
+.Lxip4_d2:
+    cmp r9, rsi
+    jae .Lxip4_pend
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxip4_pend
+    cmp al, '9'
+    jbe .Lxip4_d
+.Lxip4_pend:
+    test r11, r11
+    jz .Lxip4_no
+    cmp rcx, 255
+    ja .Lxip4_no
+    cmp r11, 1
+    je .Lxip4_sep
+    mov rax, r9
+    sub rax, r11
+    movzx edx, byte ptr [rdi + rax]
+    cmp dl, '0'
+    je .Lxip4_no
+.Lxip4_sep:
+    cmp r10, 3
+    jae .Lxip4_last
+    cmp r9, rsi
+    jae .Lxip4_no
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '.'
+    jne .Lxip4_no
+    inc r9
+    inc r10
+    jmp .Lxip4_part
+.Lxip4_last:
+    cmp r9, rsi
+    jne .Lxip4_no
+.Lxip4_yes:
+    mov eax, 1
+    ret
+.Lxip4_no:
+    xor eax, eax
+    ret
