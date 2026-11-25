@@ -175,3 +175,148 @@ AZX_NAPI(az_memmem):
 .Lxc_ones: .fill 16, 1, 1
 .Lxc_80:   .fill 16, 1, 0x80
 .Lxc_40:   .fill 16, 1, 0x40
+
+// ---------- az_is_email(rdi=ptr, rsi=len) -> eax 1/0 ----------
+// scalar-faithful port. the NEON 16-byte skip in the original is a pure
+// optimization — semantics identical, speed differs. SIMD skip is a later
+// item (scalar is the oracle). regs: r9=i r10=labels r13=cursor... only
+// caller-saved scratch used: rax rbx-via-save rcx rdx r8-r11
+    .globl AZX_NAPI(az_is_email)
+    AZX_HIDDEN AZX_NAPI(az_is_email)
+AZX_NAPI(az_is_email):
+    xor r9d, r9d             // i
+.Lxem_scan:
+    cmp r9, rsi
+    jae .Lxem_no             // no '@'
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '@'
+    je .Lxem_at
+    // allowed local char: [A-Za-z0-9_'+.-]
+    cmp al, '0'
+    jb .Lxem_l1
+    cmp al, '9'
+    jbe .Lxem_lok
+    cmp al, 'A'
+    jb .Lxem_l1
+    cmp al, 'Z'
+    jbe .Lxem_lok
+    cmp al, 'a'
+    jb .Lxem_l1
+    cmp al, 'z'
+    jbe .Lxem_lok
+.Lxem_l1:
+    cmp al, '_'
+    je .Lxem_lok
+    cmp al, 0x27             // single quote
+    je .Lxem_lok
+    cmp al, '+'
+    je .Lxem_lok
+    cmp al, '-'
+    je .Lxem_lok
+    cmp al, '.'
+    je .Lxem_lok
+    jmp .Lxem_no
+.Lxem_lok:
+    inc r9
+    jmp .Lxem_scan
+.Lxem_at:
+    test r9, r9
+    jz .Lxem_no              // empty local part
+    movzx eax, byte ptr [rdi + r9 - 1]
+    // end set: A-Za-z0-9_+-
+    cmp al, '0'
+    jb .Lxem_e1
+    cmp al, '9'
+    jbe .Lxem_eok
+    cmp al, 'A'
+    jb .Lxem_e1
+    cmp al, 'Z'
+    jbe .Lxem_eok
+    cmp al, 'a'
+    jb .Lxem_e1
+    cmp al, 'z'
+    jbe .Lxem_eok
+.Lxem_e1:
+    cmp al, '_'
+    je .Lxem_eok
+    cmp al, '+'
+    je .Lxem_eok
+    cmp al, '-'
+    je .Lxem_eok
+    jmp .Lxem_no
+.Lxem_eok:
+    inc r9                   // past '@'
+    xor r10d, r10d           // dots seen
+    mov r11, r9              // label start
+.Lxem_dlabel:
+    cmp r11, rsi
+    jae .Lxem_no             // ran out mid-label
+    mov rcx, r11             // cur
+    xor edx, edx             // label len
+.Lxem_dchar:
+    cmp rcx, rsi
+    jae .Lxem_dend
+    movzx eax, byte ptr [rdi + rcx]
+    cmp al, '.'
+    je .Lxem_dend
+    // allowed: alnum or '-' (pos0 must be alnum)
+    cmp al, '0'
+    jb .Lxem_d2
+    cmp al, '9'
+    jbe .Lxem_dok
+    cmp al, 'A'
+    jb .Lxem_d2
+    cmp al, 'Z'
+    jbe .Lxem_dok
+    cmp al, 'a'
+    jb .Lxem_d2
+    cmp al, 'z'
+    jbe .Lxem_dok
+.Lxem_d2:
+    cmp al, '-'
+    je .Lxem_dok
+    jmp .Lxem_no
+.Lxem_dok:
+    test rdx, rdx
+    jnz .Lxem_dok2
+    cmp al, '-'
+    je .Lxem_no              // leading '-'
+.Lxem_dok2:
+    inc rcx
+    inc rdx
+    jmp .Lxem_dchar
+.Lxem_dend:
+    test rdx, rdx
+    jz .Lxem_no              // empty label
+    cmp rcx, rsi
+    jae .Lxem_tld            // hit end -> last label letters >= 2
+    inc r10
+    lea r11, [rcx + 1]
+    jmp .Lxem_dlabel
+.Lxem_tld:
+    test r10, r10
+    jz .Lxem_no              // no dot in domain
+    cmp rdx, 2
+    jb .Lxem_no
+    mov rcx, r11
+.Lxem_tldl:
+    cmp rcx, rsi
+    jae .Lxem_yes
+    movzx eax, byte ptr [rdi + rcx]
+    cmp al, 'A'
+    jb .Lxem_no
+    cmp al, 'Z'
+    jbe .Lxem_tldn
+    cmp al, 'a'
+    jb .Lxem_no
+    cmp al, 'z'
+    ja .Lxem_no
+.Lxem_tldn:
+    inc rcx
+    jmp .Lxem_tldl
+.Lxem_yes:
+    mov eax, 1
+    ret
+.Lxem_no:
+    xor eax, eax
+    ret

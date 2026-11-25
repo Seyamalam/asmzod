@@ -13,10 +13,18 @@ This file is the continuation manual — read it fully before porting the next f
 - [x] engine.s — ported, assembles (no runtime test yet — needs validate.s)
 - [x] value.s — ported, assembles (no runtime test yet)
 
-- [x] checks.s chunk — utf16_units + memmem ported and VERIFIED in-container
-      (ctest.c); SSE2 idiom patterns proven. remaining validators in checks.s
-      (email/uuid/ulid/nanoid/cuid2/base64/hex/ipv4/ipv6/hash/datetime) are
-      mechanical applications of the same idioms — append to the same file
+- [x] checks.s — utf16_units + memmem + is_email ported and VERIFIED
+      in-container (ctest.c, etest.c). remaining: uuid/ulid/nanoid/cuid2/
+      base64/hex/ipv4/ipv6/hash/datetime — scalar-faithful ports (see below)
+
+## port doctrine: scalar-first
+
+the NEON SIMD paths in the originals are pure optimizations around scalar
+state machines. port the SCALAR machine faithfully first — it is bit-exact
+semantics — and treat SIMD skip paths as later optimizations with the scalar
+version as the oracle. format validation is leaf-level JS in the lanes
+anyway; asm format speed is not the hot path. do not port NEON skip loops
+unless profiling later justifies it.
 
 ## remaining, in dependency order
 
