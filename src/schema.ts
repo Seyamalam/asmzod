@@ -1129,6 +1129,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         let fastOk = _checks.length > 0;
         for (const c of _checks) {
           // transforms return the new value — only pure boolean predicates can run here
+          if (c && c.kind === "regex" && c.regex instanceof RegExp) {
+            c.regex.lastIndex = 0;
+            if (!c.regex.test(data as string)) { fastOk = false; break; }
+            continue;
+          }
           if (!(c && typeof c.fn === "function" && c.builtin) || c.fn(data) !== true) { fastOk = false; break; }
         }
         if (fastOk) return { ok: true as const, value: data };
