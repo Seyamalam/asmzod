@@ -14,12 +14,12 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 | record-200   x2000 | 2.13µs | 17.08µs | **0.12x — faster** |
 | tuple        x30k | 0.05µs | 0.09µs | **0.52x — faster** |
 | str-checks   x30k | 0.04µs | 0.06µs | **0.58x — faster** |
-| strict-obj   x30k | 0.12µs | 0.10µs | 1.2x |
+| strict-obj   x30k | 0.11µs | 0.09µs | 1.3x |
 | lazy-rec     x30k | 0.12µs | 0.09µs | 1.3x |
 | opt/null/def x30k | 0.05µs | 0.05µs | 1.1x |
-| fail-issues  x10k | 3.98µs | 0.34µs | 11.9x |
+| fail-issues  x10k | 0.32µs | 0.33µs | **0.97x — parity** |
 | str-email    x30k | 0.04µs | 0.07µs | **0.59x — faster** |
-| str-email-f  x10k | 1.87µs | 0.24µs | 7.87x |
+| str-email-f  x10k | 0.20µs | 0.22µs | **0.88x — faster** |
 | emoji        x30k | 0.03µs | 0.05µs | **0.66x — faster** |
 | coerce-num   x30k | 0.10µs | 0.04µs | 2.33x |
 | refine+trans x30k | 0.53µs | 0.10µs | 5.42x |
@@ -70,6 +70,11 @@ lore). ratios below 1.0 mean asmzod is faster.
   (~0.06-0.12µs vs 1.5µs pipelined). Richer failures (formats, checks,
   nested) keep the exact pipeline — cold by charter. validate's earlyAbort
   still stops at the first failure unread.
+- **format failures replicate inline** — builtin-format leaf chains build
+  invalid_format issues directly: same field order, pattern assembly from
+  FORMAT_PATTERNS, message ladder intact (error maps still customize at
+  finalization). fail-issues 11.9x → parity, str-email-f 7.9x → faster
+  than zod.
 - **strip-copy lanes** — extra keys no longer leave the fast path: the
   walk stashes values (getter inputs read exactly once) and builds zod's
   output shape directly — declared keys in shape order, absent optionals
@@ -99,3 +104,4 @@ lore). ratios below 1.0 mean asmzod is faster.
 | recursive tie-the-knot lanes | lazy-rec 5.9x → 1.3x (0.07µs focused, beats zod) |
 | single-pass object failure lanes + strict catchall exemption | strict-obj 12-15x → 1.2x, leaf-field failures at zod speed |
 | strip-copy lanes | extra-key inputs stay on the fast path (0.066µs vs pipeline) |
+| format-failure fast paths | fail-issues 11.9x → 0.97x parity, str-email-f 7.9x → 0.88x faster |
