@@ -6,11 +6,18 @@ const Z: any = process.argv.includes("--v3")
   : await import("zod");
 
 let sink: unknown = null;
+// min of 5 samples — allocating benchmarks sampled once time whatever the
+// collector is doing; the minimum is the stable estimator (zod bench lore)
 function bench(fn: (i: number) => unknown, iters: number): number {
-  for (let w = 0; w < Math.max(3, iters >> 4); w++) sink = fn(w); // warmup
-  const t0 = performance.now();
-  for (let i = 0; i < iters; i++) sink = fn(i);
-  return ((performance.now() - t0) * 1000) / iters;
+  let best = Infinity;
+  for (let s = 0; s < 5; s++) {
+    for (let w = 0; w < Math.max(3, iters >> 4); w++) sink = fn(w); // warmup
+    const t0 = performance.now();
+    for (let i = 0; i < iters; i++) sink = fn(i);
+    const dt = ((performance.now() - t0) * 1000) / iters;
+    if (dt < best) best = dt;
+  }
+  return best;
 }
 const fmt = (us: number) => us < 1000 ? `${us.toFixed(2)}µs` : `${(us/1000).toFixed(2)}ms`;
 

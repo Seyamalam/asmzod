@@ -1427,6 +1427,14 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.checks?.length && _leafRun(d, data)) return data as Output;
     if (params === undefined && d.type === "date" && !d.checks?.length &&
         data instanceof Date && !Number.isNaN(data.getTime())) return data as Output;
+    if (params === undefined && d.type === "object") {
+      const spec = _objLaneOf(this);
+      if (spec && _objLaneRun(spec, data)) return data as Output;
+    }
+    if (params === undefined && d.type === "array" && !d.checks?.length) {
+      const lane = _arrLaneOf(this);
+      if (lane && _arrLaneRun(lane, data, d.minLen, d.maxLen, d.exactLen)) return data as Output;
+    }
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -1445,6 +1453,15 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.type === "date" && !d.checks?.length &&
         data instanceof Date && !Number.isNaN(data.getTime()))
       return { success: true, data } as SafeParseResult<Output>;
+    if (params === undefined && d.type === "object") {
+      const spec = _objLaneOf(this);
+      if (spec && _objLaneRun(spec, data)) return { success: true, data } as SafeParseResult<Output>;
+    }
+    if (params === undefined && d.type === "array" && !d.checks?.length) {
+      const lane = _arrLaneOf(this);
+      if (lane && _arrLaneRun(lane, data, d.minLen, d.maxLen, d.exactLen))
+        return { success: true, data } as SafeParseResult<Output>;
+    }
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -4547,6 +4564,155 @@ function _leafRun(d: any, data: unknown): boolean {
   if (!lf) return false;
   for (const p of lf) if (!p(data)) return false;
   return true;
+}
+
+
+// pure-JS object fast lane: for effect-free strip/strict objects whose
+// fields are all laneable, success validation is monomorphic JS — the N-API
+// crossing floor (~40ns/call) never enters. output is the verbatim input,
+// the documented identity license; every failure/uncertainty falls through
+// to the full pipeline, which is exact by construction
+type _Lane = (v: any, refs: Set<object>) => boolean;
+
+function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
+  const d = fs?._def;
+  if (!d) return null;
+  const t = d.type;
+  if (t === "string" || t === "number" || t === "bigint" || t === "boolean") {
+    if (d.checks?.length) {
+      const preds = _leafPreds(d);
+      if (!preds) return null;
+      if (t === "number") return (v) => typeof v === "number" && Number.isFinite(v) && preds.every((p) => p(v));
+      return (v) => typeof v === t && preds.every((p) => p(v));
+    }
+    if (t === "number") return (v) => typeof v === "number" && Number.isFinite(v);
+    return (v) => typeof v === t;
+  }
+  if (t === "date" && !d.checks?.length)
+    return (v) => v instanceof Date && !Number.isNaN(v.getTime());
+  if (t === "literal") {
+    const vals = d.values;
+    if (Array.isArray(vals) && vals.every((x: any) => x === null || typeof x !== "object"))
+      return (v) => vals.includes(v);
+    return null;
+  }
+  if (t === "enum") {
+    const vals = d.entries ? Object.values(d.entries) : undefined;
+    if (Array.isArray(vals) && vals.every((x: any) => typeof x === "string" || typeof x === "number"))
+      return (v) => vals.includes(v);
+    return null;
+  }
+  if (t === "optional") {
+    const inner = _fieldLane(d.innerType, seen);
+    if (!inner) return null;
+    return (v, refs) => v === undefined || inner(v, refs);
+  }
+  if (t === "nullable") {
+    const inner = _fieldLane(d.innerType, seen);
+    if (!inner) return null;
+    return (v, refs) => v === null || inner(v, refs);
+  }
+  if (t === "array") {
+    if (d.minLen !== undefined || d.maxLen !== undefined || d.exactLen !== undefined) return null;
+    const el = _fieldLane(d.element, seen);
+    if (!el) return null;
+    // shared/cyclic references bail to the full pipeline: zod copies shared
+    // input nodes independently per position, verbatim return can't
+    return (v, refs: Set<object>) => {
+      if (!Array.isArray(v)) return false;
+      if (refs.has(v)) return false;
+      refs.add(v);
+      for (let i = 0; i < v.length; i++) if (!el(v[i], refs)) return false;
+      return true;
+    };
+  }
+  if (t === "object") {
+    const spec = _objSpec(fs, seen);
+    if (!spec) return null;
+    return (v, refs: Set<object>) => _objLaneRun(spec, v, refs);
+  }
+  return null;
+}
+
+type _ObjSpec = { keys: string[]; lanes: _Lane[]; declared: Set<string> };
+
+function _objSpec(schema: any, seen: Set<any>): _ObjSpec | null {
+  const d = schema._def;
+  if (!d || d.type !== "object") return null;
+  if (d.mode !== "strip" && d.mode !== "strict") return null;
+  if (d.catchall || d.checks?.length) return null;
+  if (Reflect.ownKeys(d.shape).some((k) => typeof k === "symbol" || k === "__proto__")) return null;
+  if (seen.has(schema) || schema._isRec()) return null;
+  seen.add(schema);
+  const shape = d.shape;
+  const keys = Object.keys(shape);
+  const lanes: _Lane[] = [];
+  for (const k of keys) {
+    const desc = Object.getOwnPropertyDescriptor(shape, k);
+    if (!desc || !("value" in desc)) { seen.delete(schema); return null; } // getter shapes stay lazy — no lane
+    const l = _fieldLane(desc.value, seen);
+    if (!l) { seen.delete(schema); return null; }
+    lanes.push(l);
+  }
+  seen.delete(schema);
+  return { keys, lanes, declared: new Set(keys) };
+}
+
+function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>): boolean {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
+  const p = Object.getPrototypeOf(data);
+  if (p !== null && p !== Object.prototype) return false;
+  const own = refs === undefined;
+  const rs = refs ?? new Set<object>();
+  // the parse root can't be a duplicate of anything, but nested objects can
+  if (!own) {
+    if (rs.has(data)) return false;
+    rs.add(data);
+  }
+  const keys = spec.keys, lanes = spec.lanes;
+  for (let i = 0; i < keys.length; i++)
+    if (!lanes[i](data[keys[i]], rs)) return false;
+  // verbatim return is only exact when no undeclared keys exist — strip
+  // would drop them, strict would fail; either way this input leaves the lane
+  let n = 0;
+  for (const k in data) {
+    if (!spec.declared.has(k)) return false;
+    if (++n > keys.length) return false;
+  }
+  return true;
+}
+
+// top-level array lane — the element walker is the same refs-threaded
+// machinery; length bounds check first since they're cheap
+function _arrLaneRun(lane: (v: any, refs: Set<object>) => boolean, data: any, minLen?: number, maxLen?: number, exactLen?: number): boolean {
+  if (!Array.isArray(data)) return false;
+  if (Object.getPrototypeOf(data) !== Array.prototype) return false;
+  if (exactLen !== undefined ? data.length !== exactLen :
+      (minLen !== undefined && data.length < minLen) || (maxLen !== undefined && data.length > maxLen)) return false;
+  const refs = new Set<object>();
+  for (let i = 0; i < data.length; i++) if (!lane(data[i], refs)) return false;
+  return true;
+}
+
+function _arrLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
+  const d = schema._def;
+  if (d.arrlane !== undefined) return d.arrlane;
+  let lane: any = 0;
+  if (!schema._isRec()) {
+    const l = _fieldLane(d.element, new Set());
+    if (l) lane = l;
+  }
+  Object.defineProperty(d, "arrlane", { value: lane, writable: true, enumerable: false, configurable: true });
+  return lane;
+}
+
+// spec cache — non-enumerable so def spreads never inherit it
+function _objLaneOf(schema: any): _ObjSpec | 0 {
+  const d = schema._def;
+  if (d.objlane !== undefined) return d.objlane;
+  const spec = _objSpec(schema, new Set()) ?? 0;
+  Object.defineProperty(d, "objlane", { value: spec, writable: true, enumerable: false, configurable: true });
+  return spec;
 }
 
 const _PARSE_PARAMS = { callee: ZodType.prototype.parse };
