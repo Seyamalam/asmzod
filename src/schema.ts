@@ -1429,7 +1429,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         data instanceof Date && !Number.isNaN(data.getTime())) return data as Output;
     if (params === undefined && d.type === "object") {
       const spec = _objLaneOf(this);
-      if (spec && _objLaneRun(spec, data)) return data as Output;
+      if (spec) {
+        const laneOut = _objLaneRun(spec, data);
+        if (laneOut !== false) return laneOut as Output;
+      }
     }
     if (params === undefined && d.type === "array" && !d.checks?.length) {
       const lane = _arrLaneOf(this);
@@ -1459,7 +1462,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       return { success: true, data } as SafeParseResult<Output>;
     if (params === undefined && d.type === "object") {
       const spec = _objLaneOf(this);
-      if (spec && _objLaneRun(spec, data)) return { success: true, data } as SafeParseResult<Output>;
+      if (spec) {
+        const laneOut = _objLaneRun(spec, data);
+        if (laneOut !== false) return { success: true, data: laneOut } as SafeParseResult<Output>;
+      }
     }
     if (params === undefined && d.type === "array" && !d.checks?.length) {
       const lane = _arrLaneOf(this);
@@ -4740,9 +4746,10 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
   return null;
 }
 
-type _ObjSpec = { keys: string[]; lanes: _Lane[]; declared: Set<string> };
+type _ObjSpec = { keys: string[]; lanes: _Lane[]; declared: Set<string>;
+  mats: { key: string; lane: _Lane; fb: () => any }[] | null };
 
-function _objSpec(schema: any, seen: Set<any>): _ObjSpec | null {
+function _objSpec(schema: any, seen: Set<any>, top = false): _ObjSpec | null {
   const d = schema._def;
   if (!d || d.type !== "object") return null;
   if (d.mode !== "strip" && d.mode !== "strict") return null;
@@ -4753,18 +4760,31 @@ function _objSpec(schema: any, seen: Set<any>): _ObjSpec | null {
   const shape = d.shape;
   const keys = Object.keys(shape);
   const lanes: _Lane[] = [];
+  let mats: _ObjSpec["mats"] = null;
   for (const k of keys) {
     const desc = Object.getOwnPropertyDescriptor(shape, k);
     if (!desc || !("value" in desc)) { seen.delete(schema); return null; } // getter shapes stay lazy — no lane
+    const fd = (desc.value as any)?._def;
+    // top-level objects materialize absent defaults into a shallow copy;
+    // nested objects can't — the parent's verbatim return shares them
+    if (top && (fd?.type === "default" || fd?.type === "prefault")) {
+      const innerLane = _fieldLane(fd.innerType, seen);
+      if (!innerLane) { seen.delete(schema); return null; }
+      const raw = fd.value;
+      const fb = typeof raw === "function" ? raw : () => raw;
+      (mats ??= []).push({ key: k, lane: innerLane, fb });
+      lanes.push(null as any); // validated conditionally in the run below
+      continue;
+    }
     const l = _fieldLane(desc.value, seen);
     if (!l) { seen.delete(schema); return null; }
     lanes.push(l);
   }
   seen.delete(schema);
-  return { keys, lanes, declared: new Set(keys) };
+  return { keys, lanes, declared: new Set(keys), mats };
 }
 
-function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>): boolean {
+function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>): any {
   if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
   const p = Object.getPrototypeOf(data);
   if (p !== null && p !== Object.prototype) return false;
@@ -4776,8 +4796,11 @@ function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>): boolean {
     rs.add(data);
   }
   const keys = spec.keys, lanes = spec.lanes;
-  for (let i = 0; i < keys.length; i++)
+  const mats = spec.mats;
+  for (let i = 0; i < keys.length; i++) {
+    if (lanes[i] === null) continue; // materializing default — checked below
     if (!lanes[i](data[keys[i]], rs)) return false;
+  }
   // verbatim return is only exact when no undeclared keys exist — strip
   // would drop them, strict would fail; either way this input leaves the lane
   let n = 0;
@@ -4785,7 +4808,17 @@ function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>): boolean {
     if (!spec.declared.has(k)) return false;
     if (++n > keys.length) return false;
   }
-  return true;
+  if (!mats) return data;
+  // absent/undefined default keys materialize into a shallow copy; a present
+  // valid value keeps the input — invalid values fail like zod
+  let out: any = null;
+  for (const m of mats) {
+    const v = data[m.key];
+    if (v === undefined) {
+      (out ??= { ...data })[m.key] = m.fb();
+    } else if (!m.lane(v, rs)) return false;
+  }
+  return out ?? data;
 }
 
 // top-level array lane — the element walker is the same refs-threaded
@@ -4831,7 +4864,7 @@ function _arrLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
 function _objLaneOf(schema: any): _ObjSpec | 0 {
   const d = schema._def;
   if (d.objlane !== undefined) return d.objlane;
-  const spec = _objSpec(schema, new Set()) ?? 0;
+  const spec = _objSpec(schema, new Set(), true) ?? 0;
   Object.defineProperty(d, "objlane", { value: spec, writable: true, enumerable: false, configurable: true });
   return spec;
 }
