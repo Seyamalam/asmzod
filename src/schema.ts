@@ -1442,6 +1442,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       const lane = _topLaneOf(this);
       if (lane && lane(data, new Set())) return data as Output;
     }
+    if (params === undefined && (d.type === "pipe" || d.type === "refine")) {
+      const lane = _effLaneOf(this);
+      if (lane) {
+        const er = lane(data);
+        if (er.hit) return er.value as Output;
+      }
+    }
     if (params === undefined && _COERCE_TYPES.has(d.type)) {
       const lane = _coerceLaneOf(this);
       if (lane) {
@@ -1488,6 +1495,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
       if (lane) {
         const cr = lane(data);
         if (cr.hit) return { success: true, data: cr.value } as SafeParseResult<Output>;
+      }
+    }
+    if (params === undefined && (d.type === "pipe" || d.type === "refine")) {
+      const lane = _effLaneOf(this);
+      if (lane) {
+        const er = lane(data);
+        if (er.hit) return { success: true, data: er.value } as SafeParseResult<Output>;
       }
     }
     const c = this._compiled;
@@ -4880,6 +4894,108 @@ function _coerceLaneOf(schema: any): ((v: any) => { hit: boolean; value?: any })
     }
   }
   Object.defineProperty(d, "coercelane", { value: lane, writable: true, enumerable: false, configurable: true });
+  return lane;
+}
+
+// effects fast lane: refine callbacks and transform pipes are user JS —
+// zod pays the same callback costs, so a lean lane matches it. the lane
+// is hit/miss plus produced value; anything async, throwing, param-gated
+// or failing falls through to the exact pipeline
+type _Eff = (v: any) => { hit: boolean; value?: any };
+
+function _effInner(s: any, seen: Set<any>): _Eff | null {
+  const d = s?._def;
+  if (!d) return null;
+  const t = d.type;
+  if (t === "refine" || t === "pipe") return _effLane(s, seen);
+  if (t === "object") {
+    const spec = _objSpec(s, seen);
+    if (!spec || spec.mats) return null; // materialized copies don't flow verbatim through effects chains
+    return (v) => {
+      const r = _objLaneRun(spec, v, new Set());
+      return r === false ? { hit: false } : { hit: true, value: r };
+    };
+  }
+  const l = _fieldLane(s, seen);
+  if (!l) return null;
+  return (v) => (l(v, new Set()) ? { hit: true, value: v } : { hit: false });
+}
+
+function _effLane(s: any, seen: Set<any>): _Eff | null {
+  const d = s?._def;
+  if (!d || seen.has(s)) return null;
+  seen.add(s);
+  const t = d.type;
+  let out: _Eff | null = null;
+  if (t === "refine" && d.kind === "refine" && typeof d.fn === "function" && d.fn.length < 2 && !d.when) {
+    const inner = _effInner(d.inner ?? d.innerType, seen);
+    if (inner) {
+      const fn = d.fn;
+      out = (v) => {
+        const r = inner(v);
+        if (!r.hit) return r;
+        const ok = fn(r.value);
+        if (isThenable(ok)) return { hit: false };
+        return ok ? { hit: true, value: r.value } : { hit: false };
+      };
+    }
+  } else if (t === "pipe") {
+    // post-pipe checks run on the output value — simple refine fns replay in
+    // the lane; anything richer excludes the pipe entirely
+    const post: ((v: any) => boolean)[] = [];
+    if (d.checks?.length) {
+      let okc = true;
+      for (const c of d.checks) {
+        if (c && c.kind === "refine" && typeof c.fn === "function" && c.fn.length < 2 && !c.when) post.push(c.fn);
+        else { okc = false; break; }
+      }
+      if (!okc) { seen.delete(s); return null; }
+    }
+    const outD = d.out?._def;
+    if (outD?.type === "transform" && typeof outD.fn === "function" && outD.fn.length < 2 && !(d.out as any)?._def?.when) {
+      const inL = _effInner(d.in, seen);
+      if (inL) {
+        const fn = outD.fn;
+        out = (v) => {
+          const r = inL(v);
+          if (!r.hit) return r;
+          const tv = fn(r.value);
+          if (isThenable(tv)) return { hit: false };
+          for (const p of post) {
+            const pr = p(tv);
+            if (isThenable(pr) || !pr) return { hit: false };
+          }
+          return { hit: true, value: tv };
+        };
+      }
+    } else if (outD?.type === "pipe" || outD?.type === "refine" || outD?.type === "transform") {
+      // chained effects: in validates, then the out chain transforms
+      const inL = _effInner(d.in, seen);
+      const outL = _effLane(d.out, seen) ?? (outD?.type === "transform" && typeof outD?.fn === "function" ? null : null);
+      if (inL && outL) {
+        out = (v) => {
+          const r = inL(v);
+          if (!r.hit) return r;
+          const r2 = outL(r.value);
+          if (!r2.hit) return r2;
+          for (const p of post) {
+            const pr = p(r2.value);
+            if (isThenable(pr) || !pr) return { hit: false };
+          }
+          return r2;
+        };
+      }
+    }
+  }
+  seen.delete(s);
+  return out;
+}
+
+function _effLaneOf(schema: any): _Eff | 0 {
+  const d = schema._def;
+  if (d.efflane !== undefined) return d.efflane;
+  const lane = _effLane(schema, new Set()) ?? 0;
+  Object.defineProperty(d, "efflane", { value: lane, writable: true, enumerable: false, configurable: true });
   return lane;
 }
 
