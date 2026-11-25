@@ -4636,10 +4636,37 @@ function _leafRun(d: any, data: unknown): boolean {
 // to the full pipeline, which is exact by construction
 type _Lane = (v: any, refs: Set<object>) => boolean;
 
-function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
+type _Cell = { lane: _Lane | null; used?: boolean };
+
+function _fieldLane(fs: any, seen: Set<any>, cells?: Map<any, _Cell>): _Lane | null {
+  if (!cells) return _fieldLaneRaw(fs, seen, cells);
+  const hit = cells.get(fs);
+  if (hit) {
+    // recursive reference — the lane exists by the time input actually runs
+    hit.used = true;
+    return (v, refs) => hit.lane!(v, refs);
+  }
+  // live cells measure nesting depth: factory recursion mints fresh schemas
+  // per level and never terminates, so a depth cap converts it to a clean bail
+  if (cells.size > 256) return null;
+  const cell: _Cell = { lane: null };
+  cells.set(fs, cell);
+  const lane = _fieldLaneRaw(fs, seen, cells);
+  if (!lane) { cells.delete(fs); return null; }
+  cell.lane = lane;
+  if (!cell.used) cells.delete(fs);
+  return lane;
+}
+
+function _fieldLaneRaw(fs: any, seen: Set<any>, cells?: Map<any, _Cell>): _Lane | null {
   const d = fs?._def;
   if (!d) return null;
   const t = d.type;
+  if (t === "lazy" && typeof d.getter === "function") {
+    // zod resolves lazy schemas once per instance — same cache, same count
+    const target = (d._cachedInner ??= d.getter());
+    return target ? _fieldLane(target, seen, cells) : null;
+  }
   if (t === "string" || t === "number" || t === "bigint" || t === "boolean") {
     if (d.checks?.length) {
       const preds = _leafPreds(d);
@@ -4665,12 +4692,13 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     return null;
   }
   if (t === "optional") {
-    const inner = _fieldLane(d.innerType, seen);
+    const inner = _fieldLane(d.innerType, seen, cells);
     if (!inner) return null;
     // undefined survives verbatim only when the inner certainly rejects it —
     // wrapper inners can funnel undefined down a ladder into a default that
     // rewrites it, so only concrete leaf/container inners keep the shortcut
-    const innerT = (d.innerType as any)?._def?.type;
+    let innerT = (d.innerType as any)?._def?.type;
+    if (innerT === "lazy") innerT = (d.innerType as any)?._def?._cachedInner?._def?.type;
     const solid = innerT === "string" || innerT === "number" || innerT === "bigint" || innerT === "boolean" ||
       innerT === "date" || innerT === "literal" || innerT === "enum" ||
       innerT === "object" || innerT === "array" || innerT === "tuple" || innerT === "record";
@@ -4678,20 +4706,20 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     return (v, refs) => v === undefined || inner(v, refs);
   }
   if (t === "default" || t === "catch" || t === "prefault") {
-    const inner = _fieldLane(d.innerType, seen);
+    const inner = _fieldLane(d.innerType, seen, cells);
     if (!inner) return null;
     // undefined input would materialize the fallback — output differs from
     // input, so the lane never engages; present-and-valid is verbatim-exact
     return (v, refs) => v !== undefined && inner(v, refs);
   }
   if (t === "nullable") {
-    const inner = _fieldLane(d.innerType, seen);
+    const inner = _fieldLane(d.innerType, seen, cells);
     if (!inner) return null;
     return (v, refs) => v === null || inner(v, refs);
   }
   if (t === "array") {
     if (d.minLen !== undefined || d.maxLen !== undefined || d.exactLen !== undefined) return null;
-    const el = _fieldLane(d.element, seen);
+    const el = _fieldLane(d.element, seen, cells);
     if (!el) return null;
     // shared/cyclic references bail to the full pipeline: zod copies shared
     // input nodes independently per position, verbatim return can't
@@ -4704,7 +4732,7 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     };
   }
   if (t === "object") {
-    const spec = _objSpec(fs, seen);
+    const spec = _objSpec(fs, seen, false, cells);
     if (!spec) return null;
     return (v, refs: Set<object>) => _objLaneRun(spec, v, refs);
   }
@@ -4713,7 +4741,7 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     const items = d.items as any[];
     const lanes: _Lane[] = [];
     for (const it of items) {
-      const l = _fieldLane(it, seen);
+      const l = _fieldLane(it, seen, cells);
       if (!l) return null;
       lanes.push(l);
     }
@@ -4740,7 +4768,7 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     // are always strings, so only a laneable key schema that accepts every
     // string could engage; simpler to require a bare string keyType
     if ((d.keyType as any)?._def?.type !== "string" || (d.keyType as any)?._def?.checks?.length) return null;
-    const vl = _fieldLane(d.valueType, seen);
+    const vl = _fieldLane(d.valueType, seen, cells);
     if (!vl) return null;
     return (v, refs) => {
       if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
@@ -4763,7 +4791,7 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     const direct = new Map<any, _Lane>();
     for (const [val, opt] of map) {
       if (!opt) continue;
-      const l = _fieldLane(opt, seen);
+      const l = _fieldLane(opt, seen, cells);
       if (!l) return null;
       direct.set(val, l);
     }
@@ -4779,7 +4807,7 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
     if (!opts?.length) return null;
     const lanes: _Lane[] = [];
     for (const o of opts) {
-      const l = _fieldLane(o, seen);
+      const l = _fieldLane(o, seen, cells);
       if (!l) return null;
       lanes.push(l);
     }
@@ -4797,7 +4825,7 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
 type _ObjSpec = { keys: string[]; lanes: _Lane[]; declared: Set<string>;
   mats: { key: string; lane: _Lane; fb: () => any }[] | null };
 
-function _objSpec(schema: any, seen: Set<any>, top = false): _ObjSpec | null {
+function _objSpec(schema: any, seen: Set<any>, top = false, cells?: Map<any, _Cell>): _ObjSpec | null {
   const d = schema._def;
   if (!d || d.type !== "object") return null;
   if (d.mode !== "strip" && d.mode !== "strict") return null;
@@ -4816,7 +4844,7 @@ function _objSpec(schema: any, seen: Set<any>, top = false): _ObjSpec | null {
     // top-level objects materialize absent defaults into a shallow copy;
     // nested objects can't — the parent's verbatim return shares them
     if (top && (fd?.type === "default" || fd?.type === "prefault")) {
-      const innerLane = _fieldLane(fd.innerType, seen);
+      const innerLane = _fieldLane(fd.innerType, seen, cells);
       if (!innerLane) { seen.delete(schema); return null; }
       const raw = fd.value;
       const fb = typeof raw === "function" ? raw : () => raw;
@@ -4824,7 +4852,7 @@ function _objSpec(schema: any, seen: Set<any>, top = false): _ObjSpec | null {
       lanes.push(null as any); // validated conditionally in the run below
       continue;
     }
-    const l = _fieldLane(desc.value, seen);
+    const l = _fieldLane(desc.value, seen, cells);
     if (!l) { seen.delete(schema); return null; }
     lanes.push(l);
   }
@@ -4887,7 +4915,7 @@ function _topLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
   if (d.toplane !== undefined) return d.toplane;
   let lane: any = 0;
   if (!d.checks?.length) {
-    const l = _fieldLane(schema, new Set());
+    const l = _fieldLane(schema, new Set(), new Map());
     if (l) lane = l;
   }
   Object.defineProperty(d, "toplane", { value: lane, writable: true, enumerable: false, configurable: true });
@@ -5021,14 +5049,14 @@ function _effLaneOf(schema: any): _Eff | 0 {
 
 const _COERCE_TYPES = new Set(["coerce_num", "coerce_str", "coerce_bool", "coerce_bigint"]);
 
-const _LANEABLE_TOP = new Set(["tuple", "record", "union", "discriminatedUnion", "discunion", "optional", "nullable"]);
+const _LANEABLE_TOP = new Set(["tuple", "record", "union", "discriminatedUnion", "discunion", "optional", "nullable", "lazy"]);
 
 function _arrLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
   const d = schema._def;
   if (d.arrlane !== undefined) return d.arrlane;
   let lane: any = 0;
   {
-    const l = _fieldLane(d.element, new Set());
+    const l = _fieldLane(d.element, new Set(), new Map());
     if (l) lane = l;
   }
   Object.defineProperty(d, "arrlane", { value: lane, writable: true, enumerable: false, configurable: true });
@@ -5039,7 +5067,14 @@ function _arrLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
 function _objLaneOf(schema: any): _ObjSpec | 0 {
   const d = schema._def;
   if (d.objlane !== undefined) return d.objlane;
-  const spec = _objSpec(schema, new Set(), true) ?? 0;
+  const cells = new Map<any, _Cell>();
+  // pre-register so recursive references tie the knot in the object branch
+  // instead of re-entering _objSpec against the seen-set
+  const cell: _Cell = { lane: null, used: true };
+  cells.set(schema, cell);
+  const built = _objSpec(schema, new Set(), true, cells);
+  const spec = built ?? 0;
+  if (built) cell.lane = (v, refs) => _objLaneRun(built, v, refs);
   Object.defineProperty(d, "objlane", { value: spec, writable: true, enumerable: false, configurable: true });
   return spec;
 }
