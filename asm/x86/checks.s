@@ -1200,3 +1200,332 @@ AZX_NAPI(az_is_datetime):
     add rsp, 48
     pop rbx
     ret
+
+// ---------- az_issue_invstr ----------
+// (x0=validation ptr, x1=len, x2=msgptr, x3=msglen,
+//  x4=extraKey ptr, x5=extraKeyLen, x6=extraVal ptr, x7=extraValLen) -> x0 0/-4
+// issue code 7 (invalid_string) + field "validation" (+optional extra field)
+    .globl AZX_NAPI(az_issue_invstr)
+    AZX_HIDDEN AZX_NAPI(az_issue_invstr)
+AZX_NAPI(az_issue_invstr):
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    mov [rsp + 16], rdi
+    mov [rsp + 24], rsi
+    mov [rsp + 48], r8        // x4 extraKey ptr
+    mov [rsp + 56], r9        // x5 extraKey len
+    mov [rsp + 64], r10       // x6 extraVal ptr
+    mov [rsp + 72], r11       // x7 extraVal len
+    mov rdi, 7
+    mov rsi, rdx              // msgptr
+    mov rdx, rcx              // msglen
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxis_out
+    lea rdi, [rip + AZX_NAPI(ak_validation)]
+    mov esi, 10
+    mov rdx, [rsp + 16]
+    mov rcx, [rsp + 24]
+    call AZX_NAPI(az_issue_f_str)
+    test rax, rax
+    jnz .Lxis_out
+    mov rax, [rsp + 56]
+    test rax, rax
+    jz .Lxis_commit
+    mov rdi, [rsp + 48]
+    mov rsi, rax
+    mov rdx, [rsp + 64]
+    mov rcx, [rsp + 72]
+    call AZX_NAPI(az_issue_f_str)
+    test rax, rax
+    jnz .Lxis_out
+.Lxis_commit:
+    call AZX_NAPI(az_issue_commit)
+    xor eax, eax
+.Lxis_out:
+    add rsp, 96
+    pop rbp
+    ret
+
+// ---------- az_issue_size ----------
+// x0=code, x1=typeptr, x2=typelen, x3=bound f64 bits, w4=inclusive, w5=exact,
+// x6=msgptr, x7=msglen  -> x0 0/-4
+// frame slots (rsp-based, 112 bytes, keeps 16-alignment):
+//   0=msgptr 8=msglen 16/24=type 32=bound bits 40=incl 48=exact
+//   56=code 64=bound i64 72=cursor 80=have 88=pad
+    .globl AZX_NAPI(az_issue_size)
+    AZX_HIDDEN AZX_NAPI(az_issue_size)
+AZX_NAPI(az_issue_size):
+    push rbp
+    mov rbp, rsp
+    sub rsp, 112
+    mov [rsp + 16], rsi
+    mov [rsp + 24], rdx
+    mov [rsp + 32], rcx
+    mov [rsp + 40], r8
+    mov [rsp + 48], r9
+    mov [rsp + 56], rdi
+    mov [rsp + 0], r10        // x6 msgptr
+    mov [rsp + 8], r11        // x7 msglen
+    test r11, r11
+    jnz .Lxsz_begin
+    // default msg: only for integral bounds below 2^61
+    mov rax, [rsp + 32]
+    movq xmm1, rax
+    cvttsd2si r9, xmm1
+    cvtsi2sd xmm2, r9
+    ucomisd xmm1, xmm2
+    jp .Lxsz_begin            // NaN
+    jne .Lxsz_begin
+    mov r10, 0x7ff
+    shl r10, 52
+    and r10, rax
+    shr r10, 52
+    cmp r10, 0x43c
+    jae .Lxsz_begin
+    mov [rsp + 64], r9
+    lea rax, [rip + AZX_NAPI(az_msgbuf)]
+    mov [rsp + 72], rax
+    mov rdi, rax
+    mov rax, [rsp + 56]
+    cmp rax, 9
+    je .Lxsz_pmax
+    lea rsi, [rip + .Lxm_toosmall]
+    mov edx, 20
+    jmp .Lxsz_pref
+.Lxsz_pmax:
+    lea rsi, [rip + .Lxm_toobig]
+    mov edx, 18
+.Lxsz_pref:
+    call AZX_NAPI(az_msgcat)
+    mov [rsp + 72], rax
+    mov rdi, rax
+    mov rsi, [rsp + 16]
+    mov rdx, [rsp + 24]
+    call AZX_NAPI(az_msgcat)
+    mov [rsp + 72], rax
+    // "string"|"array" -> have=1
+    mov qword ptr [rsp + 80], 0
+    mov rax, [rsp + 24]
+    cmp rax, 6
+    jne .Lxsz_tarr
+    mov rdi, [rsp + 16]
+    lea rsi, [rip + akx_str6]
+    mov edx, 6
+    call AZX_NAPI(az_memeq)
+    test eax, eax
+    jz .Lxsz_tarr
+    mov qword ptr [rsp + 80], 1
+    jmp .Lxsz_thave
+.Lxsz_tarr:
+    mov rax, [rsp + 24]
+    cmp rax, 5
+    jne .Lxsz_tbe
+    mov rdi, [rsp + 16]
+    lea rsi, [rip + akx_arr5]
+    mov edx, 5
+    call AZX_NAPI(az_memeq)
+    test eax, eax
+    jz .Lxsz_tbe
+    mov qword ptr [rsp + 80], 1
+.Lxsz_thave:
+    mov rdi, [rsp + 72]
+    lea rsi, [rip + .Lxm_tohave]
+    mov edx, 9
+    jmp .Lxsz_mid
+.Lxsz_tbe:
+    mov rdi, [rsp + 72]
+    lea rsi, [rip + .Lxm_tobe]
+    mov edx, 7
+.Lxsz_mid:
+    call AZX_NAPI(az_msgcat)
+    mov [rsp + 72], rax
+    // exactly | comparison op
+    mov rax, [rsp + 48]
+    test eax, eax
+    jz .Lxsz_op
+    mov rdi, [rsp + 72]
+    lea rsi, [rip + .Lxm_exactly]
+    mov edx, 8
+    call AZX_NAPI(az_msgcat)
+    mov [rsp + 72], rax
+    jmp .Lxsz_num
+.Lxsz_op:
+    mov rdi, [rsp + 72]
+    mov rax, [rsp + 56]
+    mov r11, [rsp + 40]       // inclusive
+    cmp rax, 9
+    je .Lxsz_opmax
+    test r11d, r11d
+    jz .Lxsz_gt
+    lea rsi, [rip + .Lxm_gte]
+    mov edx, 2
+    jmp .Lxsz_opc
+.Lxsz_gt:
+    lea rsi, [rip + .Lxm_gt]
+    mov edx, 1
+    jmp .Lxsz_opc
+.Lxsz_opmax:
+    test r11d, r11d
+    jz .Lxsz_lt
+    lea rsi, [rip + .Lxm_lte]
+    mov edx, 2
+    jmp .Lxsz_opc
+.Lxsz_lt:
+    lea rsi, [rip + .Lxm_lt]
+    mov edx, 1
+.Lxsz_opc:
+    call AZX_NAPI(az_msgcat)
+    mov [rsp + 72], rax
+.Lxsz_num:
+    // append bound as integer
+    mov rdi, [rsp + 64]
+    mov rsi, [rsp + 72]
+    call AZX_NAPI(az_i64toa)
+    add [rsp + 72], rax
+    // unit suffix
+    mov rax, [rsp + 80]
+    test rax, rax
+    jz .Lxsz_setd
+    mov rdi, [rsp + 72]
+    mov rax, [rsp + 24]
+    cmp rax, 6
+    jne .Lxsz_items
+    lea rsi, [rip + .Lxm_chars]
+    mov edx, 11
+    jmp .Lxsz_unit
+.Lxsz_items:
+    lea rsi, [rip + .Lxm_items]
+    mov edx, 6
+.Lxsz_unit:
+    call AZX_NAPI(az_msgcat)
+    mov [rsp + 72], rax
+.Lxsz_setd:
+    lea r9, [rip + AZX_NAPI(az_msgbuf)]
+    mov r10, [rsp + 72]
+    sub r10, r9
+    lea r11, [rip + AZX_NAPI(az_default_msg)]
+    mov [r11], r9
+    mov [r11 + 8], r10
+.Lxsz_begin:
+    mov rdi, [rsp + 56]       // code
+    mov rsi, [rsp + 0]        // msgptr
+    mov rdx, [rsp + 8]        // msglen
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxsz_out
+    // minimum|maximum field
+    mov rax, [rsp + 56]
+    cmp rax, 9
+    je .Lxsz_max
+    lea rdi, [rip + AZX_NAPI(ak_minimum)]
+    mov esi, 7
+    jmp .Lxsz_bound
+.Lxsz_max:
+    lea rdi, [rip + AZX_NAPI(ak_maximum)]
+    mov esi, 7
+.Lxsz_bound:
+    movq xmm0, [rsp + 32]     // bound bits — f64 field takes value in xmm0
+    call AZX_NAPI(az_issue_f_f64)
+    test rax, rax
+    jnz .Lxsz_out
+    lea rdi, [rip + AZX_NAPI(ak_type)]
+    mov esi, 6
+    mov rdx, [rsp + 16]
+    mov rcx, [rsp + 24]
+    call AZX_NAPI(az_issue_f_str)
+    test rax, rax
+    jnz .Lxsz_out
+    lea rdi, [rip + AZX_NAPI(ak_inclusive)]
+    mov esi, 9
+    mov rdx, [rsp + 40]
+    call AZX_NAPI(az_issue_f_bool)
+    test rax, rax
+    jnz .Lxsz_out
+    mov rax, [rsp + 48]
+    test eax, eax
+    jz .Lxsz_nc
+    lea rdi, [rip + AZX_NAPI(ak_exact)]
+    mov esi, 5
+    mov edx, 1
+    call AZX_NAPI(az_issue_f_bool)
+    test rax, rax
+    jnz .Lxsz_out
+.Lxsz_nc:
+    lea rax, [rip + AZX_NAPI(az_nc_flag)]
+    movzx eax, byte ptr [rax]
+    test eax, eax
+    jz .Lxsz_arity
+    lea rdi, [rip + AZX_NAPI(ak_nc)]
+    mov esi, 3
+    mov edx, 1
+    call AZX_NAPI(az_issue_f_bool)
+    test rax, rax
+    jnz .Lxsz_out
+.Lxsz_arity:
+    lea rax, [rip + AZX_NAPI(az_arity_flag)]
+    movzx eax, byte ptr [rax]
+    test eax, eax
+    jz .Lxsz_commit
+    lea rdi, [rip + AZX_NAPI(ak_arity)]
+    mov esi, 6
+    mov edx, 1
+    call AZX_NAPI(az_issue_f_bool)
+    test rax, rax
+    jnz .Lxsz_out
+.Lxsz_commit:
+    call AZX_NAPI(az_issue_commit)
+    xor eax, eax
+.Lxsz_out:
+    add rsp, 112
+    pop rbp
+    ret
+
+    AZX_RODATA
+.Lxm_toosmall: .ascii "Too small: expected "
+.Lxm_toobig:   .ascii "Too big: expected "
+.Lxm_tohave:   .ascii " to have "
+.Lxm_tobe:     .ascii " to be "
+.Lxm_exactly:  .ascii "exactly "
+.Lxm_gte:      .ascii ">="
+.Lxm_gt:       .ascii ">"
+.Lxm_lte:      .ascii "<="
+.Lxm_lt:       .ascii "<"
+.Lxm_chars:    .ascii " characters"
+.Lxm_items:    .ascii " items"
+akx_str6:      .ascii "string"
+akx_arr5:      .ascii "array"
+    .globl AZX_NAPI(ak_validation)
+    AZX_HIDDEN AZX_NAPI(ak_validation)
+AZX_NAPI(ak_validation): .ascii "validation"
+    .globl AZX_NAPI(ak_minimum)
+    AZX_HIDDEN AZX_NAPI(ak_minimum)
+AZX_NAPI(ak_minimum):    .ascii "minimum"
+    .globl AZX_NAPI(ak_maximum)
+    AZX_HIDDEN AZX_NAPI(ak_maximum)
+AZX_NAPI(ak_maximum):    .ascii "maximum"
+    .globl AZX_NAPI(ak_type)
+    AZX_HIDDEN AZX_NAPI(ak_type)
+AZX_NAPI(ak_type):       .ascii "origin"
+    .globl AZX_NAPI(ak_inclusive)
+    AZX_HIDDEN AZX_NAPI(ak_inclusive)
+AZX_NAPI(ak_inclusive):  .ascii "inclusive"
+    .globl AZX_NAPI(ak_exact)
+    AZX_HIDDEN AZX_NAPI(ak_exact)
+AZX_NAPI(ak_exact):      .ascii "exact"
+    .globl AZX_NAPI(ak_nc)
+    AZX_HIDDEN AZX_NAPI(ak_nc)
+AZX_NAPI(ak_nc):         .ascii "_nc"
+    .globl AZX_NAPI(ak_arity)
+    AZX_HIDDEN AZX_NAPI(ak_arity)
+AZX_NAPI(ak_arity):      .ascii "_arity"
+    AZX_WDATA
+    .globl AZX_NAPI(az_nc_flag)
+    AZX_HIDDEN AZX_NAPI(az_nc_flag)
+AZX_NAPI(az_nc_flag):    .byte 0
+    .globl AZX_NAPI(az_arity_flag)
+    AZX_HIDDEN AZX_NAPI(az_arity_flag)
+AZX_NAPI(az_arity_flag): .byte 0
+    .text
+

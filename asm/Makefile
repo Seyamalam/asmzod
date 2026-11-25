@@ -73,10 +73,7 @@ x86: $(X86OBJ)
 	clang -x assembler-with-cpp -Ix86 --target=x86_64-linux-gnu -fPIC -c -o $@ $<
 
 x86-test: x86
-	docker run --rm --platform linux/amd64 -v $(CURDIR)/x86:/x asmzod-x86 bash -c \
-	  'mkdir -p /tmp/azx && cd /tmp/azx && cp /x/*.s /x/*.h /x/*.c . 2>/dev/null; \
-	   for f in util; do clang -x assembler-with-cpp -I. -fPIC -c -o $$f.o $$f.s; done && \
-	   clang -o xtest xtest.c util.o && ./xtest'
+	docker run --rm --platform linux/amd64 -v $(CURDIR)/x86:/x asmzod-x86 bash /x/xrun.sh
 
 x86-clean:
 	rm -f x86/*.xo
