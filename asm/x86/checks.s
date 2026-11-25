@@ -466,3 +466,141 @@ AZX_NAPI(az_is_nanoid):
 .Lxnn_no:
     xor eax, eax
     ret
+
+// ---------- az_is_cuid2(rdi=ptr, rsi=len) -> eax ----------
+// [a-z][a-z0-9]* len>=2
+    .globl AZX_NAPI(az_is_cuid2)
+    AZX_HIDDEN AZX_NAPI(az_is_cuid2)
+AZX_NAPI(az_is_cuid2):
+    cmp rsi, 2
+    jb .Lxcu_no
+    movzx eax, byte ptr [rdi]
+    cmp al, 'a'
+    jb .Lxcu_no
+    cmp al, 'z'
+    ja .Lxcu_no
+    mov r9d, 1
+.Lxcu_l:
+    cmp r9, rsi
+    jae .Lxcu_yes
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxcu_c
+    cmp al, '9'
+    jbe .Lxcu_ok
+.Lxcu_c:
+    cmp al, 'a'
+    jb .Lxcu_no
+    cmp al, 'z'
+    ja .Lxcu_no
+.Lxcu_ok:
+    inc r9
+    jmp .Lxcu_l
+.Lxcu_yes:
+    mov eax, 1
+    ret
+.Lxcu_no:
+    xor eax, eax
+    ret
+
+// ---------- az_is_base64(rdi=ptr, rsi=len) -> eax ----------
+// len%4==0, alphabet, <=2 '=' at end
+    .globl AZX_NAPI(az_is_base64)
+    AZX_HIDDEN AZX_NAPI(az_is_base64)
+AZX_NAPI(az_is_base64):
+    test rsi, rsi
+    jz .Lxb64_no
+    test rsi, 3
+    jnz .Lxb64_no
+    mov r13, rsi             // body end (r13 saved below — leaf, no calls)
+    push r13
+    mov r13, rsi
+    // strip trailing '=' (max 2)
+    movzx eax, byte ptr [rdi + rsi - 1]
+    cmp al, '='
+    jne .Lxb64_body
+    dec r13
+    movzx eax, byte ptr [rdi + rsi - 2]
+    cmp al, '='
+    jne .Lxb64_body
+    dec r13
+.Lxb64_body:
+    xor r9d, r9d
+.Lxb64_l:
+    cmp r9, r13
+    jae .Lxb64_pad
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxb64_c
+    cmp al, '9'
+    jbe .Lxb64_ok
+.Lxb64_c:
+    cmp al, 'A'
+    jb .Lxb64_c2
+    cmp al, 'Z'
+    jbe .Lxb64_ok
+.Lxb64_c2:
+    cmp al, 'a'
+    jb .Lxb64_c3
+    cmp al, 'z'
+    jbe .Lxb64_ok
+.Lxb64_c3:
+    cmp al, '+'
+    je .Lxb64_ok
+    cmp al, '/'
+    je .Lxb64_ok
+    pop r13
+    jmp .Lxb64_no
+.Lxb64_ok:
+    inc r9
+    jmp .Lxb64_l
+.Lxb64_pad:
+    mov r9, r13
+    pop r13
+.Lxb64_pl:
+    cmp r9, rsi
+    jae .Lxb64_yes
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '='
+    jne .Lxb64_no
+    inc r9
+    jmp .Lxb64_pl
+.Lxb64_yes:
+    mov eax, 1
+    ret
+.Lxb64_no:
+    xor eax, eax
+    ret
+
+// ---------- az_is_hex(rdi=ptr, rsi=len) -> eax ----------
+    .globl AZX_NAPI(az_is_hex)
+    AZX_HIDDEN AZX_NAPI(az_is_hex)
+AZX_NAPI(az_is_hex):
+    test rsi, rsi
+    jz .Lxhx_yes             // zod: "" is valid hex
+    xor r9d, r9d
+.Lxhx_l:
+    cmp r9, rsi
+    jae .Lxhx_yes
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxhx_no
+    cmp al, '9'
+    jbe .Lxhx_ok
+    cmp al, 'A'
+    jb .Lxhx_no
+    cmp al, 'F'
+    jbe .Lxhx_ok
+    cmp al, 'a'
+    jb .Lxhx_no
+    cmp al, 'f'
+    ja .Lxhx_no
+.Lxhx_ok:
+    inc r9
+    jmp .Lxhx_l
+.Lxhx_yes:
+    mov eax, 1
+    ret
+.Lxhx_no:
+    xor eax, eax
+    ret
