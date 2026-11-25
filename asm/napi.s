@@ -3381,9 +3381,9 @@ _azn_encval:
     ldr x10, [x27, #10]
     cmp x9, x10
     b.ne .Ln_obj_retout
-    // property_names includes enumerable PROTOTYPE keys — a declared key read
-    // from the proto must be written as an own key, so return-input needs
-    // every name to be an own property
+    // bun's property_names includes enumerable PROTOTYPE keys — a declared
+    // key read from the proto must become an own key in the output, so
+    // return-input needs every name verified as an own property
     str xzr, [sp, #LN_M]      // i
 .Ln_obj_richk:
     ldr w9, [sp, #LN_L]
