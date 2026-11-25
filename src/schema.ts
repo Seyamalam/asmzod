@@ -1491,6 +1491,13 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     }
     if (params === undefined && d.checks?.length && _leafRun(d, data))
       return { success: true, data } as SafeParseResult<Output>;
+    if (params === undefined && d.checks?.length && d.type === "string" && typeof data === "string") {
+      const fi = _fmtFailIssues(d, data, []);
+      if (fi) {
+        for (const iss of fi) iss.inst = this;
+        return failure(ZodRealError, fi, _SYNC_CTX) as SafeParseResult<Output>;
+      }
+    }
     if (params === undefined && d.type === "date" && !d.checks?.length &&
         data instanceof Date && !Number.isNaN(data.getTime()))
       return { success: true, data } as SafeParseResult<Output>;
@@ -4871,6 +4878,31 @@ function _objSpec(schema: any, seen: Set<any>, top = false, cells?: Map<any, _Ce
     strict: d.mode === "strict", fdefs: keys.map((k) => (shape as any)[k]) };
 }
 
+// format-failure replication for leaf chains whose checks are all builtin
+// format predicates: the invalid_format issue is statically shaped. custom
+// messages/error params send it back to the exact pipeline
+function _fmtFailIssues(fd: any, v: string, path: any[]): any[] | null {
+  const checks = fd.checks as any[];
+  let out: any[] | null = null;
+  for (const c of checks) {
+    if (!(c && typeof c.fn === "function" && c.builtin)) return null;
+    if (c.message !== undefined || (c as any).error !== undefined) return null;
+    const nv = c.fn(v);
+    if (nv === true) continue;
+    if (nv !== false) return null; // arrays (multi-issue) and strings (transforms) stay exact
+    const k = c.fmt ?? c.kind;
+    const issue: any = {
+      ...(FORMAT_NOPAT.has(k) ? {} : { origin: "string" }),
+      code: "invalid_format", format: k,
+      ...(!FORMAT_NOPAT.has(k) && (c.pat || FORMAT_PATTERNS[k])
+            ? { pattern: c.pat ? `/${c.pat.source}/` : FORMAT_PATTERNS[k] } : {}),
+      input: v, path, message: c.message,
+    };
+    (out ??= []).push(issue);
+  }
+  return out;
+}
+
 const _OBJFAIL = Symbol("objfail");
 
 // returns the input (or materialized copy) on success, false when the lane
@@ -4927,9 +4959,18 @@ function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>, schema?: any
     // exact pipeline
     if (rich) continue;
     const fd = (spec.fdefs?.[i] as any)?._def;
-    if (!fd || fd.prim === undefined || fd.checks?.length || fd.format !== undefined ||
-        (fd.type !== "string" && fd.type !== "number" && fd.type !== "boolean" && fd.type !== "bigint") ||
-        typeof v === fd.prim) { rich = true; continue; }
+    if (!fd || fd.prim === undefined || fd.format !== undefined ||
+        (fd.type !== "string" && fd.type !== "number" && fd.type !== "boolean" && fd.type !== "bigint")) { rich = true; continue; }
+    if (typeof v === fd.prim) {
+      // correct type — the failure is in the checks. builtin-format chains
+      // replicate exactly; anything richer stays with the pipeline
+      if (!fd.checks?.length || fd.type !== "string" || typeof v !== "string") { rich = true; continue; }
+      const fi = _fmtFailIssues(fd, v, [keys[i]]);
+      if (!fi) { rich = true; continue; }
+      for (const iss of fi) { iss.inst = spec.fdefs![i]; (issues ??= []).push(iss); }
+      continue;
+    }
+    if (fd.checks?.length) { rich = true; continue; }
     const ferr = (fd as any).error;
     if (ferr !== undefined && typeof ferr !== "string") { rich = true; continue; }
     const issue: any = { expected: fd.prim, code: "invalid_type", path: [keys[i]] };
