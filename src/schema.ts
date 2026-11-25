@@ -1430,7 +1430,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.type === "object") {
       const spec = _objLaneOf(this);
       if (spec) {
-        const laneOut = _objLaneRun(spec, data, undefined, this);
+        const laneOut = (spec as any).cg ? (spec as any).cg(data, this, (spec as any).cgc) : _objLaneRun(spec, data, undefined, this);
         if (laneOut !== false && !laneOut[_OBJFAIL]) return laneOut as Output;
       }
     }
@@ -1504,7 +1504,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.type === "object") {
       const spec = _objLaneOf(this);
       if (spec) {
-        const laneOut = _objLaneRun(spec, data, undefined, this);
+        const laneOut = (spec as any).cg ? (spec as any).cg(data, this, (spec as any).cgc) : _objLaneRun(spec, data, undefined, this);
         if (laneOut !== false) {
           if (laneOut[_OBJFAIL]) return failure(ZodRealError, laneOut.issues, _SYNC_CTX) as SafeParseResult<Output>;
           return { success: true, data: laneOut } as SafeParseResult<Output>;
@@ -4903,6 +4903,37 @@ function _fmtFailIssues(fd: any, v: string, path: any[]): any[] | null {
   return out;
 }
 
+// shared leaf-failure classifier: bare prim mismatch and builtin-format
+// failures replicate inline; anything richer returns null and the input
+// takes the exact pipeline. single source of truth for the runtime lane
+// and codegen
+function _fieldFailIss(fdefSchema: any, v: any, key: string): any[] | null {
+  let fd = fdefSchema?._def;
+  // optional wrappers forward inner failures verbatim — classify on the inner
+  if (fd?.type === "optional" && v !== undefined) fd = fd.innerType?._def;
+  if (!fd || fd.prim === undefined || fd.format !== undefined ||
+      (fd.type !== "string" && fd.type !== "number" && fd.type !== "boolean" && fd.type !== "bigint")) return null;
+  if (typeof v === fd.prim) {
+    if (!fd.checks?.length || fd.type !== "string" || typeof v !== "string") return null;
+    const fi = _fmtFailIssues(fd, v, [key]);
+    if (!fi) return null;
+    for (const iss of fi) iss.inst = fdefSchema;
+    return fi;
+  }
+  if (fd.checks?.length) return null;
+  const ferr = (fd as any).error;
+  if (ferr !== undefined && typeof ferr !== "string") return null;
+  const issue: any = { expected: fd.prim, code: "invalid_type", path: [key] };
+  if (ferr !== undefined) issue.message = ferr;
+  else {
+    issue.message = `Invalid input: expected ${fd.prim}, received ${parsedTypeName(v)}`;
+    defaultedIssues.add(issue);
+  }
+  issue.inst = fdefSchema;
+  issue.input = v;
+  return [issue];
+}
+
 const _OBJFAIL = Symbol("objfail");
 
 // returns the input (or materialized copy) on success, false when the lane
@@ -4953,35 +4984,17 @@ function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>, schema?: any
     if (stash) stash[i] = v;
     if (lanes[i] === null) continue; // materializing default — checked below
     if (lanes[i](v, rs)) continue;
-    if (earlyAbort || !top) return false;
-    // fast-fail eligibility: bare leaf prim type mismatch — same shape as
-    // the toplevel leaf lane. richer failures send the whole input to the
-    // exact pipeline
-    if (rich) continue;
-    const fd = (spec.fdefs?.[i] as any)?._def;
-    if (!fd || fd.prim === undefined || fd.format !== undefined ||
-        (fd.type !== "string" && fd.type !== "number" && fd.type !== "boolean" && fd.type !== "bigint")) { rich = true; continue; }
-    if (typeof v === fd.prim) {
-      // correct type — the failure is in the checks. builtin-format chains
-      // replicate exactly; anything richer stays with the pipeline
-      if (!fd.checks?.length || fd.type !== "string" || typeof v !== "string") { rich = true; continue; }
-      const fi = _fmtFailIssues(fd, v, [keys[i]]);
-      if (!fi) { rich = true; continue; }
-      for (const iss of fi) { iss.inst = spec.fdefs![i]; (issues ??= []).push(iss); }
-      continue;
-    }
-    if (fd.checks?.length) { rich = true; continue; }
-    const ferr = (fd as any).error;
-    if (ferr !== undefined && typeof ferr !== "string") { rich = true; continue; }
-    const issue: any = { expected: fd.prim, code: "invalid_type", path: [keys[i]] };
-    if (ferr !== undefined) issue.message = ferr;
-    else {
-      issue.message = `Invalid input: expected ${fd.prim}, received ${parsedTypeName(v)}`;
-      defaultedIssues.add(issue);
-    }
-    issue.inst = spec.fdefs![i];
-    issue.input = v;
-    (issues ??= []).push(issue);
+    if (!top) return false;
+    // fast-fail eligibility: bare leaf prim mismatch or builtin-format
+    // failure replicate inline — richer failures send the whole input to
+    // the exact pipeline
+    if (rich) { if (earlyAbort) return false; continue; }
+    const fi = _fieldFailIss(spec.fdefs?.[i], v, keys[i]);
+    if (!fi) { rich = true; if (earlyAbort) return false; continue; }
+    for (const iss of fi) (issues ??= []).push(iss);
+    // validate only reads .success — a leaf-eligible failure answers it
+    // immediately and the walk correctly stops before later getters
+    if (earlyAbort) { const f: any = { issues }; f[_OBJFAIL] = 1; return f; }
   }
   if (extra?.length) {
     if (earlyAbort || !top) return false;
@@ -5195,6 +5208,96 @@ function _arrLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
 }
 
 // spec cache — non-enumerable so def spreads never inherit it
+// strict extras issue — shared by the runtime lane and codegen
+function _strictKeysIss(schema: any, extra: string[], data: any): any {
+  const errP = schema._def.error;
+  const issue: any = { code: "unrecognized_keys", keys: extra, path: [] };
+  if (errP !== undefined) issue.message = errP;
+  else {
+    issue.message = extra.length === 1
+      ? `Unrecognized key: "${extra[0]}"`
+      : `Unrecognized keys: ${extra.map((k) => `"${k}"`).join(", ")}`;
+    defaultedIssues.add(issue);
+  }
+  issue.inst = schema;
+  issue.input = data;
+  return issue;
+}
+
+// ---------------------------------------------------------------------------
+// straight-line codegen: monolithic per-spec validators. closure composition
+// costs real nanoseconds per field, so a generated function inlines the leaf
+// checks and the single-pass walk, calling lane closures only for fields too
+// rich to inline. workerd bans new Function — a compile failure just means
+// the runtime lane handles the spec
+// ---------------------------------------------------------------------------
+
+function _codegenObj(spec: _ObjSpec): ((data: any, schema: any, C: any) => any) | null {
+  if (spec.mats) return null; // materializing defaults stay with the runtime v1
+  // classify fields: bare prim leaves (optionally optional-wrapped) inline;
+  // everything else calls its lane closure
+  type F = { prim: string; optional: boolean } | null;
+  const prims: F[] = [];
+  for (let i = 0; i < spec.keys.length; i++) {
+    let fd = spec.fdefs?.[i]?._def;
+    if (!fd) return null;
+    let optional = false;
+    if (fd.type === "optional") {
+      const inner = fd.innerType?._def;
+      if (!inner) return null;
+      const it = inner.type === "lazy" ? inner._cachedInner?._def?.type : inner.type;
+      const solid = it === "string" || it === "number" || it === "bigint" || it === "boolean";
+      if (solid && !inner.checks?.length && inner.format === undefined) { optional = true; fd = inner; }
+    }
+    if (!optional && fd.prim !== undefined && !fd.checks?.length && fd.format === undefined &&
+        (fd.type === "string" || fd.type === "number" || fd.type === "boolean" || fd.type === "bigint")) {
+      prims.push({ prim: fd.prim, optional: false });
+    } else if (optional) {
+      prims.push({ prim: fd.prim, optional: true });
+    } else prims.push(null);
+  }
+  const B: string[] = [];
+  const w = (x: string) => B.push(x);
+  const needsRefs = prims.some((p) => p === null);
+  w(`if(data===null||typeof data!=="object"||Array.isArray(data))return false;`);
+  w(`const pr=Object.getPrototypeOf(data);if(pr!==null&&pr!==Object.prototype)return false;`);
+  if (needsRefs) w(`const refs=new Set();refs.add(data);`);
+  else w(`const refs=null;`);
+  w(`let extra=null,stripped=false;`);
+  w(`for(const k in data){if(!C.declared.has(k)){${spec.strict ? "(extra||(extra=[])).push(k);" : "stripped=true;"}}}`);
+  w(`const stash=stripped?new Array(${spec.keys.length}):null;`);
+  w(`let issues=null,rich=false,fi;`);
+  for (let i = 0; i < spec.keys.length; i++) {
+    const key = JSON.stringify(spec.keys[i]);
+    const p = prims[i];
+    w(`{const v=data[${key}];if(stash)stash[${i}]=v;`);
+    if (p) {
+      const tc = p.prim === "number" ? `typeof v!=="number"||!Number.isFinite(v)` : `typeof v!=="${p.prim}"`;
+      w(`if(${p.optional ? `v!==undefined&&(${tc})` : tc}){`);
+    } else {
+      w(`if(!C.lanes[${i}](v,refs)){`);
+    }
+    w(`if(!rich){fi=C.fieldIss(C.fdefs[${i}],v,${key});if(!fi)rich=true;else{for(let j=0;j<fi.length;j++)(issues||(issues=[])).push(fi[j]);if(C.isAbort()){const f={issues};f[C.FAIL]=1;return f}}}`);
+    w(`if(C.isAbort())return false;`);
+    w(`}}`);
+  }
+  if (spec.strict) {
+    w(`if(extra&&extra.length){if(C.isAbort())return false;`);
+    w(`const errP=schema._def.error;if(errP!==undefined&&typeof errP!=="string")return false;`);
+    w(`(issues||(issues=[])).push(C.strictIss(schema,extra,data))}`);
+  }
+  w(`if(rich)return false;`);
+  w(`if(issues){const f={issues};f[C.FAIL]=1;return f}`);
+  if (spec.strict) w(`if(extra)return false;`);
+  w(`if(stripped&&stash){const out={};for(let i=0;i<${spec.keys.length};i++)if(stash[i]!==undefined||C.keys[i] in data)out[C.keys[i]]=stash[i];return out}`);
+  w(`return data;`);
+  try {
+    return new Function("data", "schema", "C", B.join("")) as any;
+  } catch {
+    return null;
+  }
+}
+
 function _objLaneOf(schema: any): _ObjSpec | 0 {
   const d = schema._def;
   if (d.objlane !== undefined) return d.objlane;
@@ -5205,7 +5308,18 @@ function _objLaneOf(schema: any): _ObjSpec | 0 {
   cells.set(schema, cell);
   const built = _objSpec(schema, new Set(), true, cells);
   const spec = built ?? 0;
-  if (built) cell.lane = (v, refs) => _objLaneRun(built, v, refs);
+  if (built) {
+    cell.lane = (v, refs) => _objLaneRun(built, v, refs);
+    const cg = _codegenObj(built);
+    if (cg) {
+      (built as any).cg = cg;
+      (built as any).cgc = {
+        declared: built.declared, keys: built.keys, lanes: built.lanes, fdefs: built.fdefs,
+        fieldIss: _fieldFailIss, strictIss: _strictKeysIss,
+        isAbort: () => earlyAbort, FAIL: _OBJFAIL,
+      };
+    }
+  }
   Object.defineProperty(d, "objlane", { value: spec, writable: true, enumerable: false, configurable: true });
   return spec;
 }
