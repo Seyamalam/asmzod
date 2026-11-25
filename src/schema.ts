@@ -4891,26 +4891,35 @@ function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>, schema?: any
   const keys = spec.keys, lanes = spec.lanes;
   const mats = spec.mats;
   // undeclared keys scan first — for-in never invokes getters, so the order
-  // is unobservable and bailing here saves a wasted field walk. strip mode
-  // can't answer (output must drop keys); strict records them as a failure
+  // is unobservable and bailing here saves a wasted field walk. strict records
+  // them as a failure; strip copies them away at the end — but only at the
+  // top level, where the lane owns the output object. nested strip-extra
+  // inputs keep the exact pipeline: composition carries booleans, not values
+  const top0 = own && schema !== undefined;
   let extra: string[] | null = null;
+  let stripped = false;
   let n = 0;
   for (const k in data) {
     if (!spec.declared.has(k)) {
       if (spec.strict) (extra ??= []).push(k);
-      else return false;
+      else if (!top0) return false;
+      else stripped = true;
     }
-    if (++n > keys.length) { if (!spec.strict) return false; }
+    if (++n > keys.length) { if (!spec.strict && !top0) return false; }
   }
+  // values stash for the strip copy — reads happen exactly once even for
+  // getter inputs, matching zod's walk
+  const stash: any[] | null = stripped ? new Array(keys.length) : null;
   // single pass over the fields, exactly once each — getter reads are
   // observable, so failures never re-walk: leaf-eligible failures build
   // their issues inline, anything richer marks the lane unanswerable
   let issues: any[] | null = null;
   let rich = false;
-  const top = own && schema !== undefined;
+  const top = top0;
   for (let i = 0; i < keys.length; i++) {
-    if (lanes[i] === null) continue; // materializing default — checked below
     const v = data[keys[i]];
+    if (stash) stash[i] = v;
+    if (lanes[i] === null) continue; // materializing default — checked below
     if (lanes[i](v, rs)) continue;
     if (earlyAbort || !top) return false;
     // fast-fail eligibility: bare leaf prim type mismatch — same shape as
@@ -4952,6 +4961,19 @@ function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>, schema?: any
   if (rich) return false;
   if (issues) { const f: any = { issues }; f[_OBJFAIL] = 1; return f; }
   if (extra) return false; // strict extras in a nested walk — the parent re-walks exactly
+  if (stripped && stash) {
+    // zod's strip output is a plain object with keys in shape order; absent
+    // optionals stay absent, mats still materialize below
+    const out: any = {};
+    for (let i = 0; i < keys.length; i++) if (stash[i] !== undefined || keys[i] in data) out[keys[i]] = stash[i];
+    if (!mats) return out;
+    for (const m of mats!) {
+      const v = (out as any)[m.key];
+      if (v === undefined && !(m.key in data)) out[m.key] = m.fb();
+      else if (v !== undefined && !m.lane(v, rs)) return false;
+    }
+    return out;
+  }
   if (!mats) return data;
   // absent/undefined default keys materialize into a shallow copy; a present
   // valid value keeps the input — invalid values fail like zod
