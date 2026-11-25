@@ -177,6 +177,11 @@ function emitNumChecks(w: BW, checks: any[], isBig: boolean, hosts: HostTable) {
 // recursive (getter options, direct self-reference without z.lazy); defer it
 // through the lazy-ref op so runtime resolves the schema's own compiled blob
 const emitStack = new Set<SchemaLike>();
+// fresh-instance factories (get self() { return z.optional(Node()) }) mint a
+// new schema per resolution, so instance-identity cycle detection never fires
+// and one compile recurses without bound. depth-capping converts that into a
+// catchable compile failure — the memo path validates those graphs exactly
+let emitDepth = 0;
 const refThunks = new Map<SchemaLike, () => Uint8Array>();
 function refThunk(s: SchemaLike): () => Uint8Array {
   let th = refThunks.get(s);
@@ -208,9 +213,15 @@ function emit(w: BW, s: SchemaLike, hosts: HostTable, unions: SchemaLike[]): voi
     return;
   }
   emitStack.add(s);
+  if (++emitDepth > 512) {
+    emitDepth--;
+    emitStack.delete(s);
+    throw new Error("cannot compile: schema graph too deep");
+  }
   try {
     emitNode(w, s, hosts, unions);
   } finally {
+    emitDepth--;
     emitStack.delete(s);
   }
 }

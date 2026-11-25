@@ -155,15 +155,17 @@ function _hasFxWalk(inst: any, stack: Set<any>): boolean {
         try { v = d[key]; } catch { hit = true; break; }
       } else v = desc.value;
       // raw function props (catchValue/defaultValue thunks, transforms) need
-      // the TS runner — registered cbids are the engine's callback channel
-      if (typeof v === "function") { hit = true; break; }
+      // the TS runner — registered cbids are the engine's callback channel.
+      // lazy getters ARE the engine's callback channel (lazy-ref op)
+      if (typeof v === "function" && !(d.type === "lazy" && key === "getter")) { hit = true; break; }
       if (see(v) || seeList(v)) { hit = true; break; }
       if (v && typeof v === "object" && !Array.isArray(v) && !_isSchema(v)) {
         for (const sk of Reflect.ownKeys(v)) {
           const sd = Object.getOwnPropertyDescriptor(v, sk);
           if (!sd || !sd.enumerable) continue;
           // a deferred field MIGHT hide effects — assume so; the runtime
-          // resolves it and dispatches correctly
+          // resolves it and dispatches correctly. invoking it here would
+          // observable-change getter call counts, which zod memoizes once
           if (sd.get) { hit = true; break; }
           if (see(sd.value) || seeList(sd.value)) { hit = true; break; }
         }
@@ -2717,14 +2719,59 @@ export class ZodObject<T extends ZodRawShape> extends ZodType<objectOutputType<T
         input = merged;
       }
     }
-    // recursive-capable subtree — cyclic input can only loop through lazy or
+    
+// iterative shared-reference scan: true when any object/array appears twice
+// in the input tree (cycles included). native validation is exact only when
+// the answer is no — zod's memo maps one input node to one output node, and
+// with no shared nodes that invariant is vacuous. cycle-safe, no recursion
+function _hasSharedRefs(root: unknown): boolean {
+  if (!_isRef(root)) return false;
+  const seen = new Set<object>();
+  const stack: unknown[] = [root];
+  let budget = 4096; // inputs bigger than this just take the memo path
+  while (stack.length) {
+    const v = stack.pop() as any;
+    if (!_isRef(v)) continue;
+    if (seen.has(v)) return true;
+    seen.add(v);
+    if (--budget <= 0) return true;
+    if (Array.isArray(v)) {
+      for (let i = 0; i < (v as any[]).length; i++) if (_isRef((v as any[])[i])) stack.push((v as any[])[i]);
+    } else {
+      for (const k in v) if (_isRef((v as any)[k])) stack.push((v as any)[k]);
+    }
+  }
+  return false;
+}
+
+// recursive-capable subtree — cyclic input can only loop through lazy or
     // getter edges, and the engine can't close a reference cycle, so these
     // validate per-field at TS level through the parse memo
     const d2 = this._def as any;
     const syms = (d2.__syms ??= Reflect.ownKeys(shape).filter((k): k is symbol => typeof k === "symbol"));
     if (syms.length) d2.hasSyms = true;
-    if (MEMO && _isRef(data) && !Array.isArray(data) && this._isRec())
+    if (MEMO && _isRef(data) && !Array.isArray(data) && this._isRec()) {
+      // shared-reference-free input validates natively — memo identity is
+      // vacuous there. anything shared/cyclic/deep, callbacks, symbols, and
+      // every failure takes the memo path: cold, correct by construction
+      // sharing is parse-wide, so the scan runs once at the outermost
+      // recursive object and the verdict sticks for the whole parse —
+      // nested inputs are subtrees of the scanned root by construction
+      if (!syms.length && !earlyAbort) {
+        const m = MEMO as any;
+        if (m.scanDone === undefined) { m.scanDone = true; m.scanClean = !_hasSharedRefs(input); }
+        if (m.scanClean) {
+          try {
+            const c = this._compile();
+            if (!c.cbUnsafe) {
+              const nr = napiBackend.parse(c.blob, input, c.hosts, c.cbUnsafe);
+              if (nr !== null && nr.ok) return { ok: true as const, value: nr.value };
+            }
+          } catch { /* uncompilable subgraphs validate through the memo path */ }
+        }
+      }
       return _memoRun(this, data, () => ({}), (out) => this._runTSObj(input, out));
+    }
     // JS-callback effects anywhere below need TS-level orchestration — the
     // engine skips a node's own checks once its children fail, while zod runs
     // them on the best-effort payload
