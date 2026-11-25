@@ -13,9 +13,14 @@ This file is the continuation manual — read it fully before porting the next f
 - [x] engine.s — ported, assembles (no runtime test yet — needs validate.s)
 - [x] value.s — ported, assembles (no runtime test yet)
 
+- [x] checks.s chunk — utf16_units + memmem ported and VERIFIED in-container
+      (ctest.c); SSE2 idiom patterns proven. remaining validators in checks.s
+      (email/uuid/ulid/nanoid/cuid2/base64/hex/ipv4/ipv6/hash/datetime) are
+      mechanical applications of the same idioms — append to the same file
+
 ## remaining, in dependency order
 
-1. checks.s (1903 lines) — leaf validators, mostly self-contained, calls util
+1. checks.s rest (~1750 lines) — leaf validators, mostly self-contained
 2. issues.s (945) — error arena writers, calls util
 3. validate.s (3723) — the bytecode interpreter; uses x27/x28 as node/val
 4. runners.s (1365) — container walkers (obj/arr/tuple/record/union)
@@ -79,6 +84,18 @@ full upstream suite in-container, `make ci` equivalent.
   handle NaN FIRST (PF), exactly like the arm64 originals do with b.vc.
 - **cvtsi2sd xmm, eax** sign-extends from 32-bit; use rax form for counts.
 - colima does not share macOS `/tmp` — mount repo paths under /Users only.
+- **movq xmm, r64 zero-extends** — a broadcast needs punpcklqdq after it.
+  dense-candidate memmem missed matches in high lanes until fixed.
+- **pcmpeqb is not bitwise invert** — use pxor with all-ones to invert masks.
+- **psadbw writes TWO partial sums** (lanes 0-7 in qword0, 8-15 in qword1) —
+  punpckhqdq + add both, or you lose half the count.
+- **imul r64, imm is imm32-only** — mov the constant into a register first.
+- x86 addressing is base+index*scale+disp — no three-register forms; lea first.
+- **unsigned-saturating boundary**: psubusb(K, x) nonzero iff x < K — pick K
+  exactly at the bound (0x40 for continuation range, not 0x3f).
+- twice so far the TEST was wrong, not the port (fp truncation format, memmem
+  hlen). when a test fails, verify the harness expectation against the arm64
+  original FIRST — build the arm64 object on the host and compare directly.
 - ELF local syms: no underscore prefix; `-Bsymbolic` at link; rip-relative
   lea works for our own tables because they bind locally.
 
