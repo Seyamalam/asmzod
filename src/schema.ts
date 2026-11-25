@@ -1423,6 +1423,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         (d.prim === "number" ? Number.isFinite(data) : typeof data === d.prim))
       return data as Output;
     if (params === undefined && d.checks?.length && _leafRun(d, data)) return data as Output;
+    if (params === undefined && d.type === "date" && !d.checks?.length &&
+        data instanceof Date && !Number.isNaN(data.getTime())) return data as Output;
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -1437,6 +1439,9 @@ export abstract class ZodType<Output = unknown, Input = Output> {
         (d.prim === "number" ? Number.isFinite(data) : typeof data === d.prim))
       return { success: true, data } as SafeParseResult<Output>;
     if (params === undefined && d.checks?.length && _leafRun(d, data))
+      return { success: true, data } as SafeParseResult<Output>;
+    if (params === undefined && d.type === "date" && !d.checks?.length &&
+        data instanceof Date && !Number.isNaN(data.getTime()))
       return { success: true, data } as SafeParseResult<Output>;
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
