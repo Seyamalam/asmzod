@@ -3612,6 +3612,17 @@ export class ZodDiscriminatedUnion<T extends ZodTypeAny[]> extends ZodType<T[num
   protected override _runImpl(data: unknown) {
     if (data === null || typeof data !== "object" || Array.isArray(data))
       return { ok: false as const, issues: [typeIssue("object", data)], aborted: true };
+    // native success is exact; every failure falls through to the TS dispatch
+    // for the zod-exact invalid_union issue shape
+    if (!this._hasFx()) {
+      try {
+        const c = this._compile();
+        if (!c.cbUnsafe) {
+          const nr = napiBackend.parse(c.blob, data, c.hosts, c.cbUnsafe);
+          if (nr !== null && nr.ok) { c.napi = 1; return { ok: true as const, value: nr.value }; }
+        }
+      } catch { /* TS dispatch below */ }
+    }
     const disc = this._def.discriminator;
     const map = this.discMap();
     const opt = map.get((data as any)[disc]);
