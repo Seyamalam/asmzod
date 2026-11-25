@@ -1095,82 +1095,14 @@ _aznapi_run:
     add w10, w10, #1
     str w10, [x9]
     ldrb w9, [x27]
-    cmp w9, #0x01
-    b.eq .Ln_str
-    cmp w9, #0x02
-    b.eq .Ln_num
-    cmp w9, #0x03
-    b.eq .Ln_bool
-    cmp w9, #0x04
-    b.eq .Ln_big
-    cmp w9, #0x05
-    b.eq .Ln_obj
-    cmp w9, #0x06
-    b.eq .Ln_arr
-    cmp w9, #0x07
-    b.eq .Ln_union
-    cmp w9, #0x09
-    b.eq .Ln_lit
-    cmp w9, #0x0a
-    b.eq .Ln_enum
-    cmp w9, #0x0b
-    b.eq .Ln_opt
-    cmp w9, #0x0c
-    b.eq .Ln_nul
-    cmp w9, #0x0d
-    b.eq .Ln_def
-    cmp w9, #0x0e
-    b.eq .Ln_cat
-    cmp w9, #0x08
-    b.eq .Ln_disc
-    cmp w9, #0x11
-    b.eq .Ln_pipe
-    cmp w9, #0x12
-    b.eq .Ln_int
-    cmp w9, #0x13
-    b.eq .Ln_tup
-    cmp w9, #0x14
-    b.eq .Ln_rec
-    cmp w9, #0x20
-    b.eq .Ln_date
-    cmp w9, #0x15
-    b.eq .Ln_any
-    cmp w9, #0x16
-    b.eq .Ln_never
-    cmp w9, #0x17
-    b.eq .Ln_nulls
-    cmp w9, #0x18
-    b.eq .Ln_undef
-    cmp w9, #0x19
-    b.eq .Ln_nanop
-    cmp w9, #0x1a
-    b.eq .Ln_lazy
-    cmp w9, #0x1b
-    b.eq .Ln_instof
-    cmp w9, #0x0f
-    b.eq .Ln_refine
-    cmp w9, #0x10
-    b.eq .Ln_transform
-    cmp w9, #0x22
-    b.eq .Ln_custom
-    cmp w9, #0x1c
-    b.eq .Ln_coerce
-    cmp w9, #0x1d
-    b.eq .Ln_coerce
-    cmp w9, #0x1e
-    b.eq .Ln_coerce
-    cmp w9, #0x1f
-    b.eq .Ln_coerce
-    cmp w9, #0x21
-    b.eq .Ln_sym
-    cmp w9, #0x23
-    b.eq .Ln_nonopt
-    cmp w9, #0x24
-    b.eq .Ln_bail10            // map — napi bails; encode+FFI validates
-    cmp w9, #0x25
-    b.eq .Ln_bail10            // set — same
     cmp w9, #0x2A
     b.eq .Ln_msg
+    cmp w9, #0x25
+    b.hi .Ln_unknown
+    AZ_ADR x10, .Ln_jt
+    ldr x11, [x10, x9, lsl #3]
+    br x11
+.Ln_unknown:
     mov x0, #-1000
     sub x0, x0, x9            // -1000-op reveals the unknown opcode
     b .Ln_ret
@@ -4917,4 +4849,47 @@ _azn_vtype_table:
 .Lv_symbol:    .ascii "symbol\0"
 .Lv_function:  .ascii "function\0"
 .Lv_bigint:    .ascii "bigint\0"
+    .text
+
+    AZ_DATA
+    .p2align 3
+.Ln_jt:
+    .quad .Ln_unknown          // 0x00
+    .quad .Ln_str              // 0x01
+    .quad .Ln_num              // 0x02
+    .quad .Ln_bool             // 0x03
+    .quad .Ln_big              // 0x04
+    .quad .Ln_obj              // 0x05
+    .quad .Ln_arr              // 0x06
+    .quad .Ln_union            // 0x07
+    .quad .Ln_disc             // 0x08
+    .quad .Ln_lit              // 0x09
+    .quad .Ln_enum             // 0x0a
+    .quad .Ln_opt              // 0x0b
+    .quad .Ln_nul              // 0x0c
+    .quad .Ln_def              // 0x0d
+    .quad .Ln_cat              // 0x0e
+    .quad .Ln_refine           // 0x0f
+    .quad .Ln_transform        // 0x10
+    .quad .Ln_pipe             // 0x11
+    .quad .Ln_int              // 0x12
+    .quad .Ln_tup              // 0x13
+    .quad .Ln_rec              // 0x14
+    .quad .Ln_any              // 0x15
+    .quad .Ln_never            // 0x16
+    .quad .Ln_nulls            // 0x17
+    .quad .Ln_undef            // 0x18
+    .quad .Ln_nanop            // 0x19
+    .quad .Ln_lazy             // 0x1a
+    .quad .Ln_instof           // 0x1b
+    .quad .Ln_coerce           // 0x1c
+    .quad .Ln_coerce           // 0x1d
+    .quad .Ln_coerce           // 0x1e
+    .quad .Ln_coerce           // 0x1f
+    .quad .Ln_date             // 0x20
+    .quad .Ln_sym              // 0x21
+    .quad .Ln_custom           // 0x22
+    .quad .Ln_nonopt           // 0x23
+    .quad .Ln_bail10           // 0x24 map
+    .quad .Ln_bail10           // 0x25 set
     .text

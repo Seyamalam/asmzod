@@ -1413,6 +1413,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   parse(data: unknown, params?: any): Output {
+    const d = this._def;
+    if (params === undefined && d.prim !== undefined && !(d.checks?.length) &&
+        (d.prim === "number" ? Number.isFinite(data) : typeof data === d.prim))
+      return data as Output;
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -1422,6 +1426,10 @@ export abstract class ZodType<Output = unknown, Input = Output> {
   }
 
   safeParse(data: unknown, params?: any): SafeParseResult<Output> {
+    const d = this._def;
+    if (params === undefined && d.prim !== undefined && !(d.checks?.length) &&
+        (d.prim === "number" ? Number.isFinite(data) : typeof data === d.prim))
+      return { success: true, data } as SafeParseResult<Output>;
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -1888,7 +1896,7 @@ export type ZodTypeAny = ZodType<any, any>;
 
 // ---------- primitives ----------
 export class ZodString extends ZodType<string> {
-  constructor(_def: any = { type: "string", checks: [] }) { super(); _definit(this, _def); }
+  constructor(_def: any = { type: "string", checks: [] }) { super(); _def.prim = "string"; _definit(this, _def); }
   private _check(c: any) {
     const mk: any = FMT_FNS[c.kind];
     const rec = mk ? { ...c, fn: mk(c), builtin: STR_CHECK[c.kind] !== undefined } : c;
@@ -2039,7 +2047,7 @@ export class ZodString extends ZodType<string> {
 }
 
 export class ZodNumber extends ZodType<number> {
-  constructor(_def: any = { type: "number", checks: [] }) { super(); _definit(this, _def); }
+  constructor(_def: any = { type: "number", checks: [] }) { super(); _def.prim = "number"; _definit(this, _def); }
   private _check(c: any) { return new ZodNumber({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   gt(n: number, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: number, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -2101,7 +2109,7 @@ export class ZodNumber extends ZodType<number> {
 }
 
 export class ZodBigInt extends ZodType<bigint> {
-  constructor(_def: any = { type: "bigint", checks: [] }) { super(); _definit(this, _def); }
+  constructor(_def: any = { type: "bigint", checks: [] }) { super(); _def.prim = "bigint"; _definit(this, _def); }
   private _check(c: any) { return new ZodBigInt({ ...this._def, parent: this, checks: [...this._def.checks, _zrec(c)] }); }
   gt(n: bigint, message?: string) { return this._check({ kind: "gt", value: n, message }); }
   gte(n: bigint, message?: string) { return this._check({ kind: "gte", value: n, message }); }
@@ -2136,7 +2144,7 @@ export class ZodBigInt extends ZodType<bigint> {
 }
 
 export class ZodBoolean extends ZodType<boolean> {
-  constructor(_def: any = { type: "boolean" }) { super(); _definit(this, _def); }
+  constructor(_def: any = { type: "boolean" }) { super(); _def.prim = "boolean"; _definit(this, _def); }
 }
 export class ZodAny extends ZodType<any> {
   constructor(_def: any = { type: "any" }) { super(); _definit(this, _def); }
@@ -2151,16 +2159,16 @@ export class ZodNull extends ZodType<null> {
   constructor(_def: any = { type: "null" }) { super(); _definit(this, _def); }
 }
 export class ZodUndefined extends ZodType<undefined> {
-  constructor(_def: any = { type: "undefined" }) { super(); _definit(this, _def); }
+  constructor(_def: any = { type: "undefined" }) { super(); _def.prim = "undefined"; _definit(this, _def); }
 }
 export class ZodVoid extends ZodType<void> {
-  constructor(_def: any = { type: "void" }) { super(); _definit(this, _def); }
+  constructor(_def: any = { type: "void" }) { super(); _def.prim = "undefined"; _definit(this, _def); }
 }
 export class ZodNaN extends ZodType<number> {
   constructor(_def: any = { type: "nan" }) { super(); _definit(this, _def); }
 }
 export class ZodSymbol extends ZodType<symbol> {
-  constructor(_def: any = { type: "symbol" }) { super(); _definit(this, _def); }
+  constructor(_def: any = { type: "symbol" }) { super(); _def.prim = "symbol"; _definit(this, _def); }
 }
 
 export class ZodDate extends ZodType<Date> {
