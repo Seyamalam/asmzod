@@ -896,3 +896,307 @@ AZX_NAPI(az_is_ipv6):
     pop r12
     pop rbx
     ret
+
+// ---------- az_is_hash(rdi=str, rsi=len, rdx=bodylen, rcx=alpha, r8=padlen) -> eax ----------
+// alpha: 0 hex / 1 b64 / 2 b64url. exact length bodylen+padlen
+    .globl AZX_NAPI(az_is_hash)
+    AZX_HIDDEN AZX_NAPI(az_is_hash)
+AZX_NAPI(az_is_hash):
+    lea rax, [rdx + r8]
+    cmp rsi, rax
+    jne .Lxhz_no
+    mov r10, rsi
+.Lxhz_pad:
+    test r8, r8
+    jz .Lxhz_body
+    dec r8
+    dec r10
+    movzx eax, byte ptr [rdi + r10]
+    cmp al, '='
+    jne .Lxhz_no
+    jmp .Lxhz_pad
+.Lxhz_body:
+    xor r9d, r9d
+.Lxhz_l:
+    cmp r9, rdx
+    jae .Lxhz_yes
+    movzx eax, byte ptr [rdi + r9]
+    test rcx, rcx
+    jz .Lxhz_hex
+    mov r11d, eax
+    sub r11d, '0'
+    cmp r11d, 9
+    jbe .Lxhz_ok
+    mov r11d, eax
+    or r11d, 0x20
+    sub r11d, 'a'
+    cmp r11d, 25
+    jbe .Lxhz_ok
+    cmp rcx, 1
+    je .Lxhz_b64x
+    cmp al, '-'
+    je .Lxhz_ok
+    cmp al, '_'
+    je .Lxhz_ok
+    jmp .Lxhz_no
+.Lxhz_b64x:
+    cmp al, '+'
+    je .Lxhz_ok
+    cmp al, '/'
+    je .Lxhz_ok
+    jmp .Lxhz_no
+.Lxhz_hex:
+    mov r11d, eax
+    sub r11d, '0'
+    cmp r11d, 9
+    jbe .Lxhz_ok
+    mov r11d, eax
+    or r11d, 0x20
+    sub r11d, 'a'
+    cmp r11d, 5
+    ja .Lxhz_no
+.Lxhz_ok:
+    inc r9
+    jmp .Lxhz_l
+.Lxhz_yes:
+    mov eax, 1
+    ret
+.Lxhz_no:
+    xor eax, eax
+    ret
+
+// ---------- az_is_datestr(rdi=ptr, rsi=len) -> eax ----------
+// YYYY-MM-DD — scalar-faithful (NEON mask version is an optimization)
+    .globl AZX_NAPI(az_is_datestr)
+    AZX_HIDDEN AZX_NAPI(az_is_datestr)
+AZX_NAPI(az_is_datestr):
+    cmp rsi, 10
+    jne .Lxds_no
+    // digits at 0-3, dash at 4, digits 5-6, dash 7, digits 8-9
+    xor r9d, r9d
+.Lxds_dl:
+    cmp r9, 10
+    jae .Lxds_shape_ok
+    movzx eax, byte ptr [rdi + r9]
+    cmp r9, 4
+    je .Lxds_dash
+    cmp r9, 7
+    je .Lxds_dash
+    cmp al, '0'
+    jb .Lxds_no
+    cmp al, '9'
+    ja .Lxds_no
+    jmp .Lxds_dn
+.Lxds_dash:
+    cmp al, '-'
+    jne .Lxds_no
+.Lxds_dn:
+    inc r9
+    jmp .Lxds_dl
+.Lxds_shape_ok:
+    // MM in 1..12
+    movzx eax, byte ptr [rdi + 5]
+    sub eax, '0'
+    imul eax, eax, 10
+    movzx ecx, byte ptr [rdi + 6]
+    sub ecx, '0'
+    add eax, ecx
+    cmp eax, 1
+    jb .Lxds_no
+    cmp eax, 12
+    ja .Lxds_no
+    // DD in 1..31
+    movzx eax, byte ptr [rdi + 8]
+    sub eax, '0'
+    imul eax, eax, 10
+    movzx ecx, byte ptr [rdi + 9]
+    sub ecx, '0'
+    add eax, ecx
+    cmp eax, 1
+    jb .Lxds_no
+    cmp eax, 31
+    ja .Lxds_no
+    mov eax, 1
+    ret
+.Lxds_no:
+    xor eax, eax
+    ret
+
+// ---------- az_is_timestr(rdi=ptr, rsi=len) -> eax ----------
+// HH:MM[:SS[.frac]]  len 5|8|>8
+    .globl AZX_NAPI(az_is_timestr)
+    AZX_HIDDEN AZX_NAPI(az_is_timestr)
+AZX_NAPI(az_is_timestr):
+    cmp rsi, 5
+    jb .Lxts_no
+    // HH <= 23
+    movzx eax, byte ptr [rdi]
+    sub eax, '0'
+    cmp eax, 9
+    ja .Lxts_no
+    imul eax, eax, 10
+    movzx ecx, byte ptr [rdi + 1]
+    sub ecx, '0'
+    cmp ecx, 9
+    ja .Lxts_no
+    add eax, ecx
+    cmp eax, 23
+    ja .Lxts_no
+    movzx eax, byte ptr [rdi + 2]
+    cmp al, ':'
+    jne .Lxts_no
+    // MM <= 59
+    movzx eax, byte ptr [rdi + 3]
+    sub eax, '0'
+    cmp eax, 9
+    ja .Lxts_no
+    imul eax, eax, 10
+    movzx ecx, byte ptr [rdi + 4]
+    sub ecx, '0'
+    cmp ecx, 9
+    ja .Lxts_no
+    add eax, ecx
+    cmp eax, 59
+    ja .Lxts_no
+    cmp rsi, 5
+    je .Lxts_yes
+    cmp rsi, 8
+    jb .Lxts_no
+    movzx eax, byte ptr [rdi + 5]
+    cmp al, ':'
+    jne .Lxts_no
+    // SS <= 59
+    movzx eax, byte ptr [rdi + 6]
+    sub eax, '0'
+    cmp eax, 9
+    ja .Lxts_no
+    imul eax, eax, 10
+    movzx ecx, byte ptr [rdi + 7]
+    sub ecx, '0'
+    cmp ecx, 9
+    ja .Lxts_no
+    add eax, ecx
+    cmp eax, 59
+    ja .Lxts_no
+    cmp rsi, 8
+    je .Lxts_yes
+    // .frac: '.' + 1+ digits
+    movzx eax, byte ptr [rdi + 8]
+    cmp al, '.'
+    jne .Lxts_no
+    mov r9d, 9
+    xor r10d, r10d
+.Lxts_fl:
+    cmp r9, rsi
+    jae .Lxts_fend
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxts_no
+    cmp al, '9'
+    ja .Lxts_no
+    inc r9
+    inc r10
+    jmp .Lxts_fl
+.Lxts_fend:
+    test r10, r10
+    jz .Lxts_no
+.Lxts_yes:
+    mov eax, 1
+    ret
+.Lxts_no:
+    xor eax, eax
+    ret
+
+// ---------- az_is_datetime(rdi=ptr, rsi=len, rdx=flags) -> eax ----------
+// flags bit0: allow ±HH:MM offset. format: datestr 'T' timestr tz
+    .globl AZX_NAPI(az_is_datetime)
+    AZX_HIDDEN AZX_NAPI(az_is_datetime)
+AZX_NAPI(az_is_datetime):
+    push rbx
+    sub rsp, 48              // aligned: entry%16=8, +8+48=64
+    mov [rsp], rdi           // ptr
+    mov [rsp + 8], rsi       // len
+    mov [rsp + 16], rdx      // flags
+    cmp rsi, 17              // min: 10+T+HH:MM+Z
+    jb .Lxdt_no
+    mov esi, 10
+    call AZX_NAPI(az_is_datestr)
+    test eax, eax
+    jz .Lxdt_no
+    mov rdi, [rsp]
+    mov rsi, [rsp + 8]
+    movzx eax, byte ptr [rdi + 10]
+    cmp al, 'T'
+    jne .Lxdt_no
+    // tz: last char Z/z -> tzlen 1; else ±HH:MM (6, needs flag bit0)
+    movzx eax, byte ptr [rdi + rsi - 1]
+    xor ebx, ebx             // tz len
+    cmp al, 'Z'
+    je .Lxdt_tz1
+    cmp al, 'z'
+    je .Lxdt_tz1
+    mov rdx, [rsp + 16]
+    test rdx, 1
+    jz .Lxdt_no              // offset not allowed
+    cmp rsi, 23
+    jb .Lxdt_no
+    movzx eax, byte ptr [rdi + rsi - 6]
+    cmp al, '+'
+    je .Lxdt_tz6
+    cmp al, '-'
+    je .Lxdt_tz6
+    jmp .Lxdt_no
+.Lxdt_tz1:
+    mov ebx, 1
+    jmp .Lxdt_tzval
+.Lxdt_tz6:
+    mov ebx, 6
+    // validate ±HH:MM digits at len-5..len-1
+    mov rdi, [rsp]
+    mov rsi, [rsp + 8]
+    lea rcx, [rdi + rsi - 5] // first H digit
+    movzx eax, byte ptr [rcx]
+    sub eax, '0'
+    cmp eax, 9
+    ja .Lxdt_no
+    imul eax, eax, 10
+    movzx edx, byte ptr [rcx + 1]
+    sub edx, '0'
+    cmp edx, 9
+    ja .Lxdt_no
+    add eax, edx
+    cmp eax, 23
+    ja .Lxdt_no
+    movzx eax, byte ptr [rcx + 2]
+    cmp al, ':'
+    jne .Lxdt_no
+    movzx eax, byte ptr [rcx + 3]
+    sub eax, '0'
+    cmp eax, 9
+    ja .Lxdt_no
+    imul eax, eax, 10
+    movzx edx, byte ptr [rcx + 4]
+    sub edx, '0'
+    cmp edx, 9
+    ja .Lxdt_no
+    add eax, edx
+    cmp eax, 59
+    ja .Lxdt_no
+.Lxdt_tzval:
+    // time = [11, len-tzlen)
+    mov rdi, [rsp]
+    mov rsi, [rsp + 8]
+    sub rsi, rbx             // end of time part
+    add rdi, 11
+    sub rsi, 11
+    call AZX_NAPI(az_is_timestr)
+    test eax, eax
+    jz .Lxdt_no
+    mov eax, 1
+    jmp .Lxdt_out
+.Lxdt_no:
+    xor eax, eax
+.Lxdt_out:
+    add rsp, 48
+    pop rbx
+    ret
