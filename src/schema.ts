@@ -4729,7 +4729,7 @@ function _objSpec(schema: any, seen: Set<any>): _ObjSpec | null {
   if (d.mode !== "strip" && d.mode !== "strict") return null;
   if (d.catchall || d.checks?.length) return null;
   if (Reflect.ownKeys(d.shape).some((k) => typeof k === "symbol" || k === "__proto__")) return null;
-  if (seen.has(schema) || schema._isRec()) return null;
+  if (seen.has(schema)) return null;
   seen.add(schema);
   const shape = d.shape;
   const keys = Object.keys(shape);
@@ -4786,7 +4786,7 @@ function _topLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
   const d = schema._def;
   if (d.toplane !== undefined) return d.toplane;
   let lane: any = 0;
-  if (!schema._isRec() && !d.checks?.length) {
+  if (!d.checks?.length) {
     const l = _fieldLane(schema, new Set());
     if (l) lane = l;
   }
@@ -4800,7 +4800,7 @@ function _arrLaneOf(schema: any): ((v: any, refs: Set<object>) => boolean) | 0 {
   const d = schema._def;
   if (d.arrlane !== undefined) return d.arrlane;
   let lane: any = 0;
-  if (!schema._isRec()) {
+  {
     const l = _fieldLane(d.element, new Set());
     if (l) lane = l;
   }
