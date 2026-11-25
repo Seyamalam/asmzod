@@ -125,3 +125,36 @@ full upstream suite in-container, `make ci` equivalent.
   napi callback fn pointers are SysV — align rsp at those calls.
 - aznc.s (counting instrumentation) and guard builds: port LAST or skip —
   they're dev-only.
+
+## traps round 2 (array container bring-up)
+
+- **rax is the return register — never reload it for cleanup after a call.**
+  the too-big path cleared az_nc_flag by loading its address into rax right
+  after az_issue_size returned, then tested the ADDRESS (always nonzero) and
+  returned it as the status. arm64 gets away with this pattern because x9/x10
+  are pure scratch; on x86 use r10/r11 for post-call cleanup addresses.
+- **LD_NODE/LD_VAL clobber r8/r9 — both are also argument registers (args 4/5).**
+  when setting up a call whose args include r8/r9, do all LD_NODE-derived
+  reads FIRST, then load the argument registers last. exactLen-then-inclusive
+  ordering in the array size-issue calls is the canonical example.
+- **end-to-end harness pattern (atest.c)**: az_parse is directly callable —
+  hand-build bytecode (array node = 26B: op, elem self-rel i64 @1, min @9,
+  max @17, exactlen @25) plus tagged input values, pass 64KB out arenas.
+  boolean leaf is a single opcode byte — the ideal element type for harness
+  schemas. this is THE test pattern for every remaining container opcode.
+- **runners.s is fail-fast scaffolding**: the three check runners pass when
+  count==0 (correct) and ud2 otherwise (loud, unmissable). replace wholesale
+  with the real port — never extend the stubs.
+- jump table `.quad` absolute relocs in .rodata warn at static link time and
+  will need PIC-correct dispatch (offset table) for the shared addon build.
+  fine for the static test harness; revisit at linking time.
+
+## status checkpoint
+
+- [x] array container opcode — verified end-to-end in-container (7/7 atest):
+      success round-trip, min/max bounds, deferred too_small ordering,
+      too-big precheck abort, element type failures, wrong-input-type
+- [ ] remaining containers in validate.s: object (the beast, ~1400 arm64
+      lines), tuple, record, intersect, map, set, coerce x4, date
+- [ ] runners.s real port (strchecks/numchecks/bigintchecks + is_url)
+- [ ] napi.s, linking, full suite

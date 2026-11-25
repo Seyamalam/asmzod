@@ -7,7 +7,7 @@ cp /x/*.s /x/*.h /x/*.c . 2>/dev/null
 fail=0
 # assemble all ported units
 OBJS=""
-for f in util engine value checks issues validate; do
+for f in util engine value checks issues validate runners; do
   if [ -f "$f.s" ]; then
     if clang -x assembler-with-cpp -I. -fPIC -c -o "$f.o" "$f.s" 2>assemble_err.txt; then
       OBJS="$OBJS $f.o"
@@ -39,6 +39,7 @@ run btest util.o checks.o issues.o
 run dtest util.o checks.o issues.o
 run etest util.o checks.o issues.o
 run gtest util.o checks.o issues.o
+run atest util.o checks.o issues.o value.o validate.o runners.o engine.o
 echo "---"
 [ $fail -eq 0 ] && echo "x86 tests: all pass" || echo "x86 tests: FAILURES"
 exit $fail

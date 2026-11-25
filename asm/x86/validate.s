@@ -728,6 +728,377 @@ AZX_NAPI(az_validate):
     call AZX_NAPI(az_path_pop)
     jmp .Lxv_invalid
 
+// ---------- 0x0F REFINE ----------
+// [op][inner i64][cbid u64][msglen u64][msg]
+.Lxv_refine:
+    LD_NODE
+    lea rax, [r8 + 1]
+    mov r10, [rax]
+    lea rdi, [rax + r10]
+    LD_VAL
+    mov rsi, r9
+    call AZX_NAPI(az_validate)
+    test rax, rax
+    jnz .Lxv_ret
+    // out in rdx/rcx — cb_refine(cbid, outptr)
+    mov [rsp + 32], rdx
+    mov [rsp + 40], rcx
+    mov rax, [r15]           // cb_refine = table[0]
+    LD_NODE
+    mov rdi, [r8 + 9]        // cbid
+    mov rsi, [rsp + 32]
+    call rax
+    test eax, eax
+    jnz .Lxrf_ok
+    // issue custom with node msg
+    LD_NODE
+    mov rdx, [r8 + 17]       // msglen
+    lea rsi, [r8 + 25]       // msg
+    mov edi, 2               // custom
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxv_ret
+    call AZX_NAPI(az_issue_commit)
+    jmp .Lxv_invalid
+.Lxrf_ok:
+    mov rdx, [rsp + 32]
+    mov rcx, [rsp + 40]
+    xor eax, eax
+    jmp .Lxv_ret
+
+// ---------- 0x10 TRANSFORM ----------
+// [op][inner i64][cbid u64]
+.Lxv_transform:
+    LD_NODE
+    lea rax, [r8 + 1]
+    mov r10, [rax]
+    lea rdi, [rax + r10]
+    LD_VAL
+    mov rsi, r9
+    call AZX_NAPI(az_validate)
+    test rax, rax
+    jnz .Lxv_ret
+    // cb_transform(cbid, outptr, dest, avail) -> len | -3 enospc | -5 threw
+    mov rax, [r15 + 8]       // cb_transform = table[1]
+    mov [rsp + 40], rax
+    LD_NODE
+    mov rdi, [r8 + 9]        // cbid
+    mov rsi, rdx             // outptr — wait: rdx is outptr from validate ret
+    mov rdx, rbx             // dest = val pos
+    mov rcx, rbp
+    sub rcx, rbx             // avail
+    mov [rsp + 32], rbx      // remember dest
+    call qword ptr [rsp + 40]
+    test rax, rax
+    js .Lxv_ret              // -3/-5 propagate
+    mov rcx, rax             // out len = produced len
+    mov rdx, [rsp + 32]      // out ptr = dest
+    add rbx, rax             // val pos = dest + produced len
+    xor eax, eax
+    jmp .Lxv_ret
+
+// ---------- 0x11 PIPE ----------
+// [op][in i64][out i64]
+.Lxv_pipe:
+    lea rax, [rip + AZX_NAPI(az_nc_flag)]
+    mov byte ptr [rax], 1
+    LD_NODE
+    lea rax, [r8 + 1]
+    mov r10, [rax]
+    lea rdi, [rax + r10]
+    LD_VAL
+    mov rsi, r9
+    call AZX_NAPI(az_validate)
+    lea r10, [rip + AZX_NAPI(az_nc_flag)]
+    mov byte ptr [r10], 0
+    test rax, rax
+    jnz .Lxv_ret
+    // output value -> input of second
+    mov [rsp + 24], rdx      // val = out ptr
+    LD_NODE
+    lea rax, [r8 + 9]
+    mov r10, [rax]
+    lea rdi, [rax + r10]
+    mov rsi, rdx
+    call AZX_NAPI(az_validate)
+    jmp .Lxv_ret
+
+// ---------- 0x1A LAZY ----------
+// [op][u64 cbid] : cb_lazy(id) -> node ptr
+.Lxv_lazy:
+    mov rax, [r15 + 16]      // cb_lazy = table[2]
+    LD_NODE
+    mov rdi, [r8 + 1]
+    call rax
+    test rax, rax
+    jz .Lxv_badop
+    mov rdi, rax
+    LD_VAL
+    mov rsi, r9
+    call AZX_NAPI(az_validate)
+    jmp .Lxv_ret
+
+// ---------- 0x1B INSTANCEOF ----------
+// [op][u64 cbid][u64 namelen][name]
+.Lxv_instof:
+    LD_VAL
+    movzx eax, byte ptr [r9]
+    cmp eax, 8
+    je .Lxio_hr
+    cmp eax, 9
+    je .Lxio_tag
+    cmp eax, 10
+    jne .Lxio_fail
+.Lxio_tag:
+    // tag9/10 are real Map/Set by construction — cb kind9 implied-ctor compare
+    mov rax, [r15 + 24]      // cb_host
+    mov edi, 9
+    movzx esi, byte ptr [r9] // tag — arg x1
+    LD_NODE
+    mov rdx, [r8 + 1]        // cbid (ctor idx) — arg x2
+    xor ecx, ecx
+    call rax
+    test rax, rax
+    jz .Lxio_fail
+    mov r10d, 9
+    jmp .Lxv_passn
+.Lxio_hr:
+    mov rax, [r15 + 24]
+    mov edi, 1               // instanceof
+    LD_NODE
+    mov rsi, [r8 + 1]        // cbid
+    mov rdx, [r9 + 1]        // hostref idx
+    xor ecx, ecx
+    call rax
+    test rax, rax
+    jz .Lxio_fail
+    mov r10d, 9
+    jmp .Lxv_passn
+.Lxio_fail:
+    LD_NODE
+    mov rsi, [r8 + 9]        // namelen
+    lea rdi, [r8 + 17]       // name
+    jmp .Lxaz_vtype
+
+// ---------- 0x22 CUSTOM ----------
+// [op][u64 cbid][u64 msglen][msg]
+.Lxv_custom:
+    mov rax, [r15 + 24]
+    mov edi, 4               // kind4 custom
+    LD_NODE
+    mov rsi, [r8 + 1]        // cbid
+    LD_VAL
+    mov rdx, r9              // val ptr
+    xor ecx, ecx
+    call rax
+    test rax, rax
+    jz .Lxcu_fail
+    jmp .Lxv_pass
+.Lxcu_fail:
+    LD_NODE
+    mov rdx, [r8 + 9]        // msglen
+    lea rsi, [r8 + 17]       // msg
+    mov edi, 2               // custom
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxv_ret
+    call AZX_NAPI(az_issue_commit)
+    jmp .Lxv_invalid
+
+// ---------- 0x23 NONOPTIONAL (inner) ----------
+.Lxv_nonopt:
+    LD_VAL
+    cmp byte ptr [r9], 0
+    jne .Lxno_inner
+    lea rdi, [rip + .Lexx_nonopt]
+    mov esi, 11
+    jmp .Lxaz_vtype
+.Lxno_inner:
+    LD_NODE
+    lea rax, [r8 + 1]
+    jmp .Lxv_tail
+
+
+// ---------- 0x06 ARRAY ----------
+// [op][elem i64][min u64][max u64]   (u64_MAX = absent)
+// slots: 32=saved pair pos 40=n elems 48=elem node 56=i/j 64=cur elem
+//        72=failed 80=scratch 88/96=out or pair addr 96=emit start
+//        104=deferred too_small limit
+.Lxv_array:
+    LD_VAL
+    cmp byte ptr [r9], 7
+    jne .Lxar_tfail
+    mov rax, [r9 + 1]        // n elems
+    mov [rsp + 40], rax
+    mov qword ptr [rsp + 72], 0
+    mov qword ptr [rsp + 104], -1
+    // elem node: [op+1] is i64 self-rel offset
+    LD_NODE
+    lea rax, [r8 + 1]
+    mov r10, [rax]
+    add rax, r10
+    mov [rsp + 48], rax
+    // min check — deferred until after element loop (zod ordering)
+    LD_NODE
+    mov r10, [r8 + 9]        // min
+    mov rax, [rsp + 40]
+    cmp r10, -1
+    je .Lxar_chkmax
+    cmp rax, r10
+    jae .Lxar_chkmax
+    mov [rsp + 104], r10
+    mov qword ptr [rsp + 72], 1
+.Lxar_chkmax:
+    LD_NODE
+    mov r11, [r8 + 17]       // max
+    mov rax, [rsp + 40]
+    cmp r11, -1
+    je .Lxar_size_done
+    cmp rax, r11
+    jbe .Lxar_size_done
+    // too_big — zod prechecks the upper bound: abort before element validation
+    cvtsi2sd xmm0, r11
+    movq rcx, xmm0           // x3 = bound f64 bits
+    lea rax, [rip + AZX_NAPI(az_nc_flag)]
+    mov byte ptr [rax], 1    // non-continuable: downstream checks don't run
+    xor r11d, r11d           // x7 msglen = 0 -> default msg
+    mov edi, 9               // too_big
+    lea rsi, [rip + .Lxty_array]
+    mov edx, 5
+    LD_NODE                  // r8 = node (scratch before arg load)
+    movzx r9d, byte ptr [r8 + 25]  // exactLen flag -> arg5 first:
+    mov r8d, 1               // inclusive — LD_NODE clobbered r8, order matters
+    call AZX_NAPI(az_issue_size)
+    lea r10, [rip + AZX_NAPI(az_nc_flag)]
+    mov byte ptr [r10], 0    // r10, not rax — the call's return is live
+    test rax, rax
+    jnz .Lxv_ret             // -4 propagates
+    jmp .Lxv_invalid
+.Lxar_tfail:
+    lea rdi, [rip + .Lexx_array]
+    mov esi, 5
+    jmp .Lxaz_vtype
+.Lxar_size_done:
+    mov [rsp + 32], rbp      // saved pair pos
+    mov qword ptr [rsp + 56], 0   // i
+    LD_VAL
+    lea rax, [r9 + 9]
+    mov [rsp + 64], rax      // cur elem ptr
+.Lxar_vloop:
+    mov rax, [rsp + 56]
+    cmp rax, [rsp + 40]
+    jae .Lxar_emit
+    mov rdi, rax
+    call AZX_NAPI(az_path_push_idx)
+    mov rdi, [rsp + 48]      // elem node
+    mov rsi, [rsp + 64]      // cur val
+    call AZX_NAPI(az_validate)
+    mov [rsp + 80], rax      // status
+    mov [rsp + 88], rdx      // out ptr
+    mov [rsp + 96], rcx      // out len
+    call AZX_NAPI(az_path_pop)
+    mov rax, [rsp + 80]
+    test rax, rax
+    jnz .Lxar_bad
+    // push out pair: (key=0,0 vptr,vlen kind=0)
+    xor edi, edi
+    xor esi, esi
+    mov rdx, [rsp + 88]
+    mov rcx, [rsp + 96]
+    xor r8d, r8d
+    call AZX_NAPI(az_pair_push40)
+    test rax, rax
+    jnz .Lxv_ret             // -3
+    jmp .Lxar_next
+.Lxar_bad:
+    cmp rax, -2
+    jne .Lxv_ret             // -3/-4/-5 propagate
+    mov qword ptr [rsp + 72], 1
+    // push input slice as placeholder out
+    mov rdi, [rsp + 64]
+    call AZX_NAPI(az_vsize)
+    mov rcx, rax
+    mov rdx, [rsp + 64]
+    xor edi, edi
+    xor esi, esi
+    xor r8d, r8d
+    call AZX_NAPI(az_pair_push40)
+    test rax, rax
+    jnz .Lxv_ret
+.Lxar_next:
+    mov rdi, [rsp + 64]
+    call AZX_NAPI(az_vsize)
+    add [rsp + 64], rax
+    inc qword ptr [rsp + 56]
+    jmp .Lxar_vloop
+.Lxar_emit:
+    mov rax, [rsp + 72]
+    test rax, rax
+    jnz .Lxar_fail_pop
+    mov [rsp + 96], rbx      // emit start S
+    mov edi, 7
+    call AZX_NAPI(az_vw1)
+    test rax, rax
+    jnz .Lxv_ret
+    mov rdi, [rsp + 40]
+    call AZX_NAPI(az_vw8)
+    test rax, rax
+    jnz .Lxv_ret
+    mov qword ptr [rsp + 56], 0   // j
+.Lxar_eloop:
+    mov rax, [rsp + 56]
+    mov r10, [rsp + 40]
+    cmp rax, r10
+    jae .Lxar_edone
+    // pair j at rbp + (n-1-j)*40 — pairs grow down, first pushed is highest
+    mov r11, r10
+    sub r11, rax
+    dec r11                  // n-1-j
+    imul r11, r11, 40
+    add r11, rbp
+    mov rdi, [r11 + 16]      // vptr
+    mov rsi, [r11 + 24]      // vlen
+    mov [rsp + 88], r11
+    call AZX_NAPI(az_vw)
+    test rax, rax
+    jnz .Lxv_ret
+    inc qword ptr [rsp + 56]
+    jmp .Lxar_eloop
+.Lxar_edone:
+    mov r9, [rsp + 96]       // emit start S
+    mov rcx, rbx
+    sub rcx, r9              // out len
+    mov rdx, r9              // out ptr
+    xor eax, eax
+    // pop pairs
+    mov r9, [rsp + 40]
+    imul r9, r9, 40
+    add rbp, r9
+    jmp .Lxv_ret
+.Lxar_fail_pop:
+    // deferred too_small lands after every element issue (zod ordering)
+    mov rax, [rsp + 104]
+    cmp rax, -1
+    je .Lxar_fp0
+    cvtsi2sd xmm0, rax
+    movq rcx, xmm0
+    xor r11d, r11d           // x7 msglen = 0
+    mov edi, 8               // too_small
+    lea rsi, [rip + .Lxty_array]
+    mov edx, 5
+    LD_NODE
+    movzx r9d, byte ptr [r8 + 25]  // exactLen -> arg5 before r8 reload
+    mov r8d, 1               // inclusive
+    call AZX_NAPI(az_issue_size)
+    test rax, rax
+    jnz .Lxv_ret
+.Lxar_fp0:
+    mov r9, [rsp + 40]
+    imul r9, r9, 40
+    add rbp, r9
+    mov rax, -2
+    jmp .Lxv_ret
+
     AZX_RODATA
     .p2align 4
 .Lxv_jt:
@@ -737,7 +1108,7 @@ AZX_NAPI(az_validate):
     .quad .Lxv_boolean
     .quad .Lxv_bigint
     .quad .Lxv_badop         // object — pending
-    .quad .Lxv_badop         // array — pending
+    .quad .Lxv_array
     .quad .Lxv_union
     .quad .Lxv_discunion
     .quad .Lxv_literal
@@ -746,9 +1117,9 @@ AZX_NAPI(az_validate):
     .quad .Lxv_nullable
     .quad .Lxv_default
     .quad .Lxv_catch
-    .quad .Lxv_badop         // refine — pending
-    .quad .Lxv_badop         // transform — pending
-    .quad .Lxv_badop         // pipe — pending
+    .quad .Lxv_refine
+    .quad .Lxv_transform
+    .quad .Lxv_pipe
     .quad .Lxv_badop         // intersect — pending
     .quad .Lxv_badop         // tuple — pending
     .quad .Lxv_badop         // record — pending
@@ -757,16 +1128,16 @@ AZX_NAPI(az_validate):
     .quad .Lxv_nullt
     .quad .Lxv_undeft
     .quad .Lxv_nan
-    .quad .Lxv_badop         // lazy — pending
-    .quad .Lxv_badop         // instof — pending
+    .quad .Lxv_lazy
+    .quad .Lxv_instof
     .quad .Lxv_badop         // coerce_str — pending
     .quad .Lxv_badop         // coerce_num — pending
     .quad .Lxv_badop         // coerce_bool — pending
     .quad .Lxv_badop         // coerce_bigint — pending
     .quad .Lxv_badop         // date — pending
     .quad .Lxv_symbol
-    .quad .Lxv_badop         // custom — pending
-    .quad .Lxv_badop         // nonopt — pending
+    .quad .Lxv_custom
+    .quad .Lxv_nonopt
     .quad .Lxv_badop         // map — pending
     .quad .Lxv_badop         // set — pending
 
@@ -780,6 +1151,9 @@ AZX_NAPI(az_validate):
 .Lexx_never:     .ascii "never"
 .Lexx_symbol:    .ascii "symbol"
 .Lexx_object:    .ascii "object"
+.Lexx_nonopt:    .ascii "nonoptional"
+.Lexx_array:     .ascii "array"
+.Lxty_array:     .ascii "array"
 .Lxk_expected2:  .ascii "expected"
 .Lxk_received2:  .ascii "received"
 .Lxk_options:    .ascii "options"
