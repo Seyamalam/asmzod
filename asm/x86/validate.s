@@ -319,6 +319,415 @@ AZX_NAPI(az_validate):
     lea rax, [r8 + 1]
     jmp .Lxv_tail
 
+// ---------- 0x0D DEFAULT ----------
+// [op][inner i64][embedded Value @+9]
+.Lxv_default:
+    LD_VAL
+    cmp byte ptr [r9], 0
+    je .Lxvdef_use
+    mov rsi, r9
+    jmp .Lxvdef_go
+.Lxvdef_use:
+    LD_NODE
+    lea rsi, [r8 + 9]        // embedded default value
+.Lxvdef_go:
+    LD_NODE
+    lea rax, [r8 + 1]
+    mov r10, [rax]
+    lea rdi, [rax + r10]     // inner node
+    call AZX_NAPI(az_validate)
+    jmp .Lxv_ret
+
+// ---------- 0x0E CATCH ----------
+// [op][inner i64][embedded Value @+9]
+.Lxv_catch:
+    mov [rsp + 32], rbx      // val pos
+    mov [rsp + 40], rbp      // pair pos
+    mov [rsp + 48], r12      // err pos
+    mov rax, [r13]           // issue_count
+    mov rcx, [r13 + 8]       // depth
+    mov [rsp + 64], rax
+    mov [rsp + 72], rcx
+    LD_NODE
+    lea rax, [r8 + 1]
+    mov r10, [rax]
+    lea rdi, [rax + r10]
+    LD_VAL
+    mov rsi, r9
+    call AZX_NAPI(az_validate)
+    test rax, rax
+    jz .Lxv_ret              // ok
+    cmp rax, -2
+    jne .Lxv_ret             // -3/-4/-5 propagate
+    mov rbx, [rsp + 32]
+    mov rbp, [rsp + 40]
+    mov r12, [rsp + 48]
+    mov rax, [rsp + 64]
+    mov rcx, [rsp + 72]
+    mov [r13], rax
+    mov [r13 + 8], rcx
+    // out = embedded catch value (ref into schema blob)
+    LD_NODE
+    lea rdi, [r8 + 9]
+    call AZX_NAPI(az_vsize)
+    mov rcx, rax
+    LD_NODE
+    lea rdx, [r8 + 9]
+    xor eax, eax
+    jmp .Lxv_ret
+
+// ---------- 0x09 LITERAL ----------
+// [op][embedded scalar Value]
+.Lxv_literal:
+    LD_NODE
+    LD_VAL
+    movzx eax, byte ptr [r8 + 1]   // lit tag
+    movzx ecx, byte ptr [r9]       // in tag
+    cmp eax, ecx
+    jne .Lxlit_fail
+    cmp eax, 0
+    je .Lxlit_ok
+    cmp eax, 1
+    je .Lxlit_ok
+    cmp eax, 2
+    je .Lxlit_bool
+    cmp eax, 3
+    je .Lxlit_f64
+    cmp eax, 4
+    je .Lxlit_str
+    cmp eax, 5
+    je .Lxlit_f64                // bigint: same 8-byte compare
+    jmp .Lxlit_fail
+.Lxlit_bool:
+    movzx eax, byte ptr [r8 + 2]
+    cmp al, [r9 + 1]
+    je .Lxlit_ok
+    jmp .Lxlit_fail
+.Lxlit_f64:
+    mov rax, [r8 + 2]
+    cmp rax, [r9 + 1]
+    je .Lxlit_ok
+    jmp .Lxlit_fail
+.Lxlit_str:
+    mov rax, [r8 + 2]        // lit len
+    cmp rax, [r9 + 1]        // in len
+    jne .Lxlit_fail
+    lea rdi, [r8 + 10]
+    lea rsi, [r9 + 9]
+    mov rdx, rax
+    call AZX_NAPI(az_memeq)
+    test eax, eax
+    jz .Lxlit_fail
+.Lxlit_ok:
+    jmp .Lxv_pass
+.Lxlit_fail:
+    mov edi, 1               // invalid_literal
+    xor esi, esi
+    xor edx, edx
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxv_ret
+    LD_NODE
+    lea rdi, [r8 + 1]
+    call AZX_NAPI(az_vsize)
+    mov rcx, rax             // vlen
+    LD_NODE
+    lea rdx, [r8 + 1]        // vptr
+    lea rdi, [rip + .Lxk_expected2]
+    mov esi, 8
+    call AZX_NAPI(az_issue_f_rawval)
+    test rax, rax
+    jnz .Lxv_ret
+    call AZX_NAPI(az_issue_commit)
+    jmp .Lxv_invalid
+
+// ---------- 0x0A ENUM ----------
+// [op][u64 n][entries: u64 len + bytes]*
+// scan state in frame slots: [rsp+96]=cursor [rsp+104]=remaining
+.Lxv_enum:
+    LD_VAL
+    cmp byte ptr [r9], 4
+    jne .Lxen_fail
+    LD_NODE
+    mov rax, [r8 + 1]        // n
+    mov [rsp + 104], rax
+    lea rax, [r8 + 9]
+    mov [rsp + 96], rax      // cursor
+.Lxen_loop:
+    mov rax, [rsp + 104]
+    test rax, rax
+    jz .Lxen_fail
+    LD_VAL
+    mov rcx, [r9 + 1]        // in len
+    mov r10, [rsp + 96]
+    mov rax, [r10]           // entry len
+    cmp rax, rcx
+    jne .Lxen_next
+    lea rdi, [r9 + 9]        // in ptr
+    mov rsi, [rsp + 96]
+    add rsi, 8
+    mov rdx, rcx
+    call AZX_NAPI(az_memeq)
+    test eax, eax
+    jnz .Lxen_ok
+.Lxen_next:
+    mov r10, [rsp + 96]
+    mov rax, [r10]
+    lea r10, [r10 + rax + 8]
+    mov [rsp + 96], r10
+    dec qword ptr [rsp + 104]
+    jmp .Lxen_loop
+.Lxen_ok:
+    LD_VAL
+    mov r10, [r9 + 1]
+    add r10, 9
+    jmp .Lxv_passn
+.Lxen_fail:
+    // invalid_enum_value {received: rawval, options: strseq}
+    mov edi, 4
+    xor esi, esi
+    xor edx, edx
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxv_ret
+    LD_VAL
+    mov rdi, r9
+    call AZX_NAPI(az_vsize)
+    mov rcx, rax
+    LD_VAL
+    mov rdx, r9
+    lea rdi, [rip + .Lxk_received2]
+    mov esi, 8
+    call AZX_NAPI(az_issue_f_rawval)
+    test rax, rax
+    jnz .Lxv_ret
+    LD_NODE
+    lea rdx, [r8 + 9]        // seqptr
+    mov rcx, [r8 + 1]        // count
+    lea rdi, [rip + .Lxk_options]
+    mov esi, 7
+    call AZX_NAPI(az_issue_f_strseq)
+    test rax, rax
+    jnz .Lxv_ret
+    call AZX_NAPI(az_issue_commit)
+    jmp .Lxv_invalid
+
+// ---------- 0x07 UNION ----------
+// [op][u64 n][n x i64 optoffs]
+// slots: [rsp+32]=nopts-remaining [rsp+48]=optseq cursor
+//        [rsp+64/72]=rbx/rbp snap [rsp+80]=r12 snap [rsp+96/104]=err cnt/depth
+.Lxv_union:
+    LD_NODE
+    mov rax, [r8 + 1]
+    mov [rsp + 32], rax      // nopts
+    lea rax, [r8 + 9]
+    mov [rsp + 48], rax      // optseq cursor
+.Lxun_loop:
+    mov rax, [rsp + 32]
+    test rax, rax
+    jz .Lxun_allfail
+    // snapshot
+    mov [rsp + 64], rbx
+    mov [rsp + 72], rbp
+    mov [rsp + 80], r12
+    mov rax, [r13]
+    mov rcx, [r13 + 8]
+    mov [rsp + 96], rax
+    mov [rsp + 104], rcx
+    // opt node = cur + [cur]
+    mov r9, [rsp + 48]
+    mov r10, [r9]
+    lea rdi, [r9 + r10]
+    LD_VAL
+    mov rsi, r9
+    call AZX_NAPI(az_validate)
+    test rax, rax
+    jz .Lxv_ret              // success
+    cmp rax, -2
+    jne .Lxv_ret             // -3/-4/-5 propagate
+    // rollback
+    mov rbx, [rsp + 64]
+    mov rbp, [rsp + 72]
+    mov r12, [rsp + 80]
+    mov rax, [rsp + 96]
+    mov rcx, [rsp + 104]
+    mov [r13], rax
+    mov [r13 + 8], rcx
+    // next option
+    mov r9, [rsp + 48]
+    add r9, 8
+    mov [rsp + 48], r9
+    dec qword ptr [rsp + 32]
+    jmp .Lxun_loop
+.Lxun_allfail:
+    mov edi, 3               // invalid_union
+    xor esi, esi
+    xor edx, edx
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxv_ret
+    // `_u` = union index trailing field (per-option error attach in TS)
+    LD_NODE
+    mov rax, [r8 + 1]        // nopts
+    shl rax, 3
+    add rax, 9
+    mov rax, [r8 + rax]      // uidx
+    cvtsi2sd xmm0, rax
+    lea rdi, [rip + .Lxk_u]
+    mov esi, 2
+    call AZX_NAPI(az_issue_f_f64)
+    test rax, rax
+    jnz .Lxv_ret
+    call AZX_NAPI(az_issue_commit)
+    jmp .Lxv_invalid
+
+// ---------- 0x08 DISCRIMINATED UNION ----------
+// [op][u64 dnamelen][dname][u64 nmap][klen+key+i64]*
+// slots: [rsp+32]=dnamelen [rsp+40]=dname [rsp+48]=nfields [rsp+56]=cursor
+//        [rsp+64]=discvalptr [rsp+80]=nmap [rsp+96]=mapcur [rsp+104]=inlen
+//        [rsp+112]=inptr
+.Lxv_discunion:
+    LD_VAL
+    movzx eax, byte ptr [r9]
+    cmp eax, 6
+    je .Lxdu_obj
+    cmp eax, 8
+    je .Lxdu_hr
+    cmp eax, 9
+    je .Lxdu_hrobj
+    cmp eax, 10
+    je .Lxdu_hrobj
+    jmp .Lxdu_typefail
+.Lxdu_hr:
+    mov rax, [r15 + 24]      // cb_host
+    mov edi, 6               // host type idx
+    mov rsi, [r9 + 1]
+    xor edx, edx
+    xor ecx, ecx
+    call rax
+    test rax, rax
+    jz .Lxdu_typefail        // symbol
+    cmp rax, 4
+    je .Lxdu_typefail        // function
+    cmp rax, 8
+    je .Lxdu_typefail        // bigint
+.Lxdu_hrobj:
+    LD_NODE
+    mov rax, [r8 + 1]
+    mov [rsp + 32], rax      // dnamelen
+    lea rax, [r8 + 9]
+    mov [rsp + 40], rax      // dname
+    jmp .Lxdu_fail
+.Lxdu_typefail:
+    lea rdi, [rip + .Lexx_object]
+    mov esi, 6
+    jmp .Lxaz_vtype
+.Lxdu_obj:
+    LD_NODE
+    mov rax, [r8 + 1]
+    mov [rsp + 32], rax      // dnamelen
+    lea rax, [r8 + 9]
+    mov [rsp + 40], rax      // dname
+    // scan input fields for the discriminator key
+    LD_VAL
+    mov rax, [r9 + 1]        // nfields
+    mov [rsp + 48], rax
+    lea rax, [r9 + 9]
+    mov [rsp + 56], rax      // cursor at first key
+.Lxdu_scan:
+    mov rax, [rsp + 48]
+    test rax, rax
+    jz .Lxdu_fail
+    mov r10, [rsp + 56]
+    mov rax, [r10]           // keylen
+    cmp rax, [rsp + 32]
+    jne .Lxdu_next
+    mov rdi, [rsp + 40]      // dname
+    lea rsi, [r10 + 8]       // key bytes
+    mov rdx, [rsp + 32]
+    call AZX_NAPI(az_memeq)
+    test eax, eax
+    jnz .Lxdu_found
+.Lxdu_next:
+    mov r10, [rsp + 56]
+    mov rax, [r10]
+    lea r10, [r10 + rax + 8] // at value
+    mov rdi, r10
+    call AZX_NAPI(az_vsize)
+    mov r10, [rsp + 56]
+    mov rcx, [r10]
+    lea r10, [r10 + rcx + 8]
+    add r10, rax             // past value
+    mov [rsp + 56], r10
+    dec qword ptr [rsp + 48]
+    jmp .Lxdu_scan
+.Lxdu_found:
+    // value ptr = cursor + keylen + 8
+    mov r10, [rsp + 56]
+    mov rax, [r10]
+    lea rax, [r10 + rax + 8]
+    cmp byte ptr [rax], 4    // discr must be string
+    jne .Lxdu_fail
+    mov [rsp + 64], rax      // disc value ptr
+    // scan the map: entries at dname+dnamelen
+    mov r10, [rsp + 40]
+    mov rax, [rsp + 32]
+    add r10, rax             // past dname -> nmap field
+    mov rax, [r10]           // nmap
+    mov [rsp + 80], rax
+    lea rax, [r10 + 8]
+    mov [rsp + 96], rax      // map cursor
+    mov r10, [rsp + 64]
+    mov rax, [r10 + 1]
+    mov [rsp + 104], rax     // in len
+    lea rax, [r10 + 9]
+    mov [rsp + 112], rax     // in ptr
+.Lxdu_map:
+    mov rax, [rsp + 80]
+    test rax, rax
+    jz .Lxdu_fail
+    mov r10, [rsp + 96]
+    mov rax, [r10]           // key len
+    cmp rax, [rsp + 104]
+    jne .Lxdu_mnext
+    mov rdi, [rsp + 112]
+    mov rsi, [rsp + 96]
+    add rsi, 8
+    mov rdx, [rsp + 104]
+    call AZX_NAPI(az_memeq)
+    test eax, eax
+    jnz .Lxdu_match
+.Lxdu_mnext:
+    mov r10, [rsp + 96]
+    mov rax, [r10]
+    lea r10, [r10 + rax + 8 + 8]  // skip key + i64 off
+    mov [rsp + 96], r10
+    dec qword ptr [rsp + 80]
+    jmp .Lxdu_map
+.Lxdu_match:
+    mov r10, [rsp + 96]
+    mov rax, [r10]
+    lea r10, [r10 + rax + 8] // at i64 optoff
+    mov rax, [r10]
+    lea rdi, [r10 + rax]     // opt node
+    LD_VAL
+    mov rsi, r9
+    call AZX_NAPI(az_validate)
+    jmp .Lxv_ret
+.Lxdu_fail:
+    mov rdi, [rsp + 40]      // discriminator name ptr
+    mov rsi, [rsp + 32]      // len
+    call AZX_NAPI(az_path_push_key)
+    mov edi, 3
+    xor esi, esi
+    xor edx, edx
+    call AZX_NAPI(az_issue_begin)
+    test rax, rax
+    jnz .Lxv_ret
+    call AZX_NAPI(az_issue_commit)
+    call AZX_NAPI(az_path_pop)
+    jmp .Lxv_invalid
+
     AZX_RODATA
     .p2align 4
 .Lxv_jt:
@@ -329,14 +738,14 @@ AZX_NAPI(az_validate):
     .quad .Lxv_bigint
     .quad .Lxv_badop         // object — pending
     .quad .Lxv_badop         // array — pending
-    .quad .Lxv_badop         // union — pending
-    .quad .Lxv_badop         // discunion — pending
-    .quad .Lxv_badop         // literal — pending
-    .quad .Lxv_badop         // enum — pending
+    .quad .Lxv_union
+    .quad .Lxv_discunion
+    .quad .Lxv_literal
+    .quad .Lxv_enum
     .quad .Lxv_optional
     .quad .Lxv_nullable
-    .quad .Lxv_badop         // default — pending
-    .quad .Lxv_badop         // catch — pending
+    .quad .Lxv_default
+    .quad .Lxv_catch
     .quad .Lxv_badop         // refine — pending
     .quad .Lxv_badop         // transform — pending
     .quad .Lxv_badop         // pipe — pending
@@ -370,4 +779,9 @@ AZX_NAPI(az_validate):
 .Lexx_nan:       .ascii "nan"
 .Lexx_never:     .ascii "never"
 .Lexx_symbol:    .ascii "symbol"
+.Lexx_object:    .ascii "object"
+.Lxk_expected2:  .ascii "expected"
+.Lxk_received2:  .ascii "received"
+.Lxk_options:    .ascii "options"
+.Lxk_u:          .ascii "_u"
     .p2align 4
