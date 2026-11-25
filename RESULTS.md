@@ -6,35 +6,51 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 
 | workload | asmzod | zod4 | ratio |
 |---|---|---|---|
-| small-obj     x50k | 0.53µs | 0.12µs | 4.48x |
-| array-2000     x40 | 473µs | 118µs | 4.01x |
-| deep+arr500   x400 | 9.10µs | 20.38µs | **0.45x — faster** |
-| union-mixed   x30k | 0.33µs | 0.19µs | 1.79x |
-| disc-union    x30k | 0.47µs | 0.10µs | 4.74x |
-| record-200   x2000 | 69µs | 21µs | 3.36x |
-| tuple        x30k | 0.69µs | 0.20µs | 3.52x |
-| str-checks   x30k | 0.28µs | 0.15µs | 1.82x |
-| strict-obj   x30k | 1.42µs | 0.21µs | 6.73x |
-| lazy-rec     x30k | 2.27µs | 0.18µs | 12.68x |
-| opt/null/def x30k | 0.44µs | 0.12µs | 3.54x |
-| fail-issues  x10k | 3.55µs | 0.60µs | 5.96x |
-| str-email    x30k | 0.21µs | 0.11µs | 1.90x |
-| str-email-f  x10k | 2.21µs | 0.35µs | 6.40x |
-| emoji        x30k | 1.38µs | 0.10µs | 13.8x |
-| coerce-num   x30k | 0.23µs | 0.06µs | 4.07x |
-| refine+trans x30k | 0.59µs | 0.21µs | 2.85x |
-| msgwrap      x30k | 0.22µs | 0.06µs | 3.94x |
-| msgwrap-fail x10k | 1.43µs | 0.09µs | 15.9x |
-| int-safe     x30k | 0.26µs | 0.15µs | 1.73x |
-| date         x30k | 0.28µs | 0.05µs | 5.6x |
+| small-obj     x50k | 0.39µs | 0.12µs | 3.23x |
+| array-2000     x40 | 357µs | 120µs | 2.99x |
+| deep+arr500   x400 | 8.95µs | 24.91µs | **0.36x — faster** |
+| union-mixed   x30k | 0.19µs | 0.14µs | 1.36x |
+| disc-union    x30k | 0.61µs | 0.14µs | 4.32x |
+| record-200   x2000 | 64µs | 17µs | 3.73x |
+| tuple        x30k | 0.60µs | 0.15µs | 3.90x |
+| str-checks   x30k | 0.15µs | 0.13µs | 1.19x |
+| strict-obj   x30k | 1.70µs | 0.18µs | 9.46x |
+| lazy-rec     x30k | 1.72µs | 0.13µs | 13.20x |
+| opt/null/def x30k | 0.22µs | 0.10µs | 2.09x |
+| fail-issues  x10k | 3.75µs | 0.45µs | 8.26x |
+| str-email    x30k | 0.13µs | 0.07µs | 1.90x |
+| str-email-f  x10k | 1.95µs | 0.28µs | 6.84x |
+| emoji        x30k | 0.53µs | 0.05µs | 10.6x |
+| coerce-num   x30k | 0.19µs | 0.04µs | 4.65x |
+| refine+trans x30k | 0.55µs | 0.17µs | 3.22x |
+| msgwrap      x30k | 0.03µs | 0.03µs | 1.06x |
+| msgwrap-fail x10k | 1.55µs | 0.04µs | 40.8x |
+| int-safe     x30k | 0.06µs | 0.11µs | **0.61x — faster** |
+| date         x30k | 0.09µs | 0.04µs | 2.50x |
 
 ## Where the time goes
 
 - **Success path** is one N-API call per value inspected
   (`typeof`/`get_element`/`get_named_property`) — ~40ns/call is the floor
   for an external validator; leaf schemas return the input handle
-  verbatim and unchanged arrays return the input array (no output
-  materialization).
+  verbatim and unchanged arrays/objects return the input when nothing
+  changed (depth-1 strip mode, verified by key-count pigeonhole +
+  per-key own-property checks).
+- **Object fields** read with `get` first and only pay a `has` crossing
+  when the value is undefined (presence matters exactly there). Required
+  fields whose type structurally rejects undefined skip even the typeof
+  probe — absent and present-undefined are the same failure for them.
+- **strict/passthrough/catchall** skip the unknown-key scan entirely
+  when input key count equals the count of present declared keys —
+  input = declared + unknown with no duplicates, so equality is exact.
+- **`safeParseMany`** batch-validates through the addon's in-native loop;
+  the win over per-value `safeParse` is small (~12%) because per-object
+  crossings dominate, not fixed entry costs.
+- **`lazy-rec`** recursive schemas route to the TS memo path — cyclic
+  input data can't be distinguished from deep data without memoization,
+  so native compilation is blocked. Enabling it needs a depth cap in
+  the asm walker with a whole-parse TS fallback; documented in the
+  backlog.
 - **`str-checks`** runs natively: check records are walked one at a
   time, regex hits the host's `RegExp.test` through a single N-API
   call instead of bouncing through the whole FFI engine.
