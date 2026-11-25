@@ -1422,6 +1422,7 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.prim !== undefined && !(d.checks?.length) &&
         (d.prim === "number" ? Number.isFinite(data) : typeof data === d.prim))
       return data as Output;
+    if (params === undefined && d.checks?.length && _leafRun(d, data)) return data as Output;
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
       const r = napiBackend.fastParse(c.blob, data);
@@ -1434,6 +1435,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     const d = this._def;
     if (params === undefined && d.prim !== undefined && !(d.checks?.length) &&
         (d.prim === "number" ? Number.isFinite(data) : typeof data === d.prim))
+      return { success: true, data } as SafeParseResult<Output>;
+    if (params === undefined && d.checks?.length && _leafRun(d, data))
       return { success: true, data } as SafeParseResult<Output>;
     const c = this._compiled;
     if (c?.napi === 1 && params === undefined) {
@@ -4386,6 +4389,37 @@ for (const Cls of [
 ])
   if (Cls && !Object.getOwnPropertyDescriptor(Cls.prototype, "spa"))
     Object.defineProperty(Cls.prototype, "spa", _spaDesc);
+
+// leaf-check fast lane: a string schema whose checks are all builtin fns or
+// regexes reduces to a typed typeof + predicate loop on success. failures
+// fall through to the full pipeline for exact issue semantics. cached on
+// the def — the check list is schema-static
+function _leafPreds(d: any): ((v: string) => boolean)[] | null {
+  if (d.type !== "string" || !d.checks?.length) return null;
+  const out: ((v: string) => boolean)[] = [];
+  for (const c of d.checks) {
+    if (c && c.kind === "regex" && c.regex instanceof RegExp) {
+      const re = c.regex;
+      out.push((v) => { re.lastIndex = 0; return re.test(v); });
+      continue;
+    }
+    if (c && typeof c.fn === "function" && c.builtin) {
+      const fn = c.fn;
+      out.push((v) => fn(v) === true);
+      continue;
+    }
+    return null;
+  }
+  return out;
+}
+function _leafRun(d: any, data: unknown): boolean {
+  if (typeof data !== "string") return false;
+  const lf = d.leaf === undefined ? (d.leaf = _leafPreds(d) ?? 0) : d.leaf;
+  if (!lf) return false;
+  for (const p of lf) if (!p(data as string)) return false;
+  return true;
+}
+
 const _PARSE_PARAMS = { callee: ZodType.prototype.parse };
 const _PARSE_ASYNC_PARAMS = { callee: ZodType.prototype.parseAsync };
 const _DECODE_PARAMS = { callee: ZodType.prototype.decode };
