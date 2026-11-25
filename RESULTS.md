@@ -70,6 +70,14 @@ lore). ratios below 1.0 mean asmzod is faster.
   (~0.06-0.12µs vs 1.5µs pipelined). Richer failures (formats, checks,
   nested) keep the exact pipeline — cold by charter. validate's earlyAbort
   still stops at the first failure unread.
+- **straight-line codegen** — eligible object specs compile to a single
+  generated function instead of closure composition: leaf checks inline,
+  single-pass failure semantics preserved, no refs-set allocation when all
+  fields inline, lane closures only for rich fields. workerd bans new
+  Function; compile failure falls back to the runtime lane transparently.
+  bare-leaf objects: 0.054µs → 0.022µs. validate's abort mode also got
+  exacter — leaf-eligible failures answer the boolean immediately without
+  a pipeline re-walk (getter reads 3 → 1, zod-exact).
 - **format failures replicate inline** — builtin-format leaf chains build
   invalid_format issues directly: same field order, pattern assembly from
   FORMAT_PATTERNS, message ladder intact (error maps still customize at
@@ -105,3 +113,4 @@ lore). ratios below 1.0 mean asmzod is faster.
 | single-pass object failure lanes + strict catchall exemption | strict-obj 12-15x → 1.2x, leaf-field failures at zod speed |
 | strip-copy lanes | extra-key inputs stay on the fast path (0.066µs vs pipeline) |
 | format-failure fast paths | fail-issues 11.9x → 0.97x parity, str-email-f 7.9x → 0.88x faster |
+| straight-line codegen for object specs | bare-leaf objects 0.054µs → 0.022µs; validate abort getter-exact |
