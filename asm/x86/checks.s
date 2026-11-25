@@ -320,3 +320,68 @@ AZX_NAPI(az_is_email):
 .Lxem_no:
     xor eax, eax
     ret
+
+// ---------- az_is_uuid(rdi=ptr, rsi=len, rdx=version) -> eax ----------
+// 8-4-4-4-12 hex; version 0=any else nibble at pos 14 == version
+// scalar-faithful port of the original's .Luid_slow oracle
+    .globl AZX_NAPI(az_is_uuid)
+    AZX_HIDDEN AZX_NAPI(az_is_uuid)
+AZX_NAPI(az_is_uuid):
+    cmp rsi, 36
+    jne .Lxuid_no
+    xor r9d, r9d             // i
+    xor r10d, r10d           // group idx 0..4
+    lea r11, [rip + .Lxuid_groups]
+.Lxuid_grp:
+    cmp r10, 5
+    jae .Lxuid_yes
+    movzx ecx, byte ptr [r11 + r10]  // group len
+    xor r8d, r8d             // j within group
+.Lxuid_hex:
+    cmp r8, rcx
+    jae .Lxuid_grp_end
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxuid_no
+    cmp al, '9'
+    jbe .Lxuid_hok
+    cmp al, 'A'
+    jb .Lxuid_no
+    cmp al, 'F'
+    jbe .Lxuid_hok
+    cmp al, 'a'
+    jb .Lxuid_no
+    cmp al, 'f'
+    ja .Lxuid_no
+.Lxuid_hok:
+    cmp r9, 14               // version nibble position
+    jne .Lxuid_hn
+    test rdx, rdx
+    jz .Lxuid_hn
+    sub al, '0'
+    movzx eax, al
+    cmp rax, rdx
+    jne .Lxuid_no
+.Lxuid_hn:
+    inc r9
+    inc r8
+    jmp .Lxuid_hex
+.Lxuid_grp_end:
+    inc r10
+    cmp r10, 5
+    jae .Lxuid_yes
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '-'
+    jne .Lxuid_no
+    inc r9
+    jmp .Lxuid_grp
+.Lxuid_yes:
+    mov eax, 1
+    ret
+.Lxuid_no:
+    xor eax, eax
+    ret
+
+    AZX_RODATA
+.Lxuid_groups: .byte 8,4,4,4,12
+    .text
