@@ -385,3 +385,84 @@ AZX_NAPI(az_is_uuid):
     AZX_RODATA
 .Lxuid_groups: .byte 8,4,4,4,12
     .text
+
+// ---------- az_is_ulid(rdi=ptr, rsi=len) -> eax ----------
+// 26 chars crockford b32: digits + A-Z except I,L,O,U
+    .globl AZX_NAPI(az_is_ulid)
+    AZX_HIDDEN AZX_NAPI(az_is_ulid)
+AZX_NAPI(az_is_ulid):
+    cmp rsi, 26
+    jne .Lxul_no
+    xor r9d, r9d
+.Lxul_l:
+    cmp r9, 26
+    jae .Lxul_yes
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxul_c
+    cmp al, '9'
+    jbe .Lxul_ok
+.Lxul_c:
+    cmp al, 'A'
+    jb .Lxul_no
+    cmp al, 'Z'
+    ja .Lxul_no
+    cmp al, 'I'
+    je .Lxul_no
+    cmp al, 'L'
+    je .Lxul_no
+    cmp al, 'O'
+    je .Lxul_no
+    cmp al, 'U'
+    je .Lxul_no
+.Lxul_ok:
+    inc r9
+    jmp .Lxul_l
+.Lxul_yes:
+    mov eax, 1
+    ret
+.Lxul_no:
+    xor eax, eax
+    ret
+
+// ---------- az_is_nanoid(rdi=ptr, rsi=len) -> eax ----------
+// 21 chars [A-Za-z0-9_-]
+    .globl AZX_NAPI(az_is_nanoid)
+    AZX_HIDDEN AZX_NAPI(az_is_nanoid)
+AZX_NAPI(az_is_nanoid):
+    cmp rsi, 21
+    jne .Lxnn_no
+    xor r9d, r9d
+.Lxnn_l:
+    cmp r9, 21
+    jae .Lxnn_yes
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, '0'
+    jb .Lxnn_c
+    cmp al, '9'
+    jbe .Lxnn_ok
+.Lxnn_c:
+    cmp al, 'A'
+    jb .Lxnn_c2
+    cmp al, 'Z'
+    jbe .Lxnn_ok
+.Lxnn_c2:
+    cmp al, 'a'
+    jb .Lxnn_c3
+    cmp al, 'z'
+    jbe .Lxnn_ok
+.Lxnn_c3:
+    cmp al, '_'
+    je .Lxnn_ok
+    cmp al, '-'
+    je .Lxnn_ok
+    jmp .Lxnn_no
+.Lxnn_ok:
+    inc r9
+    jmp .Lxnn_l
+.Lxnn_yes:
+    mov eax, 1
+    ret
+.Lxnn_no:
+    xor eax, eax
+    ret
