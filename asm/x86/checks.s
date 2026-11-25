@@ -674,3 +674,225 @@ AZX_NAPI(az_is_ipv4):
 .Lxip4_no:
     xor eax, eax
     ret
+
+// ---------- az_is_ipv6(rdi=ptr, rsi=len) -> eax ----------
+// WHATWG-style: alphabet [0-9a-fA-F:.], at most one "::", pieces 1-4 hex,
+// optional trailing ipv4 piece (counts 2 groups). no "::" -> exactly 8;
+// "::" -> fewer than 8.
+// frame regs: rbx=orig ptr r12=orig len r13=dc index r14=left count
+// (all saved/restored — ctx safe)
+    .globl AZX_NAPI(az_is_ipv6)
+    AZX_HIDDEN AZX_NAPI(az_is_ipv6)
+AZX_NAPI(az_is_ipv6):
+    push rbx
+    push r12
+    push r13
+    push r14
+    test rsi, rsi
+    jz .L6xno
+    xor r9d, r9d             // i
+    mov r10, -1              // "::" index
+.L6xa:
+    movzx eax, byte ptr [rdi + r9]
+    cmp al, ':'
+    je .L6xa_col
+    cmp al, '.'
+    je .L6xa_next
+    mov ecx, eax
+    sub ecx, '0'
+    cmp ecx, 9
+    jbe .L6xa_next
+    mov ecx, eax
+    or ecx, 0x20
+    sub ecx, 'a'
+    cmp ecx, 5
+    ja .L6xno
+    jmp .L6xa_next
+.L6xa_col:
+    lea rcx, [r9 + 1]
+    cmp rcx, rsi
+    jae .L6xa_next
+    movzx edx, byte ptr [rdi + rcx]
+    cmp dl, ':'
+    jne .L6xa_next
+    cmp r10, -1
+    jne .L6xno               // second "::" invalid
+    mov r10, r9
+    inc r9                   // skip the pair's second ':'
+.L6xa_next:
+    inc r9
+    cmp r9, rsi
+    jb .L6xa
+    cmp r10, -1
+    jne .L6xsplit
+    mov edx, 1               // whole string is the last part
+    call .L6xcount
+    cmp rax, 8
+    je .L6xyes
+    jmp .L6xno
+.L6xsplit:
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, r10             // dc index
+    mov rsi, r10             // left = [0, dc)
+    xor edx, edx             // not the final part
+    call .L6xcount
+    cmp rax, -1
+    je .L6xno
+    mov r14, rax             // ln
+    lea r9, [r13 + 2]
+    lea rdi, [rbx + r9]      // right ptr
+    mov rsi, r12
+    sub rsi, r9              // right len
+    mov edx, 1
+    call .L6xcount
+    cmp rax, -1
+    je .L6xno
+    add rax, r14
+    cmp rax, 8
+    jb .L6xyes
+.L6xno:
+    xor eax, eax
+    jmp .L6xout
+.L6xyes:
+    mov eax, 1
+.L6xout:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+// .L6xcount(rdi=ptr, rsi=len, rdx=isLast) -> rax = group count or -1
+// regs: r9=group start r10=cursor r11=dotpos/glen-tmp rcx total r8 hexcur
+// note: arm64 reused x2 as lz-flag after isLast was consumed; x86 port
+// keeps them separate (rdx=isLast preserved whole function, lz in r11 high)
+.L6xcount:
+    push rbx
+    push r12
+    push r13
+    test rsi, rsi
+    jz .L6xc_ret0
+    xor r9d, r9d             // group start
+    xor ecx, ecx             // total
+.L6xc_grp:
+    mov r10, r9              // scan cursor
+    mov r11, -1              // dot position inside piece
+.L6xc_scan:
+    cmp r10, rsi
+    jae .L6xc_gend
+    movzx eax, byte ptr [rdi + r10]
+    cmp al, ':'
+    je .L6xc_gend
+    cmp al, '.'
+    jne .L6xc_sn
+    mov r11, r10
+.L6xc_sn:
+    inc r10
+    jmp .L6xc_scan
+.L6xc_gend:
+    mov rax, r10
+    sub rax, r9              // glen
+    test rax, rax
+    jz .L6xc_fail            // empty group
+    cmp r11, -1
+    jne .L6xc_v4
+    cmp rax, 4
+    ja .L6xc_fail            // hex piece > 4 digits
+    mov r8, r9
+.L6xc_hx:
+    movzx eax, byte ptr [rdi + r8]
+    mov r12d, eax
+    sub r12d, '0'
+    cmp r12d, 9
+    jbe .L6xc_hxn
+    or eax, 0x20
+    sub eax, 'a'
+    cmp eax, 5
+    ja .L6xc_fail
+.L6xc_hxn:
+    inc r8
+    cmp r8, r10
+    jb .L6xc_hx
+    inc rcx
+    jmp .L6xc_gn
+.L6xc_v4:
+    cmp r10, rsi
+    jne .L6xc_fail           // dotted piece must be the last group
+    test rdx, rdx
+    jz .L6xc_fail            // and only in the final part
+    mov r8, r9               // pos
+    xor r12d, r12d           // dot count
+    xor r13d, r13d           // octet value
+    xor ebx, ebx             // octet digits
+    xor eax, eax             // leading-zero flag (fresh per octet)
+.L6xc_v4l:
+    cmp r8, r10
+    jae .L6xc_v4e
+    movzx r11d, byte ptr [rdi + r8]
+    cmp r11b, '.'
+    je .L6xc_v4dot
+    sub r11d, '0'
+    cmp r11d, 9
+    ja .L6xc_fail
+    test rbx, rbx
+    jnz .L6xc_v4dig
+    // first digit of octet: leading-zero flag = (digit == 0)
+    xor eax, eax
+    test r11d, r11d
+    sete al
+    jmp .L6xc_v4acc
+.L6xc_v4dig:
+    test eax, eax
+    jnz .L6xc_fail           // leading zero + more digits (WHATWG)
+.L6xc_v4acc:
+    imul r13d, r13d, 10
+    add r13d, r11d
+    inc rbx
+    cmp rbx, 3
+    ja .L6xc_fail            // octet > 3 digits
+    inc r8
+    jmp .L6xc_v4l
+.L6xc_v4dot:
+    test rbx, rbx
+    jz .L6xc_fail            // empty octet
+    cmp r13d, 255
+    ja .L6xc_fail
+    xor r13d, r13d
+    xor ebx, ebx
+    inc r12
+    cmp r12, 3
+    ja .L6xc_fail            // more than 3 dots
+    inc r8
+    jmp .L6xc_v4l
+.L6xc_v4e:
+    test rbx, rbx
+    jz .L6xc_fail            // trailing octet empty
+    cmp r13d, 255
+    ja .L6xc_fail
+    cmp r12, 3
+    jne .L6xc_fail           // need exactly 3 dots
+    add rcx, 2               // ipv4 tail counts as two groups
+.L6xc_gn:
+    cmp r10, rsi
+    jae .L6xc_done
+    lea r9, [r10 + 1]        // skip ':'
+    jmp .L6xc_grp
+.L6xc_done:
+    mov rax, rcx
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.L6xc_ret0:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    ret
+.L6xc_fail:
+    mov rax, -1
+    pop r13
+    pop r12
+    pop rbx
+    ret
