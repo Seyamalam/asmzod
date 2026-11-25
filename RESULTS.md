@@ -46,11 +46,14 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 - **`safeParseMany`** batch-validates through the addon's in-native loop;
   the win over per-value `safeParse` is small (~12%) because per-object
   crossings dominate, not fixed entry costs.
-- **`lazy-rec`** recursive schemas route to the TS memo path — cyclic
-  input data can't be distinguished from deep data without memoization,
-  so native compilation is blocked. Enabling it needs a depth cap in
-  the asm walker with a whole-parse TS fallback; documented in the
-  backlog.
+- **`lazy-rec`** recursive schemas route to the TS memo path. A depth
+  cap (768) now exists in the asm walker, and native-first validation of
+  recursive schemas was prototyped: it validated acyclic data at 0.38us
+  (vs 1.9us memo) but diverges on shared references — zod's memo maps
+  one input node to one output node, and the upstream cyclic-data tests
+  check exactly that. Native recursion needs a per-parse pointer-keyed
+  memo table in asm before it can replace the TS path; the memo fallback
+  alone is not enough.
 - **`str-checks`** runs natively: check records are walked one at a
   time, regex hits the host's `RegExp.test` through a single N-API
   call instead of bouncing through the whole FFI engine.

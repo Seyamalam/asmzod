@@ -1095,6 +1095,10 @@ _aznapi_run:
     ldr w10, [x9]
     add w10, w10, #1
     str w10, [x9]
+    // cyclic input data on a recursive schema recurses forever without the
+    // TS memo — cap the nesting and punt to the fallback pipeline
+    cmp w10, #768
+    b.hi .Ln_depthcap
     ldrb w9, [x27]
     cmp w9, #0x2A
     b.eq .Ln_msg
@@ -1103,6 +1107,9 @@ _aznapi_run:
     AZ_ADR x10, .Ln_jt
     ldr x11, [x10, x9, lsl #3]
     br x11
+.Ln_depthcap:
+    mov x0, #-10              // unsupported — TS reruns with memo machinery
+    b .Ln_ret
 .Ln_unknown:
     mov x0, #-1000
     sub x0, x0, x9            // -1000-op reveals the unknown opcode
