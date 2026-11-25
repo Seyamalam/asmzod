@@ -1430,8 +1430,8 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.type === "object") {
       const spec = _objLaneOf(this);
       if (spec) {
-        const laneOut = _objLaneRun(spec, data);
-        if (laneOut !== false) return laneOut as Output;
+        const laneOut = _objLaneRun(spec, data, undefined, this);
+        if (laneOut !== false && !laneOut[_OBJFAIL]) return laneOut as Output;
       }
     }
     if (params === undefined && d.type === "array" && !d.checks?.length) {
@@ -1497,8 +1497,11 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.type === "object") {
       const spec = _objLaneOf(this);
       if (spec) {
-        const laneOut = _objLaneRun(spec, data);
-        if (laneOut !== false) return { success: true, data: laneOut } as SafeParseResult<Output>;
+        const laneOut = _objLaneRun(spec, data, undefined, this);
+        if (laneOut !== false) {
+          if (laneOut[_OBJFAIL]) return failure(ZodRealError, laneOut.issues, _SYNC_CTX) as SafeParseResult<Output>;
+          return { success: true, data: laneOut } as SafeParseResult<Output>;
+        }
       }
     }
     if (params === undefined && d.type === "array" && !d.checks?.length) {
@@ -4823,13 +4826,18 @@ function _fieldLaneRaw(fs: any, seen: Set<any>, cells?: Map<any, _Cell>): _Lane 
 }
 
 type _ObjSpec = { keys: string[]; lanes: _Lane[]; declared: Set<string>;
-  mats: { key: string; lane: _Lane; fb: () => any }[] | null };
+  mats: { key: string; lane: _Lane; fb: () => any }[] | null;
+  strict: boolean; fdefs: any[] | null };
 
 function _objSpec(schema: any, seen: Set<any>, top = false, cells?: Map<any, _Cell>): _ObjSpec | null {
   const d = schema._def;
   if (!d || d.type !== "object") return null;
   if (d.mode !== "strip" && d.mode !== "strict") return null;
-  if (d.catchall || d.checks?.length) return null;
+  // strict mode installs a redundant catchall-never alongside mode itself —
+  // validation keys off the mode, so the lane treats that one as transparent.
+  // an explicit .catchall(z.never()) in strip mode emits invalid_type per key
+  // instead — semantically distinct, stays excluded
+  if ((d.catchall && !(d.mode === "strict" && d.catchall?._def?.type === "never")) || d.checks?.length) return null;
   if (Reflect.ownKeys(d.shape).some((k) => typeof k === "symbol" || k === "__proto__")) return null;
   if (seen.has(schema)) return null;
   seen.add(schema);
@@ -4857,10 +4865,19 @@ function _objSpec(schema: any, seen: Set<any>, top = false, cells?: Map<any, _Ce
     lanes.push(l);
   }
   seen.delete(schema);
-  return { keys, lanes, declared: new Set(keys), mats };
+  // fdefs only materialize for strict mode or when a failure needs leaf
+  // classification — allocate eagerly, the build is one-time
+  return { keys, lanes, declared: new Set(keys), mats,
+    strict: d.mode === "strict", fdefs: keys.map((k) => (shape as any)[k]) };
 }
 
-function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>): any {
+const _OBJFAIL = Symbol("objfail");
+
+// returns the input (or materialized copy) on success, false when the lane
+// can't answer, or a failure descriptor when validation failed and every
+// failure is fast-fail eligible. nested calls (own === false) only ever get
+// the boolean — descriptors are a top-level affair
+function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>, schema?: any): any {
   if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
   const p = Object.getPrototypeOf(data);
   if (p !== null && p !== Object.prototype) return false;
@@ -4873,17 +4890,68 @@ function _objLaneRun(spec: _ObjSpec, data: any, refs?: Set<object>): any {
   }
   const keys = spec.keys, lanes = spec.lanes;
   const mats = spec.mats;
-  for (let i = 0; i < keys.length; i++) {
-    if (lanes[i] === null) continue; // materializing default — checked below
-    if (!lanes[i](data[keys[i]], rs)) return false;
-  }
-  // verbatim return is only exact when no undeclared keys exist — strip
-  // would drop them, strict would fail; either way this input leaves the lane
+  // undeclared keys scan first — for-in never invokes getters, so the order
+  // is unobservable and bailing here saves a wasted field walk. strip mode
+  // can't answer (output must drop keys); strict records them as a failure
+  let extra: string[] | null = null;
   let n = 0;
   for (const k in data) {
-    if (!spec.declared.has(k)) return false;
-    if (++n > keys.length) return false;
+    if (!spec.declared.has(k)) {
+      if (spec.strict) (extra ??= []).push(k);
+      else return false;
+    }
+    if (++n > keys.length) { if (!spec.strict) return false; }
   }
+  // single pass over the fields, exactly once each — getter reads are
+  // observable, so failures never re-walk: leaf-eligible failures build
+  // their issues inline, anything richer marks the lane unanswerable
+  let issues: any[] | null = null;
+  let rich = false;
+  const top = own && schema !== undefined;
+  for (let i = 0; i < keys.length; i++) {
+    if (lanes[i] === null) continue; // materializing default — checked below
+    const v = data[keys[i]];
+    if (lanes[i](v, rs)) continue;
+    if (earlyAbort || !top) return false;
+    // fast-fail eligibility: bare leaf prim type mismatch — same shape as
+    // the toplevel leaf lane. richer failures send the whole input to the
+    // exact pipeline
+    if (rich) continue;
+    const fd = (spec.fdefs?.[i] as any)?._def;
+    if (!fd || fd.prim === undefined || fd.checks?.length || fd.format !== undefined ||
+        (fd.type !== "string" && fd.type !== "number" && fd.type !== "boolean" && fd.type !== "bigint") ||
+        typeof v === fd.prim) { rich = true; continue; }
+    const ferr = (fd as any).error;
+    if (ferr !== undefined && typeof ferr !== "string") { rich = true; continue; }
+    const issue: any = { expected: fd.prim, code: "invalid_type", path: [keys[i]] };
+    if (ferr !== undefined) issue.message = ferr;
+    else {
+      issue.message = `Invalid input: expected ${fd.prim}, received ${parsedTypeName(v)}`;
+      defaultedIssues.add(issue);
+    }
+    issue.inst = spec.fdefs![i];
+    issue.input = v;
+    (issues ??= []).push(issue);
+  }
+  if (extra?.length) {
+    if (earlyAbort || !top) return false;
+    const errP = schema._def.error;
+    if (errP !== undefined && typeof errP !== "string") return false;
+    const issue: any = { code: "unrecognized_keys", keys: extra, path: [] };
+    if (errP !== undefined) issue.message = errP;
+    else {
+      issue.message = extra.length === 1
+        ? `Unrecognized key: "${extra[0]}"`
+        : `Unrecognized keys: ${extra.map((k) => `"${k}"`).join(", ")}`;
+      defaultedIssues.add(issue);
+    }
+    issue.inst = schema;
+    issue.input = data;
+    (issues ??= []).push(issue);
+  }
+  if (rich) return false;
+  if (issues) { const f: any = { issues }; f[_OBJFAIL] = 1; return f; }
+  if (extra) return false; // strict extras in a nested walk — the parent re-walks exactly
   if (!mats) return data;
   // absent/undefined default keys materialize into a shallow copy; a present
   // valid value keeps the input — invalid values fail like zod
