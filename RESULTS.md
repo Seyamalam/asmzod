@@ -13,20 +13,20 @@ Silicon (ARM64), Bun. asmzod numbers are the N-API direct path
 | disc-union    x30k | 0.61µs | 0.14µs | 4.32x |
 | record-200   x2000 | 64µs | 17µs | 3.73x |
 | tuple        x30k | 0.60µs | 0.15µs | 3.90x |
-| str-checks   x30k | 0.15µs | 0.13µs | 1.19x |
+| str-checks   x30k | 0.13µs | 0.14µs | **0.95x — faster** |
 | strict-obj   x30k | 1.70µs | 0.18µs | 9.46x |
 | lazy-rec     x30k | 1.72µs | 0.13µs | 13.20x |
 | opt/null/def x30k | 0.22µs | 0.10µs | 2.09x |
 | fail-issues  x10k | 3.75µs | 0.45µs | 8.26x |
-| str-email    x30k | 0.13µs | 0.07µs | 1.90x |
+| str-email    x30k | 0.06µs | 0.08µs | **0.73x — faster** |
 | str-email-f  x10k | 1.95µs | 0.28µs | 6.84x |
-| emoji        x30k | 0.53µs | 0.05µs | 10.6x |
+| emoji        x30k | 0.04µs | 0.07µs | **0.54x — faster** |
 | coerce-num   x30k | 0.19µs | 0.04µs | 4.65x |
 | refine+trans x30k | 0.55µs | 0.17µs | 3.22x |
-| msgwrap      x30k | 0.03µs | 0.03µs | 1.06x |
+| msgwrap      x30k | 0.03µs | 0.04µs | **0.90x — faster** |
 | msgwrap-fail x10k | 1.55µs | 0.04µs | 40.8x |
 | int-safe     x30k | 0.06µs | 0.11µs | **0.61x — faster** |
-| date         x30k | 0.09µs | 0.04µs | 2.50x |
+| date         x30k | 0.03µs | 0.02µs | 1.46x |
 
 ## Where the time goes
 
