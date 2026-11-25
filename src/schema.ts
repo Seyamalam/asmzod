@@ -4698,12 +4698,31 @@ function _fieldLane(fs: any, seen: Set<any>): _Lane | null {
       return true;
     };
   }
-  if (t === "union" || t === "discriminatedUnion" || t === "discunion") {
+  if (t === "discriminatedUnion" || t === "discunion") {
     const opts = d.options as any[];
     if (!opts?.length) return null;
     // duplicate discriminator values are a schema error zod surfaces at first
     // use — forcing the map here keeps the throw instead of laning past it
-    if (t !== "union" && typeof (fs as any).discMap === "function") (fs as any).discMap();
+    const map = typeof (fs as any).discMap === "function" ? (fs as any).discMap() : null;
+    if (!map) return null;
+    const disc = d.discriminator;
+    const direct = new Map<any, _Lane>();
+    for (const [val, opt] of map) {
+      if (!opt) continue;
+      const l = _fieldLane(opt, seen);
+      if (!l) return null;
+      direct.set(val, l);
+    }
+    if (!direct.size) return null;
+    return (v, refs) => {
+      if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+      const l = direct.get((v as any)[disc]);
+      return l !== undefined && l(v, refs);
+    };
+  }
+  if (t === "union") {
+    const opts = d.options as any[];
+    if (!opts?.length) return null;
     const lanes: _Lane[] = [];
     for (const o of opts) {
       const l = _fieldLane(o, seen);
