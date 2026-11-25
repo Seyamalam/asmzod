@@ -1469,6 +1469,26 @@ export abstract class ZodType<Output = unknown, Input = Output> {
     if (params === undefined && d.prim !== undefined && !(d.checks?.length) &&
         (d.prim === "number" ? Number.isFinite(data) : typeof data === d.prim))
       return { success: true, data } as SafeParseResult<Output>;
+    // fast failure: a bare leaf type mismatch needs no engine roundtrip —
+    // the issue is static except the input-dependent type name, and the
+    // error-param ladder only engages when the param is a plain string
+    if (params === undefined && d.prim !== undefined && !d.checks?.length &&
+        d.format === undefined && typeof data !== d.prim &&
+        (d.type === "string" || d.type === "number" || d.type === "boolean" || d.type === "bigint")) {
+      const errP = (d as any).error;
+      if (errP === undefined || typeof errP === "string") {
+        // zod field order: expected, code, path, message, inst, input
+        const issue: any = { expected: d.prim, code: "invalid_type", path: [] };
+        if (errP !== undefined) issue.message = errP;
+        else {
+          issue.message = `Invalid input: expected ${d.prim}, received ${parsedTypeName(data)}`;
+          defaultedIssues.add(issue);
+        }
+        issue.inst = this;
+        issue.input = data;
+        return failure(ZodRealError, [issue], _SYNC_CTX) as SafeParseResult<Output>;
+      }
+    }
     if (params === undefined && d.checks?.length && _leafRun(d, data))
       return { success: true, data } as SafeParseResult<Output>;
     if (params === undefined && d.type === "date" && !d.checks?.length &&
